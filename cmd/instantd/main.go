@@ -1,25 +1,36 @@
-// Command instantd is the Instant v2 sync server.
-//
-// Phase 0 scope: configuration, schema boot, health surface, graceful shutdown.
-// Sync/query surfaces arrive with later phases per docs/04-roadmap.md.
 package main
 
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/coder/websocket"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/instant-v2/instant-v2/internal/config"
+	"github.com/instant-v2/instant-v2/internal/instaql"
 	"github.com/instant-v2/instant-v2/internal/platform"
+	"github.com/instant-v2/instant-v2/internal/reactive"
+	"github.com/instant-v2/instant-v2/internal/storage"
+	syncpkg "github.com/instant-v2/instant-v2/internal/sync"
+	"github.com/instant-v2/instant-v2/internal/transact"
 )
+
+// notifierBridge connects storage writes to the reactive invalidator for the
+// single-instance deployment: after each committed transact, notify directly.
+type notifierBridge struct {
+	pool *pgxpool.Pool
+	n    *reactive.Notifier
+}
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -36,17 +47,30 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 	logger.Info("starting instantd", "config", cfg.String())
-
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	var db *sql.DB
-	if cfg.DatabaseURL != "" {
+	if cfg.DatabaseURL == "" {
+		logger.Warn("DATABASE_URL empty; serving /health only")
+		db = nil
+	} else {
 		db, err = sql.Open("pgx", cfg.DatabaseURL)
 		if err != nil {
 			return err
 		}
 		defer db.Close()
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", health(db))
+
+	var (
+		store    *reactive.Store
+		notifier *reactive.Notifier
+		ws       *syncpkg.WSHandler
+	)
+	if db != nil {
 		if err := platform.Migrate(ctx, db); err != nil {
 			return err
 		}
@@ -55,19 +79,65 @@ func run(logger *slog.Logger) error {
 			return err
 		}
 		logger.Info("schema ready", "version", v)
-	} else {
-		logger.Warn("DATABASE_URL empty; running without database-backed features")
-	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", health(db))
+		pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+		if err != nil {
+			return err
+		}
+		defer pool.Close()
+
+		st := storage.New(pool)
+		cats := platform.NewCatalogCache(pool, pool)
+		store = reactive.NewStore()
+		ex := &instaql.Executor{DB: pool}
+		notifier = &reactive.Notifier{
+			Store:   store,
+			Refresh: refreshFor(ex, cats),
+			Logger:  logger,
+		}
+		go notifier.Run(ctx)
+
+		mgr := syncpkg.NewManager(syncpkg.Deps{
+			DB:       st,
+			Catalogs: cats,
+			Store:    store,
+			Logger:   logger,
+		})
+		ws = &syncpkg.WSHandler{
+			Manager: mgr,
+			Store:   store,
+			Refresh: func(ctx context.Context, sub *reactive.Subscription) (json.RawMessage, error) {
+				q, err := instaql.Coerce(rawToMap(sub.Query))
+				if err != nil {
+					return nil, err
+				}
+				cat, err := cats.For(ctx, sub.AppID)
+				if err != nil {
+					return nil, err
+				}
+				appID, err := platform.ScanUUIDErr(sub.AppID)
+				if err != nil {
+					return nil, err
+				}
+				res, err := ex.Run(ctx, q, cat, appID)
+				if err != nil {
+					return nil, err
+				}
+				return json.Marshal(res)
+			},
+		}
+		mux.Handle("GET /runtime/session", ws)
+
+		// Post-commit invalidation bridge: wraps transact via HTTP-level hook.
+		bridge := &notifierBridge{pool: pool, n: notifier}
+		mux.Handle("POST /runtime/transact", transactHandler(st, cats, bridge))
+	}
 
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()
 
@@ -76,16 +146,96 @@ func run(logger *slog.Logger) error {
 		logger.Info("shutdown signal received")
 		shutCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		if err := srv.Shutdown(shutCtx); err != nil {
-			return err
-		}
-		return nil
+		return srv.Shutdown(shutCtx)
 	case err := <-errCh:
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
 		}
 		return err
 	}
+}
+
+func transactHandler(st *storage.DB, cats *platform.CatalogCache, b *notifierBridge) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			AppID string            `json:"app-id"`
+			Steps []json.RawMessage `json:"tx-steps"`
+			Rules bool              `json:"-"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"bad json"}`, 400)
+			return
+		}
+		parsed, err := transact.ParseSteps(req.Steps)
+		if err != nil {
+			http.Error(w, `{"error":"`+err.Error()+`"}`, 400)
+			return
+		}
+		cat, err := cats.For(r.Context(), req.AppID)
+		if err != nil {
+			http.Error(w, `{"error":"unknown app"}`, 404)
+			return
+		}
+		appID, err := platform.ScanUUIDErr(req.AppID)
+		if err != nil {
+			http.Error(w, `{"error":"bad app id"}`, 400)
+			return
+		}
+		res, err := transact.Transact(r.Context(), st, cat, appID, parsed, transact.Options{}, nil)
+		if err != nil {
+			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusForbidden)
+			return
+		}
+		// Direct post-commit notification (single-instance path).
+		attrsTouched := touchedAttrs(parsed, cat)
+		go b.n.Notify(r.Context(), req.AppID, attrsTouched, res.TxID)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"tx-id": res.TxID})
+	}
+}
+
+func touchedAttrs(steps []transact.Step, _ *platform.AttrCatalog) []string {
+	var out []string
+	for _, s := range steps {
+		switch s.Op {
+		case "add-triple", "deep-merge-triple", "retract-triple":
+			if len(s.Args) >= 2 {
+				var attrStr string
+				if json.Unmarshal(s.Args[1], &attrStr) == nil {
+					out = append(out, attrStr)
+				}
+			}
+		}
+	}
+	return out
+}
+
+func refreshFor(ex *instaql.Executor, cats *platform.CatalogCache) func(ctx context.Context, sub *reactive.Subscription) (json.RawMessage, error) {
+	return func(ctx context.Context, sub *reactive.Subscription) (json.RawMessage, error) {
+		q, err := instaql.Coerce(rawToMap(sub.Query))
+		if err != nil {
+			return nil, err
+		}
+		cat, err := cats.For(ctx, sub.AppID)
+		if err != nil {
+			return nil, err
+		}
+		appID, err := platform.ScanUUIDErr(sub.AppID)
+		if err != nil {
+			return nil, err
+		}
+		res, err := ex.Run(ctx, q, cat, appID)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(res)
+	}
+}
+
+func rawToMap(raw json.RawMessage) map[string]any {
+	var m map[string]any
+	_ = json.Unmarshal(raw, &m)
+	return m
 }
 
 func health(db *sql.DB) http.HandlerFunc {
@@ -105,3 +255,6 @@ func health(db *sql.DB) http.HandlerFunc {
 		_, _ = w.Write([]byte(`{"ok":true,"db":true}`))
 	}
 }
+
+var _ = websocket.Accept
+var _ = sync.Mutex{}
