@@ -12,7 +12,6 @@ package reactive
 
 import (
 	"encoding/json"
-	"fmt"
 	"sort"
 )
 
@@ -76,86 +75,62 @@ func DiffResults(oldJSON, newJSON json.RawMessage) (p *Patch, ok bool) {
 		return nil, false
 	}
 
-	patch := &Patch{}
-	oldTotal, newTotal := 0, 0
-
-	for _, env := range []*envelope{&oldEnv, &newEnv} {
-		for _, raw := range env.Data {
-			arr, err := decodeEntities(raw)
-			if err != nil {
-				return nil, false
-			}
-			if env == &oldEnv {
-				oldTotal += len(arr)
-			} else {
-				newTotal += len(arr)
-			}
-		}
-	}
-
-	type ent struct {
-		id    string
-		raw   json.RawMessage // original bytes as produced by instaql
-		canon json.RawMessage // map-reserialized bytes for content comparison
-	}
-	index := func(env *envelope) map[string]map[string]ent {
-		out := map[string]map[string]ent{}
+	// parseSide splits each etype array once. Every entity is unmarshaled
+	// exactly ONE time here (targeted id probe); all later stages work off
+	// the extracted ids plus raw bytes — no per-entity re-marshaling.
+	type side map[string][]string // etype → ids aligned with env.Data raws
+	parseSide := func(env *envelope) (side, bool) {
+		out := make(side, len(env.Data))
 		for etype, raw := range env.Data {
-			var arr []json.RawMessage
-			_ = json.Unmarshal(raw, &arr)
-			m := make(map[string]ent, len(arr))
-			for _, e := range arr {
-				var obj map[string]any
-				if json.Unmarshal(e, &obj) != nil {
-					continue // caught by decodeEntities above
-				}
-				id, _ := obj["id"].(string)
-				canon, _ := json.Marshal(obj)
-				if dup, exists := m[id]; exists && string(dup.canon) != string(canon) {
-					continue // duplicates resolved at fallback below via count check
-				}
-				m[id] = ent{id: id, raw: e, canon: canon}
+			if len(raw) == 0 || string(raw) == "null" {
+				out[etype] = nil
+				continue
 			}
-			out[etype] = m
-		}
-		return out
-	}
-	oldIdx, newIdx := index(&oldEnv), index(&newEnv)
-
-	// Duplicate ids with differing bodies make position ambiguous → fallback.
-	countCheck := func(env *envelope) bool {
-		for etype, raw := range env.Data {
 			var arr []json.RawMessage
-			_ = json.Unmarshal(raw, &arr)
-			seen := map[string]bool{}
-			for _, e := range arr {
-				var obj map[string]any
-				if json.Unmarshal(e, &obj) != nil {
-					return false
-				}
-				id, _ := obj["id"].(string)
-				if seen[id] {
-					return false
-				}
-				seen[id] = true
+			if err := json.Unmarshal(raw, &arr); err != nil {
+				return nil, false // etype payload is not an entity array
 			}
+			ids := make([]string, len(arr))
+			seen := make(map[string]struct{}, len(arr))
+			for i, e := range arr {
+				var probe struct {
+					ID string `json:"id"`
+				}
+				if json.Unmarshal(e, &probe) != nil || probe.ID == "" {
+					return nil, false // non-object or missing string id
+				}
+				if _, dup := seen[probe.ID]; dup {
+					return nil, false // duplicate id: positional identity broken
+				}
+				seen[probe.ID] = struct{}{}
+				ids[i] = probe.ID
+			}
+			out[etype] = ids
 		}
-		return true
+		return out, true
 	}
-	if !countCheck(&oldEnv) || !countCheck(&newEnv) {
+	oldSide, oldOK := parseSide(&oldEnv)
+	newSide, newOK := parseSide(&newEnv)
+	if !oldOK || !newOK {
 		return nil, false
 	}
 
+	patch := &Patch{}
 	touched := 0
-	for etype, oldEnts := range oldIdx {
-		newEnts, exists := newIdx[etype]
-		if !exists {
-			newEnts = map[string]ent{}
+
+	// Removes: in old but absent from new (deterministic id order).
+	for etype, oldIDs := range oldSide {
+		newArr, exists := newEnv.Data[etype]
+		var newSet map[string]struct{}
+		if exists && len(newArr) > 0 {
+			newSet = make(map[string]struct{}, len(newSide[etype]))
+			for _, id := range newSide[etype] {
+				newSet[id] = struct{}{}
+			}
 		}
-		// Removes: present before, absent now (deterministic id order).
 		var remIDs []string
-		for id := range oldEnts {
-			if _, live := newEnts[id]; !live {
+		for _, id := range oldIDs {
+			if _, live := newSet[id]; !live {
 				remIDs = append(remIDs, id)
 			}
 		}
@@ -165,31 +140,30 @@ func DiffResults(oldJSON, newJSON json.RawMessage) (p *Patch, ok bool) {
 			touched++
 		}
 	}
+
 	// Adds + updates walked in NEW array order per etype.
-	etypeOrder := sortedKeys(newIdx)
-	for _, etype := range etypeOrder {
-		newEnts := newIdx[etype]
-		oldEnts, existed := oldIdx[etype]
-		if !existed {
-			oldEnts = map[string]ent{}
-		}
-		var arr []json.RawMessage
-		if raw, okData := newEnv.Data[etype]; okData {
-			_ = json.Unmarshal(raw, &arr)
-		}
-		for _, e := range arr {
-			var obj map[string]any
-			if json.Unmarshal(e, &obj) != nil {
-				return nil, false
+	for etype, newIDs := range newSide {
+		oldEnts := make(map[string]json.RawMessage, len(oldSide[etype]))
+		var oldArr []json.RawMessage
+		if raw, exists := oldEnv.Data[etype]; exists && len(raw) > 0 && string(raw) != "null" {
+			_ = json.Unmarshal(raw, &oldArr)
+			for i, id := range oldSide[etype] {
+				oldEnts[id] = oldArr[i]
 			}
-			id, _ := obj["id"].(string)
+		}
+		var newArr []json.RawMessage
+		raw, _ := newEnv.Data[etype]
+		if len(raw) > 0 && string(raw) != "null" {
+			_ = json.Unmarshal(raw, &newArr)
+		}
+		for i, id := range newIDs {
+			e := newArr[i]
 			prev, wasOld := oldEnts[id]
-			if !wasOld {
+			switch {
+			case !wasOld:
 				patch.Ops = append(patch.Ops, PatchOp{Op: OpAdd, Etype: etype, ID: id, Entity: e})
 				touched++
-				continue
-			}
-			if string(prev.canon) != string(objBytes(obj)) {
+			case !sameEntity(prev, e):
 				patch.Ops = append(patch.Ops, PatchOp{Op: OpUpdate, Etype: etype, ID: id, Entity: e})
 				touched++
 			}
@@ -197,38 +171,43 @@ func DiffResults(oldJSON, newJSON json.RawMessage) (p *Patch, ok bool) {
 	}
 
 	// Reorder check: relative order of surviving ids must be identical on
-	// both sides (per etype). Any positional shift of common entities is not
-	// expressible without move semantics → full envelope.
-	for etype, oldEnts := range oldIdx {
-		newEnts, exists := newIdx[etype]
+	// both sides (per etype). Any positional shift of common entities is
+	// not expressible without move semantics → full envelope.
+	for etype, oldIDs := range oldSide {
+		newIDs, exists := newSide[etype]
 		if !exists {
 			continue
 		}
-		var oldCommon, newCommon []string
-		forEachID(oldEnv.Data[etype], func(id string) {
-			if _, keep := newEnts[id]; keep {
-				oldCommon = append(oldCommon, id)
-			}
-		})
-		forEachID(newEnv.Data[etype], func(id string) {
-			if _, keep := oldEnts[id]; keep {
-				newCommon = append(newCommon, id)
-			}
-		})
-		if len(oldCommon) != len(newCommon) {
-			return nil, false
+		newPos := make(map[string]int, len(newIDs))
+		for i, id := range newIDs {
+			newPos[id] = i
 		}
-		for i := range oldCommon {
-			if oldCommon[i] != newCommon[i] {
+		last := -1
+		for _, id := range oldIDs { // survivors must keep relative order
+			pos, keep := newPos[id]
+			if !keep {
+				continue
+			}
+			if pos < last {
 				return nil, false // reorder / cross-etype shuffle ambiguity
 			}
+			last = pos
 		}
 	}
 
 	// Size heuristic: too much churn ⇒ patch ≈ full envelope anyway.
-	total := oldTotal
-	if newTotal > total {
-		total = newTotal
+	total := 0
+	for etype, ids := range oldSide {
+		n := len(ids)
+		if m := len(newSide[etype]); m > n {
+			n = m
+		}
+		total += n
+	}
+	for etype, ids := range newSide {
+		if _, existed := oldSide[etype]; !existed {
+			total += len(ids)
+		}
 	}
 	if total > 0 && float64(touched)/float64(total) > MaxTouchedRatio {
 		return nil, false
@@ -245,47 +224,21 @@ func isSet(raw json.RawMessage) bool {
 	return len(raw) > 0 && string(raw) != "null" && string(raw) != ""
 }
 
-// decodeEntities parses one etype's value as an array of objects carrying
-// string ids; anything else is a shape we refuse to diff.
-func decodeEntities(raw json.RawMessage) ([]json.RawMessage, error) {
-	if len(raw) == 0 || string(raw) == "null" {
-		return nil, nil
+// sameEntity reports whether two entity payloads carry identical content.
+// Byte equality short-circuits the common case (same producer, unchanged
+// row); differing bytes fall back to a canonical map comparison so key-order
+// differences don't count as updates.
+func sameEntity(a, b json.RawMessage) bool {
+	if string(a) == string(b) {
+		return true
 	}
-	var arr []json.RawMessage
-	if err := json.Unmarshal(raw, &arr); err != nil {
-		return nil, fmt.Errorf("delta: etype payload is not an array: %w", err)
+	var am, bm any
+	if json.Unmarshal(a, &am) != nil || json.Unmarshal(b, &bm) != nil {
+		return false
 	}
-	for _, e := range arr {
-		var obj map[string]any
-		if err := json.Unmarshal(e, &obj); err != nil {
-			return nil, fmt.Errorf("delta: entity is not an object: %w", err)
-		}
-		if id, _ := obj["id"].(string); id == "" {
-			return nil, fmt.Errorf("delta: entity missing string id")
-		}
-	}
-	return arr, nil
-}
-
-func forEachID(raw json.RawMessage, fn func(string)) {
-	var arr []json.RawMessage
-	if json.Unmarshal(raw, &arr) != nil {
-		return
-	}
-	for _, e := range arr {
-		var obj map[string]any
-		if json.Unmarshal(e, &obj) != nil {
-			continue
-		}
-		if id, _ := obj["id"].(string); id != "" {
-			fn(id)
-		}
-	}
-}
-
-func objBytes(obj map[string]any) json.RawMessage {
-	b, _ := json.Marshal(obj) // Go marshals maps with sorted keys: canonical
-	return b
+	ab, _ := json.Marshal(am) // sorted keys: canonical
+	bb, _ := json.Marshal(bm)
+	return string(ab) == string(bb)
 }
 
 func pageChanged(oldRaw, newRaw json.RawMessage) bool {
@@ -298,13 +251,4 @@ func pageChanged(oldRaw, newRaw json.RawMessage) bool {
 	ob, _ := json.Marshal(o)
 	nb, _ := json.Marshal(n)
 	return string(ob) != string(nb)
-}
-
-func sortedKeys[V any](m map[string]V) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
 }

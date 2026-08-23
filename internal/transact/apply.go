@@ -228,7 +228,9 @@ func applyDeepMerge(ctx context.Context, tx pgx.Tx, db *storage.DB, appID [16]by
 		if len(rows) == 0 {
 			merged = incoming
 		} else {
-			merged = deepMergeJSON(rows[0].Triple.V, incoming)
+			// decodeValue leaves json.Number in place (storage pkg contract);
+			// widen it here so the merged map re-encodes via triple.IsValue.
+			merged = deepMergeJSON(convertNumbers(rows[0].Triple.V), incoming)
 		}
 		if err := applyInsertInto(ctx, tx, appID, cat, []triple.Triple{{E: eid, A: ta.AttrID, V: merged}}, opts.OverwriteT); err != nil {
 			return err
@@ -279,26 +281,6 @@ func applyDeleteEntity(ctx context.Context, tx pgx.Tx, db *storage.DB, appID [16
 	return nil
 }
 
-func parseValueJSON(raw json.RawMessage) (any, error) {
-	if string(raw) == "null" {
-		return nil, nil
-	}
-	var v any
-	dec := json.NewDecoder(strings.NewReader(string(raw)))
-	dec.UseNumber()
-	if err := dec.Decode(&v); err != nil {
-		return nil, err
-	}
-	if n, ok := v.(json.Number); ok {
-		if i, err := n.Int64(); err == nil {
-			return int64(i), nil
-		}
-		f, _ := n.Float64()
-		return f, nil
-	}
-	return v, nil
-}
-
 func deepMergeJSON(dst, src any) any {
 	dm, dok := dst.(map[string]any)
 	sm, sok := src.(map[string]any)
@@ -342,6 +324,43 @@ func collectTouchedEntities(steps []Step) ([][16]byte, error) {
 	return out, nil
 }
 
+func parseValueJSON(raw json.RawMessage) (any, error) {
+	if string(raw) == "null" {
+		return nil, nil
+	}
+	var v any
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec.UseNumber()
+	if err := dec.Decode(&v); err != nil {
+		return nil, err
+	}
+	// Nested numbers arrive as json.Number, which triple.IsValue rejects;
+	// widen them to int64/float64 everywhere so deep-merged objects encode.
+	return convertNumbers(v), nil
+}
+
+func convertNumbers(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		for k, e := range x {
+			x[k] = convertNumbers(e)
+		}
+		return x
+	case []any:
+		for i, e := range x {
+			x[i] = convertNumbers(e)
+		}
+		return x
+	case json.Number:
+		if i, err := x.Int64(); err == nil {
+			return i
+		}
+		f, _ := x.Float64()
+		return f
+	default:
+		return v
+	}
+}
 func validateRequired(ctx context.Context, q interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }, appID [16]byte, cat *platform.AttrCatalog, touched [][16]byte) error {

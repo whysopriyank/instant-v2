@@ -15,7 +15,10 @@ func TestAddRemoveAndTopicIndex(t *testing.T) {
 		Query:  json.RawMessage(`{"posts":{}}`),
 		Topics: map[string]bool{"attr-a": true, "attr-b": true},
 	}
-	id := s.Add(sub)
+	id, err := s.Add(sub)
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
 	if s.Len() != 1 {
 		t.Fatalf("len %d", s.Len())
 	}
@@ -54,7 +57,9 @@ func TestNotifierCoalesces(t *testing.T) {
 			mu.Unlock()
 		},
 	}
-	s.Add(sub)
+	if _, err := s.Add(sub); err != nil {
+		t.Fatalf("add: %v", err)
+	}
 
 	n := &Notifier{Store: s}
 	n.Refresh = func(ctx context.Context, sub *Subscription) (json.RawMessage, error) {
@@ -87,7 +92,9 @@ func TestNotifierIgnoresStaleTxIDs(t *testing.T) {
 		TxID:   10,
 		Emit:   func(Frame) { called = true },
 	}
-	s.Add(sub)
+	if _, err := s.Add(sub); err != nil {
+		t.Fatalf("add: %v", err)
+	}
 	n := &Notifier{Store: s}
 	n.Refresh = func(ctx context.Context, sub *Subscription) (json.RawMessage, error) {
 		return json.RawMessage(`{}`), nil
@@ -104,8 +111,12 @@ func TestNotifierIgnoresStaleTxIDs(t *testing.T) {
 
 func TestAppIsolation(t *testing.T) {
 	s := NewStore()
-	s.Add(&Subscription{ID: "a-app1", AppID: "app1", Topics: map[string]bool{"x": true}})
-	s.Add(&Subscription{ID: "b-app2", AppID: "app2", Topics: map[string]bool{"x": true}})
+	if _, err := s.Add(&Subscription{ID: "a-app1", AppID: "app1", Topics: map[string]bool{"x": true}}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if _, err := s.Add(&Subscription{ID: "b-app2", AppID: "app2", Topics: map[string]bool{"x": true}}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
 	got := s.SubsForTopics([]string{"x"})
 	if len(got) != 2 {
 		t.Fatalf("topic index lost a sub: %v", got)

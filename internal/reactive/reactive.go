@@ -257,6 +257,7 @@ func (n *Notifier) Run(ctx context.Context) {
 			batch := n.pending
 			n.pending = map[string]int64{}
 			n.gauge.Add(-int64(len(batch)))
+			n.mu.Unlock()
 
 			var wg sync.WaitGroup
 			sem := make(chan struct{}, Workers)

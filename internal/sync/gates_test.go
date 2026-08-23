@@ -9,34 +9,39 @@ import (
 )
 
 // TestNegotiateMatrix pins the exact gate boundaries from
-// reactive/session.clj:73-107 — old SDKs must keep working.
+// reactive/session.clj:73-107 plus the v2-only delta-refresh gate (≥0.23.0,
+// chosen after batch-messages so every existing SDK version stays below it).
 func TestNegotiateMatrix(t *testing.T) {
 	cases := []struct {
 		version       string
 		skipAttrs     bool
 		patchPresence bool
 		batchMessages bool
+		deltaRefresh  bool
 	}{
-		{"0.12.0", false, false, false},
-		{"0.13.0", false, false, false},
-		{"0.17.4", false, false, false}, // just below patch-presence
-		{"0.17.5", false, true, false},  // patch-presence boundary
-		{"0.17.6", false, true, false},
-		{"0.20.3", false, true, false}, // just below skip-attrs
-		{"0.20.4", true, true, false},  // skip-attrs boundary
-		{"0.20.5", true, true, false},
-		{"0.22.74", true, true, false}, // just below batch-messages
-		{"0.22.75", true, true, true},  // batch-messages boundary
-		{"0.23.0", true, true, true},
-		{"1.0.0", true, true, true},
+		{"0.12.0", false, false, false, false},
+		{"0.13.0", false, false, false, false},
+		{"0.17.4", false, false, false, false}, // just below patch-presence
+		{"0.17.5", false, true, false, false},  // patch-presence boundary
+		{"0.17.6", false, true, false, false},
+		{"0.20.3", false, true, false, false}, // just below skip-attrs
+		{"0.20.4", true, true, false, false},  // skip-attrs boundary
+		{"0.20.5", true, true, false, false},
+		{"0.22.74", true, true, false, false}, // just below batch-messages
+		{"0.22.75", true, true, true, false},  // batch-messages boundary
+		{"0.22.99", true, true, true, false},  // just below delta-refresh
+		{"0.23.0", true, true, true, true},    // delta-refresh boundary
+		{"0.23.1", true, true, true, true},
+		{"1.0.0", true, true, true, true},
 	}
 	for _, tc := range cases {
 		f := syncpkg.Negotiate(map[string]string{"@instantdb/core": tc.version})
 		if f["skip-attrs"] != tc.skipAttrs ||
 			f["patch-presence"] != tc.patchPresence ||
-			f["batch-messages"] != tc.batchMessages {
-			t.Errorf("version %s: got %v, want skip-attrs=%v patch-presence=%v batch-messages=%v",
-				tc.version, f, tc.skipAttrs, tc.patchPresence, tc.batchMessages)
+			f["batch-messages"] != tc.batchMessages ||
+			f["delta-refresh"] != tc.deltaRefresh {
+			t.Errorf("version %s: got %v, want skip-attrs=%v patch-presence=%v batch-messages=%v delta-refresh=%v",
+				tc.version, f, tc.skipAttrs, tc.patchPresence, tc.batchMessages, tc.deltaRefresh)
 		}
 	}
 	if f := syncpkg.Negotiate(nil); len(f) != 0 {

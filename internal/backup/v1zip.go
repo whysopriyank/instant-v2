@@ -319,7 +319,7 @@ func readEntry(f *zip.File) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("backup: open zip entry %s: %v", f.Name, err)
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }() //nolint:errcheck // read already completed
 	body, err := io.ReadAll(rc)
 	if err != nil {
 		return nil, fmt.Errorf("backup: read zip entry %s: %v", f.Name, err)

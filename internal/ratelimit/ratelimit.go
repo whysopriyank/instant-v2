@@ -185,7 +185,7 @@ func HTTPMiddleware(next http.Handler, limiter *Limiter, classify func(*http.Req
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("Retry-After", strconv.Itoa(retrySecs))
 				w.WriteHeader(http.StatusTooManyRequests)
-				fmt.Fprintf(w, `{"error":"rate limited","class":%q,"retry-after":%d}`+"\n", class, retrySecs)
+				_, _ = fmt.Fprintf(w, `{"error":"rate limited","class":%q,"retry-after":%d}`+"\n", class, retrySecs)
 				return
 			}
 		}

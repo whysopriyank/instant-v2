@@ -99,7 +99,11 @@ type Session struct {
 	Subs     map[string]bool // subscription ids owned by this session
 	Rooms    map[string]bool
 	Send     func(Frame) error // transport-bound writer
-	mu       sync.Mutex
+	// TreeResults selects v1's return-type :tree (admin subscribe-query,
+	// session.clj:1395): refresh envelopes carry the bare object tree instead
+	// of the join-rows node-list used on the WS path.
+	TreeResults bool
+	mu          sync.Mutex
 }
 
 // Manager creates sessions and dispatches frames. One Manager per process.
@@ -268,12 +272,18 @@ func (m *Manager) handleAddQuery(ctx context.Context, sess *Session, f Frame) ([
 			}
 			entry := map[string]any{"instaql-query": json.RawMessage(fr.QueryJSON)}
 			opName := "refresh-ok"
-			if len(fr.PatchJSON) > 0 {
+			if len(fr.PatchJSON) > 0 && !sess.TreeResults {
 				// delta-refresh fast path: structural patch referencing
 				// node identities (etype + entity id); the patch's entity
 				// bodies are flat {id,label:value} objects.
 				opName = "refresh-ok-delta"
 				entry["delta"] = json.RawMessage(fr.PatchJSON)
+			} else if sess.TreeResults {
+				tree, terr := UnwrapTree(fr.ResultJSON)
+				if terr != nil {
+					return
+				}
+				entry["instaql-result"] = tree
 			} else {
 				// Full envelope: v1-conformant join-rows node-list so the
 				// frozen SDK can extractTriples it (docs/03 §5).
@@ -282,6 +292,9 @@ func (m *Manager) handleAddQuery(ctx context.Context, sess *Session, f Frame) ([
 					return
 				}
 				entry["instaql-result"] = nodes
+			}
+			if sess.TreeResults {
+				entry["result-meta"] = resultMetaOf(fr.ResultJSON)
 			}
 			payload, _ := json.Marshal([]map[string]any{entry})
 			_ = sess.Send(Frame{
@@ -296,7 +309,7 @@ func (m *Manager) handleAddQuery(ctx context.Context, sess *Session, f Frame) ([
 		if errors.As(aerr, &capErr) {
 			// Per-app subscription cap: reject, then drop the connection.
 			return []Frame{ErrFrame(429, "subscription-limit",
-				fmt.Sprintf("per-app subscription cap (%d) exceeded", capErr.Max))},
+					fmt.Sprintf("per-app subscription cap (%d) exceeded", capErr.Max))},
 				fmt.Errorf("%w: %v", ErrCloseSession, aerr)
 		}
 		return []Frame{ErrFrame(500, "internal", aerr.Error())}, aerr
@@ -304,6 +317,28 @@ func (m *Manager) handleAddQuery(ctx context.Context, sess *Session, f Frame) ([
 	sess.mu.Lock()
 	sess.Subs[key] = true
 	sess.mu.Unlock()
+
+	reply := Frame{"op": json.RawMessage(`"add-query-ok"`)}
+	if eventID != "" {
+		reply["client-event-id"] = json.RawMessage(mustJSON(eventID))
+	}
+	return []Frame{reply}, nil
+}
+
+func (m *Manager) handleTransact(ctx context.Context, sess *Session, f Frame) ([]Frame, error) {
+	rawSteps, ok := f["tx-steps"]
+	if !ok {
+		return []Frame{ErrFrame(400, "bad-request", "transact requires tx-steps")}, nil
+	}
+	var steps []json.RawMessage
+	if err := json.Unmarshal(rawSteps, &steps); err != nil {
+		return []Frame{ErrFrame(400, "bad-request", "tx-steps must be an array")}, nil
+	}
+	parsed, err := transact.ParseSteps(steps)
+	if err != nil {
+		return []Frame{ErrFrame(400, "tx-step-validation", err.Error())}, nil
+	}
+	cat, err := m.Deps.Catalogs.For(ctx, sess.AppID)
 	if err != nil {
 		return []Frame{ErrFrame(404, "unknown-app", "no such app")}, nil
 	}

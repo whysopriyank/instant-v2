@@ -85,6 +85,11 @@ func TestTailerDeliversTriplesChanges(t *testing.T) {
 	if err := tailer.EnsurePublication(ctx); err != nil {
 		t.Fatalf("EnsurePublication: %v", err)
 	}
+	// Fresh checkpoint namespace: sibling tests persist synthetic LSNs into
+	// tail_state; starting replication from those starves the tailer.
+	if _, err := sqlDB.Exec(`DROP TABLE IF EXISTS tail_state`); err != nil {
+		t.Fatal(err)
+	}
 	cp, err := waltail.OpenCheckpoint(sqlDB)
 	if err != nil {
 		t.Fatal(err)

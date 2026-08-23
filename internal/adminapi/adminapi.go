@@ -47,6 +47,11 @@ type Handler struct {
 	DB       *storage.DB
 	Catalogs *platform.CatalogCache
 	Logger   *slog.Logger
+	// OnCommit, when set, fires after every successful /admin/transact so
+	// the reactive invalidator learns about admin-plane writes (same hook
+	// the WS and /runtime/transact paths use). attrIDs are the triple-step
+	// targets; empty means no invalidatable writes.
+	OnCommit func(ctx context.Context, appID [16]byte, attrIDs []string, txID int64)
 }
 
 // authedReq carries the authenticated request context through routing.
@@ -280,19 +285,123 @@ func (h *Handler) handleTransact(w http.ResponseWriter, r *http.Request, a *auth
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	throwOnMissing := false
+	if v, ok := a.body["throw-on-missing-attrs?"].(bool); ok {
+		throwOnMissing = v
+	}
+	cat := a.cat
+	if transact.HasHighLevelOps(stepsRaw) {
+		var lerr error
+		stepsRaw, cat, lerr = h.lowerAdminSteps(r.Context(), a, stepsRaw, throwOnMissing)
+		if lerr != nil {
+			writeErr(w, http.StatusBadRequest, lerr.Error())
+			return
+		}
+	}
 	steps, err := transact.ParseSteps(stepsRaw)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	res, err := transact.Transact(r.Context(), h.DB, a.cat, a.appID, steps,
+	res, err := transact.Transact(r.Context(), h.DB, cat, a.appID, steps,
 		transact.Options{Admin: true}, nil)
 	if err != nil {
 		h.logger().Error("adminapi: transact", "err", err)
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if h.OnCommit != nil {
+		h.OnCommit(r.Context(), a.appID, touchedAttrs(steps), res.TxID)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"tx-id": res.TxID})
+}
+
+// lowerAdminSteps runs the instant.admin.model lowering (see
+// internal/transact/highlevel.go): it resolves lookup eids against committed
+// state and provisions missing attrs via platform.GetOrCreateAttr(+Rev),
+// mirroring how authn creates system attrs. Provisioning commits in its own
+// transaction and the catalog cache is invalidated + reloaded so Transact's
+// parseTripleArgs sees the fresh attr ids. Pure-low-level batches never reach
+// this path.
+func (h *Handler) lowerAdminSteps(
+	ctx context.Context, a *authedReq, raw []json.RawMessage, throwOnMissing bool,
+) ([]json.RawMessage, *platform.AttrCatalog, error) {
+	var (
+		tx      pgx.Tx
+		created int
+	)
+	hooks := transact.LowerHooks{
+		ResolveUnique: func(ctx context.Context, appID [16]byte, attrID [16]byte, value json.RawMessage) ([16]byte, bool, error) {
+			var eid [16]byte
+			err := h.Pool.QueryRow(ctx,
+				`SELECT entity_id FROM triples
+				  WHERE app_id=$1 AND attr_id=$2 AND av AND value=$3::jsonb
+				  LIMIT 1`, appID, attrID, string(value)).Scan(&eid)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return [16]byte{}, false, nil
+			}
+			if err != nil {
+				return [16]byte{}, false, err
+			}
+			return eid, true, nil
+		},
+		EntityExists: func(ctx context.Context, appID [16]byte, eid [16]byte) (bool, error) {
+			var one int
+			err := h.Pool.QueryRow(ctx,
+				`SELECT 1 FROM triples WHERE app_id=$1 AND entity_id=$2 LIMIT 1`,
+				appID, eid).Scan(&one)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return false, nil
+			}
+			if err != nil {
+				return false, err
+			}
+			return true, nil
+		},
+		CreateAttr: func(ctx context.Context, appID [16]byte, spec transact.AttrSpec) (platform.Attr, error) {
+			if tx == nil {
+				var err error
+				tx, err = h.Pool.Begin(ctx)
+				if err != nil {
+					return platform.Attr{}, err
+				}
+			}
+			created++
+			if spec.Ref {
+				return platform.GetOrCreateAttrRev(ctx, tx, appID,
+					spec.Etype, spec.Label, spec.ReverseEtype, spec.ReverseLabel,
+					spec.ValueType, spec.Cardinality, spec.Unique, spec.Indexed)
+			}
+			return platform.GetOrCreateAttr(ctx, tx, appID,
+				spec.Etype, spec.Label, spec.ValueType, spec.Cardinality,
+				spec.Unique, spec.Indexed)
+		},
+	}
+
+	lowered, err := transact.LowerAdminSteps(ctx, a.appID, a.cat, raw, hooks, throwOnMissing)
+	if tx != nil {
+		if err != nil {
+			_ = tx.Rollback(ctx)
+			return nil, nil, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, nil, err
+		}
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	if created == 0 {
+		return lowered, a.cat, nil
+	}
+	// Attrs were provisioned: drop the stale cached catalog and reload so the
+	// freshly minted attr ids resolve inside Transact.
+	h.Catalogs.Invalidate(a.appStr)
+	fresh, err := h.Catalogs.For(ctx, a.appStr)
+	if err != nil {
+		return nil, nil, err
+	}
+	return lowered, fresh, nil
 }
 
 func stepsFromBody(body map[string]any) ([]json.RawMessage, error) {
@@ -369,6 +478,24 @@ func (h *Handler) handleQueryPermsCheck(w http.ResponseWriter, r *http.Request, 
 		"check-results": checks,
 		"result":        res.Data, // object-tree, matching v1's :result
 	})
+}
+
+// touchedAttrs extracts attr-id strings from triple-shaped steps so callers
+// can invalidate reactive subscriptions (mirrors cmd's touchedAttrs).
+func touchedAttrs(steps []transact.Step) []string {
+	var out []string
+	for _, s := range steps {
+		switch s.Op {
+		case "add-triple", "deep-merge-triple", "retract-triple":
+			if len(s.Args) >= 2 {
+				var attrStr string
+				if json.Unmarshal(s.Args[1], &attrStr) == nil {
+					out = append(out, attrStr)
+				}
+			}
+		}
+	}
+	return out
 }
 
 // tripleAction maps one wire step to the permission action v1 evaluates.

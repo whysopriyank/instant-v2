@@ -155,6 +155,11 @@ func run(logger *slog.Logger) error {
 			Store:   store,
 			Refresh: refreshFor(ex, cats),
 		}
+		sseH.AdminAuth = func(ctx context.Context, appID, token string) bool {
+			ok, err := cats.CheckAdminToken(ctx, appID, token)
+			return err == nil && ok
+		}
+		mux.HandleFunc("POST /admin/subscribe-query", sseH.AdminSubscribe)
 		mux.Handle("GET /runtime/session", ws)
 		mux.HandleFunc("GET /runtime/sse", sseH.ServeHTTP)
 		mux.HandleFunc("POST /runtime/sse", sseH.ServeHTTP)
@@ -178,6 +183,12 @@ func run(logger *slog.Logger) error {
 			DB:       st,
 			Catalogs: cats,
 			Logger:   logger,
+			OnCommit: func(ctx context.Context, appID [16]byte, attrIDs []string, txID int64) {
+				// Admin-plane writes must invalidate live subscribers too.
+				// Detach: the request context dies when handleTransact
+				// returns, but refreshes must outlive it.
+				go notifier.Notify(context.WithoutCancel(ctx), platform.UUIDToStr(appID), attrIDs, txID)
+			},
 		})
 
 		storeSecret := []byte(os.Getenv("INSTANT_V2_STORAGE_SECRET"))

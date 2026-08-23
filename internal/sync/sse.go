@@ -20,6 +20,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
@@ -40,6 +41,9 @@ type SSEHandler struct {
 	Manager *Manager
 	Store   *reactive.Store
 	Refresh func(ctx context.Context, sub *reactive.Subscription) (json.RawMessage, error)
+	// AdminAuth gates POST /admin/subscribe-query; cmd injects
+	// CatalogCache.CheckAdminToken. nil disables the endpoint.
+	AdminAuth func(ctx context.Context, appID, token string) bool
 
 	mu     sync.Mutex
 	conns  map[string]*sseConn // sha256hex(sseToken) → conn
@@ -201,9 +205,13 @@ func (h *SSEHandler) postSSE(w http.ResponseWriter, r *http.Request) {
 			pushReply(conn.events, reply)
 			continue
 		}
-		replies, _ := h.Manager.Handle(r.Context(), conn.sess, f)
+		replies, herr := h.Manager.Handle(r.Context(), conn.sess, f)
 		for _, rf := range replies {
 			pushReply(conn.events, rf)
+		}
+		if errors.Is(herr, ErrCloseSession) {
+			h.closeTearDown(tokenHashOf(req.SSEToken), conn)
+			break
 		}
 		// add-query initial snapshot rides the same direct-refresh path
 		// as the WS handler.
@@ -229,15 +237,37 @@ func (h *SSEHandler) snapshot(ctx context.Context, sess *Session, f Frame) {
 	if err != nil {
 		return
 	}
+	// Baseline for delta-refresh diffs is the flat envelope; SSE init-query
+	// answers with v1 :tree semantics (session.clj:1395) — a bare object
+	// tree with NO "data" wrapper key.
+	sub.SetSnapshot(result)
+	tree, terr := UnwrapTree(result)
+	if terr != nil {
+		return
+	}
 	payload, _ := json.Marshal([]map[string]any{{
 		"instaql-query":  json.RawMessage(rawQ),
-		"instaql-result": result,
+		"instaql-result": tree,
 	}})
 	_ = sess.Send(Frame{
 		"op":              json.RawMessage(`"refresh-ok"`),
 		"computations":    payload,
 		"processed-tx-id": json.RawMessage(mustJSON(0)),
 	})
+}
+
+// closeTearDown drops the SSE registration and tears down the session's
+// subscriptions and rooms (ErrCloseSession path).
+func (h *SSEHandler) closeTearDown(tokenHash string, c *sseConn) {
+	h.mu.Lock()
+	delete(h.conns, tokenHash)
+	h.mu.Unlock()
+	if c.sess != nil {
+		for id := range c.sess.Subs {
+			h.Store.Remove(id)
+		}
+		h.Manager.Deps.Rooms.LeaveAll(c.sess)
+	}
 }
 
 var errSSEBackpressure = fmt.Errorf("sse: event buffer full")

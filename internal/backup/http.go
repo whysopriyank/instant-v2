@@ -115,10 +115,10 @@ func parseBackupRoute(path string) (appID, action string, ok bool) {
 }
 
 func routeMethodOK(method, action string) bool {
-	switch {
-	case action == "":
+	switch action {
+	case "":
 		return method == http.MethodGet
-	case action == "restore" || action == "restore-v1zip":
+	case "restore", "restore-v1zip":
 		return method == http.MethodPost
 	default:
 		return false
@@ -173,7 +173,7 @@ func (h *Handler) importV1ZipBody(ctx context.Context, r *http.Request, appID [1
 	if err != nil {
 		return Counts{}, fmt.Errorf("backup: temp file: %w", err)
 	}
-	defer os.Remove(tmp.Name())
+	defer func() { _ = os.Remove(tmp.Name()) }() //nolint:errcheck // best-effort cleanup
 	if _, err := io.Copy(tmp, r.Body); err != nil {
 		tmp.Close()
 		return Counts{}, fmt.Errorf("backup: read upload: %v", err)

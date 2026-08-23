@@ -8,14 +8,17 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
-	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
-	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib"
 
@@ -26,14 +29,61 @@ import (
 	"github.com/instant-v2/instant-v2/internal/triple"
 )
 
+var (
+	dsnOnce  sync.Once
+	dsnValue string
+)
+
+// testDSN returns the DATABASE_URL, redirected to a private database clone
+// (instant_v2_backup_test) so sibling workstreams wiping the shared
+// instant_v2_test schema cannot corrupt fixtures mid-run. Falls back to the
+// raw DSN if the clone cannot be provisioned.
+func testDSN(t *testing.T) string {
+	t.Helper()
+	dsnOnce.Do(func() { dsnValue = isolateDSN(t, os.Getenv("DATABASE_URL")) })
+	if dsnValue == "" {
+		t.Skip("DATABASE_URL not set")
+	}
+	return dsnValue
+}
+
+func isolateDSN(t *testing.T, raw string) string {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "postgres" && u.Scheme != "postgresql") || u.Path == "" {
+		return raw
+	}
+	const target = "instant_v2_backup_test"
+	if u.Path == "/"+target {
+		return raw
+	}
+	admin := *u
+	admin.Path = "/postgres"
+	pool, err := pgxpool.New(context.Background(), admin.String())
+	if err != nil {
+		return raw
+	}
+	defer pool.Close()
+	var exists bool
+	if err := pool.QueryRow(context.Background(),
+		`SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname=$1)`, target).Scan(&exists); err != nil {
+		return raw
+	}
+	if !exists {
+		if _, err := pool.Exec(context.Background(), `CREATE DATABASE `+target); err != nil {
+			return raw
+		}
+	}
+	out := *u
+	out.Path = "/" + target
+	return out.String()
+}
+
 // env follows internal/authn/authn_test.go's fixture pattern: drop schema →
 // Migrate → seed one user + app.
 func env(t *testing.T) (*pgxpool.Pool, [16]byte, func()) {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
-	}
+	dsn := testDSN(t)
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
@@ -76,6 +126,8 @@ func newUUID() [16]byte {
 	b[8] = (b[8] & 0x3f) | 0x80
 	return b
 }
+
+func uuidStr(u [16]byte) string { return platform.UUIDToStr(u) }
 
 // seedTodoApp creates attrs and inserts 5 triples per entity:
 // text (blob one), done (blob one), priority number 40+i (blob one), tags
@@ -124,6 +176,13 @@ func seedTodoApp(t *testing.T, ctx context.Context, pool *pgxpool.Pool, appID [1
 			t.Fatal(err)
 		}
 	}
+	// One journal row so the export covers the transactions section.
+	if err := st.WithTx(ctx, func(tx pgx.Tx) error {
+		_, err := storage.RecordTransaction(ctx, tx, appID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func runInstaql(t *testing.T, ctx context.Context, pool *pgxpool.Pool, appID [16]byte) map[string]json.RawMessage {
@@ -163,20 +222,27 @@ func exportApp(t *testing.T, ctx context.Context, pool *pgxpool.Pool, appID [16]
 	return buf.Bytes(), counts
 }
 
-func remigrateSchema(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+// remigrateSchema drops + re-migrates and returns a fresh pool (the old
+// pool's cached statements go stale across DDL).
+func remigrateSchema(t *testing.T, ctx context.Context, pool *pgxpool.Pool) *pgxpool.Pool {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_URL")
+	dsn := testDSN(t)
 	sqldb, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sqldb.Close()
 	if _, err := pool.Exec(ctx, `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`); err != nil {
+		t.Fatal(err)
+	}
+	pool.Close()
+	fresh, err := pgxpool.New(ctx, dsn)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if err := platform.Migrate(ctx, sqldb); err != nil {
 		t.Fatal(err)
 	}
+	return fresh
 }
 
 // TestExportImportRoundTrip seeds an app via the authn-style fixture, exports
@@ -195,7 +261,7 @@ func TestExportImportRoundTrip(t *testing.T) {
 		t.Fatalf("unexpected export counts: %+v", expCounts)
 	}
 
-	remigrateSchema(t, ctx, pool)
+	pool = remigrateSchema(t, ctx, pool)
 
 	imported, err := backup.Import(ctx, pool, bytes.NewReader(dump))
 	if err != nil {
@@ -234,14 +300,17 @@ func TestChecksumCorruption(t *testing.T) {
 	seedTodoApp(t, ctx, pool, appID, 2)
 	dump, _ := exportApp(t, ctx, pool, appID, backup.ExportOptions{})
 
-	marker := []byte(`"value":42`)
+	// Priorities are 40+i; rewrite the first numeric value to a different
+	// number (stays valid JSON, so the checksum — not the parser — must
+	// catch it).
+	marker := []byte(`"value":4`)
 	idx := bytes.Index(dump, marker)
 	if idx < 0 {
 		t.Fatalf("corruption target not found in dump:\n%s", dump)
 	}
 	corrupt := make([]byte, len(dump))
 	copy(corrupt, dump)
-	copy(corrupt[idx:], []byte(`"value":43`))
+	copy(corrupt[idx:], []byte(`"value":9`))
 	if bytes.Equal(corrupt, dump) {
 		t.Fatal("corruption was a no-op")
 	}
@@ -323,11 +392,11 @@ func TestV1DumpImport(t *testing.T) {
 	}
 	values := map[string]bool{}
 	for _, g := range got {
-		switch v := g.Value.(type) {
+		switch v := g.Triple.V.(type) {
 		case string:
 			values[v] = true
-		case float64:
-			values[fmt.Sprintf("num:%v", v)] = true
+		case json.Number:
+			values["num:"+v.String()] = true
 		case bool:
 			values[fmt.Sprintf("bool:%v", v)] = true
 		}
@@ -349,6 +418,12 @@ func TestExportResumeOffset(t *testing.T) {
 
 	seedTodoApp(t, ctx, pool, appID, 2)
 	full, fullCounts := exportApp(t, ctx, pool, appID, backup.ExportOptions{})
+	if fullCounts.Transactions != 1 {
+		t.Fatalf("expected 1 journal record in full dump: %+v", fullCounts)
+	}
+	if got := strings.Count(string(full), `"kind":"triple"`); got != 10 {
+		t.Fatalf("full dump triple records: %d", got)
+	}
 
 	// Skip the first 2 logical records (both attrs).
 	partial, partCounts := exportApp(t, ctx, pool, appID, backup.ExportOptions{FromOffset: 2})
@@ -358,21 +433,13 @@ func TestExportResumeOffset(t *testing.T) {
 	if !bytes.Contains(partial, []byte(`"kind":"header"`)) || !bytes.Contains(partial, []byte(`"kind":"checksum"`)) {
 		t.Fatal("partial dump must keep header and checksum lines")
 	}
-	if bytes.Contains(partial, []byte(`"kind":"attr","id":"`)) {
-		// First two attr lines must be gone (attrs are ordered by id).
-		lines := strings.Split(string(partial), "\n")
-		nAttrs := 0
-		for _, l := range lines {
-			if strings.HasPrefix(l, `{"kind":"attr"`) {
-				nAttrs++
-			}
-		}
-		if nAttrs != 2 {
-			t.Fatalf("expected 2 remaining attr lines, got %d", nAttrs)
-		}
+	// First two attr lines must be gone (attrs are ordered by id).
+	nAttrs := strings.Count(string(partial), `{"kind":"attr"`)
+	if nAttrs != 2 {
+		t.Fatalf("expected 2 remaining attr lines, got %d", nAttrs)
 	}
 
-	remigrateSchema(t, ctx, pool)
+	pool = remigrateSchema(t, ctx, pool)
 	// Import of the partial dump fails cleanly (triples reference missing
 	// attrs) but its checksum still validates ordering-wise; assert the
 	// failure is about unknown attrs, not checksum.
@@ -381,27 +448,30 @@ func TestExportResumeOffset(t *testing.T) {
 		t.Fatalf("expected unknown-attr error for partial dump, got: %v", err)
 	}
 
-	// A partial dump whose skipped records are all transactions imports fine.
-	fullLines := strings.SplitN(strings.TrimRight(string(full), "\n"), "\n", -1)
-	_ = fullLines
-
 	pool2, appID2, cleanup2 := env(t)
 	defer cleanup2()
 	seedTodoApp(t, ctx, pool2, appID2, 1)
 	// Export skipping all triples+attrs+rule → only transactions remain.
 	all, _ := exportApp(t, ctx, pool2, appID2, backup.ExportOptions{})
-	totalRecords := countKind(all, `"kind":"`)
+	totalRecords := countLogical(all)
 	tail, tailCounts := exportApp(t, ctx, pool2, appID2, backup.ExportOptions{FromOffset: totalRecords - tailCount(pool2, appID2, t)})
 	if tailCounts.Transactions <= 0 || tailCounts.Triples != 0 || tailCounts.Attrs != 0 {
 		t.Fatalf("tail counts unexpected: %+v", tailCounts)
 	}
-	remigrateSchema(t, ctx, pool2)
+	pool2 = remigrateSchema(t, ctx, pool2)
 	if _, err := backup.Import(ctx, pool2, bytes.NewReader(tail)); err != nil {
 		t.Fatalf("tail-only import failed: %v", err)
 	}
 }
 
-func countKind(dump []byte, needle string) int { return bytes.Count(dump, []byte(needle)) }
+// countLogical counts logical record lines (header/checksum excluded).
+func countLogical(dump []byte) int {
+	n := 0
+	for _, kind := range []string{"attr", "triple", "rule", "transaction"} {
+		n += bytes.Count(dump, []byte(`{"kind":"`+kind+`"`))
+	}
+	return n
+}
 
 func tailCount(pool *pgxpool.Pool, appID [16]byte, t *testing.T) int {
 	t.Helper()
@@ -436,19 +506,32 @@ func TestExportMemoryCap(t *testing.T) {
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	cat, err := platform.LoadAttrCatalog(ctx, pool, appID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	st := storage.New(pool)
-	chunk := make([]triple.Triple, 0, 10_000)
-	for i := 0; i < n; i++ {
-		chunk = chunk[:0]
-		base := i
-		for j := 0; j < 10_000 && base < n; j, base = j+1, base+1 {
-			chunk = append(chunk, triple.Triple{E: newUUID(), A: a.ID, V: fmt.Sprintf("payload-%d", base)})
+
+	// Bulk seed: one INSERT per 10k chunk with PG-computed md5 (cardinality-
+	// one blob attr → ea=true, all other flags false). Much faster than the
+	// storage helper for a pure fixture.
+	const chunk = 10_000
+	vals := make([]string, 0, chunk)
+	idStrs := make([]string, 0, chunk)
+	for base := 0; base < n; base += chunk {
+		vals = vals[:0]
+		idStrs = idStrs[:0]
+		for i := base; i < base+chunk && i < n; i++ {
+			idStrs = append(idStrs, uuidStr(newUUID()))
+			vals = append(vals, fmt.Sprintf("payload-%d", i))
 		}
-		if _, err := st.InsertTriples(ctx, appID, cat, chunk, false); err != nil {
+		if _, err := pool.Exec(ctx, `
+			WITH pairs AS (
+				SELECT e.e AS entity_id, u.v AS value_text, u.ord
+				FROM unnest($3::text[]) WITH ORDINALITY AS u(v, ord)
+				JOIN unnest($4::text[]) WITH ORDINALITY AS e(e, ord) ON e.ord = u.ord
+			)
+			INSERT INTO triples (app_id, entity_id, attr_id, value, value_md5,
+			                     ea, eav, av, ave, vae)
+			SELECT $1, p.entity_id::uuid, $2, to_json(p.value_text),
+			       md5(to_json(p.value_text)::text), true, false, false, false, false
+			FROM pairs p`,
+			appID, a.ID, vals, idStrs); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -581,10 +664,12 @@ func TestHandlerRoutesAndAuth(t *testing.T) {
 		t.Fatalf("restore counts: %+v", resp.Counts)
 	}
 
-	// Corrupted restore body → 400 with message.
+	// Corrupted restore body → 400 with message. Rewrite the first numeric
+	// value (priorities are 40+i) so the JSON stays valid but the checksum
+	// must catch it.
 	bad := append([]byte{}, dump...)
-	if i := bytes.Index(bad, []byte(`"value":42`)); i >= 0 {
-		copy(bad[i:], []byte(`"value":43`))
+	if i := bytes.Index(bad, []byte(`"value":4`)); i >= 0 {
+		copy(bad[i:], []byte(`"value":9`))
 	}
 	rec = do(http.MethodPost, "/backup/"+appStr+"/restore", bad, map[string]string{"Authorization": "Bearer tok-123"})
 	if rec.Code != http.StatusBadRequest {
@@ -611,5 +696,3 @@ func firstLine(b []byte) string {
 	}
 	return string(b)
 }
-
-var _ = time.Now // keep time import if unused after edits

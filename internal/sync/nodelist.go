@@ -15,12 +15,8 @@ package sync
 // keyed by etype. This file ports that projection over instaql.Result's flat
 // envelope so every full frame on the wire is byte-compatible with what the
 // frozen SDK expects.
-//
-// Delta-refresh patches (negotiating sessions only, ≥0.23.0) reference these
-// same node identities: an op's `etype` names the owning node/k and its `id`
-// matches the eid component of the entity's join-row triples.
-
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -65,14 +61,15 @@ func BuildNodeList(cat *platform.AttrCatalog, result json.RawMessage) (json.RawM
 			}
 		}
 
-		// One join-row per entity: its triples [eid, attr-id, value].
-		rows := make([][]any, 0, len(ents))
+		// v1 collect-instaql-results-for-client (query.clj:91) wraps ALL
+		// deduped triples as ONE flat row: join-rows = [triples…], where
+		// each triple is [entity-id, attr-id, value].
+		triples := make([]any, 0, len(ents))
 		for _, e := range ents {
 			id, _ := e["id"].(string)
 			if id == "" {
 				return nil, fmt.Errorf("nodelist: %s entity missing id", etype)
 			}
-			row := make([]any, 0, len(e))
 			labels := make([]string, 0, len(e))
 			for label := range e {
 				if label == "id" {
@@ -88,24 +85,23 @@ func BuildNodeList(cat *platform.AttrCatalog, result json.RawMessage) (json.RawM
 					// Link attrs project one triple per linked child id;
 					// child bodies arrive via the child etype's own node.
 					for _, cid := range linkedIDs(e[label]) {
-						row = append(row, []any{id, platform.UUIDToStr(attr.ID), cid})
+						triples = append(triples, []any{id, platform.UUIDToStr(attr.ID), cid})
 					}
 				case attr != nil:
-					row = append(row, []any{id, platform.UUIDToStr(attr.ID), e[label]})
+					triples = append(triples, []any{id, platform.UUIDToStr(attr.ID), e[label]})
 				default:
 					// Unknown label (defensive): keep it verbatim so the
 					// projection stays lossless.
-					row = append(row, []any{id, label, e[label]})
+					triples = append(triples, []any{id, label, e[label]})
 				}
 			}
-			rows = append(rows, row)
 		}
 
 		data := map[string]any{
 			"k":     etype,
 			"etype": etype,
 			"datalog-result": map[string]any{
-				"join-rows": []any{rows}, // single outer row per node
+				"join-rows": []any{triples}, // one flat row of all triples
 			},
 		}
 		if !pageInfoPlaced && isRawSet(env.PageInfo) {
@@ -178,4 +174,14 @@ func asLinkedID(v any) string {
 
 func isRawSet(raw json.RawMessage) bool {
 	return len(raw) > 0 && string(raw) != "null"
+}
+
+// nodelistFor resolves the session's catalog and projects a flat instaql
+// result into the v1 node-list wire shape.
+func nodelistFor(ctx context.Context, catalogs *platform.CatalogCache, appID string, result json.RawMessage) (json.RawMessage, error) {
+	cat, err := catalogs.For(ctx, appID)
+	if err != nil {
+		return nil, err
+	}
+	return BuildNodeList(cat, result)
 }

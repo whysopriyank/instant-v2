@@ -75,6 +75,17 @@ type Counts struct {
 	Transactions int64 `json:"transactions"`
 }
 
+// dumpHeader is the ordered header line (field order is part of the wire
+// shape: "kind" leads every line).
+type dumpHeader struct {
+	Kind      string `json:"kind"`
+	Format    string `json:"format"`
+	Version   int    `json:"version"`
+	AppID     string `json:"app_id"`
+	Title     string `json:"title"`
+	CreatorID string `json:"creator_id"`
+}
+
 // ExportOptions tunes Export. Zero value exports everything.
 type ExportOptions struct {
 	// FromOffset skips the first N logical records (see package docs).
@@ -142,13 +153,13 @@ func Export(ctx context.Context, w io.Writer, pool *pgxpool.Pool, appID [16]byte
 	defer conn.Release()
 
 	hw := hashWriter{w: w, h: sha256.New()}
-	header := map[string]any{
-		"kind":       "header",
-		"format":     dumpFormat,
-		"version":    dumpVer,
-		"app_id":     platform.UUIDToStr(appID),
-		"title":      title,
-		"creator_id": platform.UUIDToStr(creator),
+	header := dumpHeader{
+		Kind:      "header",
+		Format:    dumpFormat,
+		Version:   dumpVer,
+		AppID:     platform.UUIDToStr(appID),
+		Title:     title,
+		CreatorID: platform.UUIDToStr(creator),
 	}
 	hb, err := json.Marshal(header)
 	if err != nil {
@@ -209,21 +220,29 @@ func Export(ctx context.Context, w io.Writer, pool *pgxpool.Pool, appID [16]byte
 }
 
 func streamSection(ctx context.Context, conn *pgxpool.Conn, rw *recordWriter, sqlStr string, appID [16]byte) (int64, error) {
+	start := rw.count
 	rows, err := conn.Query(ctx, sqlStr, appID)
 	if err != nil {
 		return 0, err
 	}
 	defer rows.Close()
+	var buf bytes.Buffer
 	for rows.Next() {
 		var line string
 		if err := rows.Scan(&line); err != nil {
 			return 0, err
 		}
-		if err := rw.emit(line); err != nil {
+		// Canonicalize to compact JSON: json_build_object pads " : " and a
+		// one-line guarantee keeps the NDJSON framing safe.
+		buf.Reset()
+		if err := json.Compact(&buf, []byte(line)); err != nil {
+			return 0, fmt.Errorf("backup: non-JSON export row: %v", err)
+		}
+		if err := rw.emit(buf.String()); err != nil {
 			return 0, err
 		}
 	}
-	return rw.count, rows.Err()
+	return rw.count - start, rows.Err()
 }
 
 // ---- Import ----
@@ -298,7 +317,8 @@ func Import(ctx context.Context, pool *pgxpool.Pool, r io.Reader) (Counts, error
 			if err := json.Unmarshal(body, &ck); err != nil {
 				return counts, fmt.Errorf("backup: bad checksum line: %v", err)
 			}
-			logical := counts.Attrs + counts.Triples + counts.Rules + counts.Transactions
+			logical := counts.Attrs + counts.Triples + int64(batch.len()) +
+				counts.Rules + counts.Transactions
 			if got := fmt.Sprintf("%x", hash.Sum(nil)); got != ck.SHA256 {
 				return counts, fmt.Errorf("backup: checksum mismatch: expected %s, computed %s", ck.SHA256, got)
 			}
@@ -409,6 +429,7 @@ func decodeKinded(line string) (string, json.RawMessage, error) {
 	if err := json.Unmarshal(kb, &kind); err != nil {
 		return "", nil, fmt.Errorf("backup: bad kind field: %v", err)
 	}
+	delete(m, "kind")
 	body, err := json.Marshal(m)
 	if err != nil {
 		return "", nil, err
@@ -630,7 +651,7 @@ func (b *tripleBatch) flush(ctx context.Context, tx pgx.Tx, appID [16]byte, coun
 	if dangling > 0 {
 		return fmt.Errorf("%d triple(s) reference unknown attrs (import a matching attr set first)", dangling)
 	}
-	ct, err := tx.Exec(ctx, `
+	_, err := tx.Exec(ctx, `
 		WITH input AS (
 			SELECT * FROM unnest($2::uuid[], $3::uuid[], $4::jsonb[], $5::timestamptz[])
 			WITH ORDINALITY AS t(entity_id, attr_id, value, created_at, ord)
@@ -644,7 +665,8 @@ func (b *tripleBatch) flush(ctx context.Context, tx pgx.Tx, appID [16]byte, coun
 			       a.is_unique                                          AS av,
 			       a.is_indexed                                         AS ave,
 			       (a.value_type  = 'ref')                              AS vae,
-			       a.checked_data_type                                  AS checked_data_type
+			       a.checked_data_type                                  AS checked_data_type,
+			       i.created_at                                         AS created_at
 			  FROM input i
 			  JOIN attrs a ON a.id = i.attr_id AND a.deletion_marked_at IS NULL
 		)
@@ -658,7 +680,9 @@ func (b *tripleBatch) flush(ctx context.Context, tx pgx.Tx, appID [16]byte, coun
 	if err != nil {
 		return err
 	}
-	*counter += ct.RowsAffected()
+	// Counts reports logical records consumed from the dump (idempotent
+	// re-imports count too, even when every row was a DB no-op).
+	*counter += int64(len(b.entityIDs))
 	b.reset()
 	return nil
 }

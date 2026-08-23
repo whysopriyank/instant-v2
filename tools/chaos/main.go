@@ -26,6 +26,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -75,6 +76,7 @@ type sessionStats struct {
 	FinalCount  int
 	Verdict     string
 	finalIDs    map[string]bool
+	rawResult   string
 }
 
 func (s *sessionStats) dropped() bool {
@@ -200,17 +202,49 @@ func run() error {
 	fmt.Printf("== [1] waltail streaming (slot %s), checkpoint LSN starts at %d ==\n", wt.SlotName(), cpLive.Last())
 
 	// ---- Phase 3: build + start instantd ------------------------------------
+	// Preferred: build the live working tree (tests what will actually ship).
+	// Fallback: if that fails — e.g. a sibling workstream holds half-finished
+	// uncommitted edits — retry from a pristine `git archive HEAD` export so
+	// the chaos proof stays runnable.
+	fmt.Println("== [2] building instantd ==")
 	binDir, err := os.MkdirTemp("", "chaos-instantd-*")
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(binDir)
+	defer func() { _ = os.RemoveAll(binDir) }()
 	instantdBin := filepath.Join(binDir, "instantd")
-	fmt.Println("== [2] building instantd ==")
-	build := exec.Command("go", "build", "-o", instantdBin, "./cmd/instantd")
-	build.Dir = repoRoot
-	if out, err := build.CombinedOutput(); err != nil {
-		return fmt.Errorf("go build instantd: %v\n%s", err, out)
+
+	buildAt := func(dir string) ([]byte, error) {
+		b := exec.Command("go", "build", "-o", instantdBin, "./cmd/instantd")
+		b.Dir = dir
+		return b.CombinedOutput()
+	}
+	// The working tree is shared with concurrently-running workstreams; a
+	// build may transiently fail while a sibling saves mid-edit. Retry a
+	// few times before falling back to the pristine HEAD export.
+	buildSrc := repoRoot
+	var lastOut []byte
+	var lastErr error
+	for attempt := 1; attempt <= 8; attempt++ {
+		lastOut, lastErr = buildAt(repoRoot)
+		if lastErr == nil {
+			break
+		}
+		fmt.Printf("   working-tree build attempt %d failed; retrying in 15s (%v)\n", attempt, lastErr)
+		time.Sleep(15 * time.Second)
+	}
+	if lastErr != nil {
+		fmt.Println("   falling back to HEAD snapshot")
+		srcDir, xerr := exportHead(repoRoot)
+		if xerr != nil {
+			return fmt.Errorf("export HEAD: %w", xerr)
+		}
+		defer func() { _ = os.RemoveAll(srcDir) }()
+		out2, err2 := buildAt(srcDir)
+		if err2 != nil {
+			return fmt.Errorf("go build instantd (working tree):\n%s\ngo build instantd (HEAD):\n%s", lastOut, out2)
+		}
+		buildSrc = srcDir // corpusctl + corpus replay against the same snapshot
 	}
 	httpPort, err := freePort()
 	if err != nil {
@@ -254,7 +288,7 @@ func run() error {
 
 	corpusBaseline := ""
 	if !*flagSkipCorp {
-		corpusBaseline = runCorpusReplay(repoRoot, wsURL)
+		corpusBaseline = runCorpusReplay(buildSrc, wsURL)
 		fmt.Println("-- corpus baseline (pre-chaos) --\n" + indent(corpusBaseline))
 	}
 
@@ -275,7 +309,7 @@ func run() error {
 	}
 	outageRejected := 0
 	for i := 0; i < 3; i++ {
-		if _, code, err := postTransact(baseURL, chaosApp, attrID, fmt.Sprintf("outage-%d", i)); err != nil || code != 0 && code != 200 {
+		if _, code, _, err := postTransact(baseURL, chaosApp, attrID, fmt.Sprintf("outage-%d", i)); err != nil || code != 0 && code != 200 {
 			outageRejected++
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -311,6 +345,7 @@ func run() error {
 
 	// ---- Phase 6: recovery ---------------------------------------------------
 	fmt.Println("== [6] restarting postgres + instantd ==")
+	fmt.Println("   stopping old tailer...")
 	tailCancel()
 	select {
 	case <-tailDone:
@@ -318,10 +353,12 @@ func run() error {
 		fmt.Println("   note: old tailer loop slow to unwind (backoff)")
 	}
 	if out, err := pgCtl(pgData,
+		"-l", filepath.Join(pgData, "chaos.log"),
 		"-o", fmt.Sprintf("-p %d -c wal_level=logical", *flagPGPort),
 		"-w", "-t", "60", "start"); err != nil {
 		return fmt.Errorf("pg_ctl restart: %v\n%s", err, out)
 	}
+	fmt.Printf("   starting instantd at %s...\n", httpAddr)
 	p2, err := startInstantd(instantdBin, dsn, httpAddr)
 	if err != nil {
 		return err
@@ -386,6 +423,11 @@ func run() error {
 		}
 	}
 	if bad > 0 {
+		for _, s := range sessions {
+			s.mu.Lock()
+			fmt.Printf("   session %d verdict: %s\n      raw: %s\n", s.ID, s.Verdict, truncate(s.rawResult, 600))
+			s.mu.Unlock()
+		}
 		return fmt.Errorf("%d/%d sessions failed phantom-read verification", bad, len(sessions))
 	}
 
@@ -400,7 +442,7 @@ func run() error {
 	// ---- Phase 8: corpus replay post-chaos ------------------------------------
 	corpusAfter := ""
 	if !*flagSkipCorp {
-		corpusAfter = runCorpusReplay(repoRoot, wsURL)
+		corpusAfter = runCorpusReplay(buildSrc, wsURL)
 		fmt.Println("-- corpus replay (post-chaos) --\n" + indent(corpusAfter))
 	}
 
@@ -417,7 +459,9 @@ func run() error {
 // to PATH so the harness works regardless of the caller's environment.
 func pgBin(name string, args ...string) (string, error) {
 	full := append([]string{name}, args...)
-	cmd := exec.Command(full[0], full[1:]...)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, full[0], full[1:]...)
 	cmd.Env = append(os.Environ(),
 		"PATH=/opt/homebrew/opt/postgresql@17/bin:"+os.Getenv("PATH"))
 	out, err := cmd.CombinedOutput()
@@ -537,17 +581,20 @@ func stopInstantd(p *exec.Cmd) {
 	_, _ = p.Process.Wait()
 }
 
+// chaosHTTP bounds every probe so a wedged handler cannot hang the harness.
 // waitHealth polls /health until it matches wantUp (200 = up, anything else
 // including connection errors counts as down).
+var chaosHTTP = &http.Client{Timeout: 5 * time.Second}
+
 func waitHealth(baseURL string, timeout time.Duration, wantUp bool) error {
 	deadline := time.Now().Add(timeout)
 	var last string
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(baseURL + "/health")
+		resp, err := chaosHTTP.Get(baseURL + "/health")
 		if err != nil {
 			last = err.Error()
 		} else {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			last = fmt.Sprintf("status %d", resp.StatusCode)
 			if (resp.StatusCode == http.StatusOK) == wantUp {
 				return nil
@@ -599,7 +646,7 @@ func connectSession(n int, wsURL, appID string) (*sessionStats, error) {
 	}
 	defer func() {
 		if err != nil {
-			conn.CloseNow()
+			_ = conn.CloseNow()
 		}
 	}()
 	conn.SetReadLimit(64 << 20)
@@ -645,6 +692,9 @@ func connectSession(n int, wsURL, appID string) (*sessionStats, error) {
 		switch f.op() {
 		case "add-query-ok":
 		case "refresh-ok":
+			stats.mu.Lock()
+			stats.rawResult = string(f["computations"])
+			stats.mu.Unlock()
 			ids, perr := extractEntities(f)
 			if perr != nil {
 				return stats, fmt.Errorf("parse refresh-ok: %w", perr)
@@ -709,8 +759,13 @@ func readFrame(conn *websocket.Conn, timeout time.Duration) (frame, error) {
 	return f, nil
 }
 
-// extractEntities pulls the etype's entity ids out of a refresh-ok payload:
-// {computations:[{instaql-result:{data:{chaos-items:[{id,...}]}}}]}.
+// extractEntities pulls the entity ids out of a refresh-ok payload's
+// instaql-result. Two wire shapes are handled:
+//
+//   - v1 node list (current): an array of nodes whose
+//     data['datalog-result']['join-rows'] rows are [entity-id, attr-id, value]
+//     triples (internal/sync/nodelist.go);
+//   - flat envelope (legacy fallback): {data:{etype:[{id,...}]}}.
 func extractEntities(f frame) (map[string]bool, error) {
 	rawComp, ok := f["computations"]
 	if !ok {
@@ -725,15 +780,44 @@ func extractEntities(f frame) (map[string]bool, error) {
 	if len(comps) == 0 {
 		return nil, errors.New("empty computations")
 	}
+
+	out := map[string]bool{}
+
+	// Node-list shape: try first; fall back to the flat envelope.
+	// v1 collect-instaql-results-for-client emits ONE flat join-row whose
+	// elements are [entity-id, attr-id, value] triples (query.clj:100).
+	var nodes []struct {
+		Data struct {
+			DatalogResult struct {
+				JoinRows [][]json.RawMessage `json:"join-rows"`
+			} `json:"datalog-result"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(comps[0].Result, &nodes); err == nil && len(nodes) > 0 {
+		for _, n := range nodes {
+			for _, row := range n.Data.DatalogResult.JoinRows {
+				for _, t := range row {
+					var triple []any
+					if json.Unmarshal(t, &triple) != nil || len(triple) == 0 {
+						continue
+					}
+					if eid, ok := triple[0].(string); ok {
+						out[eid] = true
+					}
+				}
+			}
+		}
+		return out, nil
+	}
+
 	var res struct {
 		Data map[string][]struct {
 			ID string `json:"id"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(comps[0].Result, &res); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unmarshal %s: %w", comps[0].Result, err)
 	}
-	out := map[string]bool{}
 	for _, es := range res.Data {
 		for _, e := range es {
 			out[e.ID] = true
@@ -754,12 +838,15 @@ func writerLoop(baseURL, appID, attrID string, writes int) ([]journalEntry, int,
 		rejected int
 	)
 	for i := 0; i < writes; i++ {
-		entity := fmt.Sprintf("e%d", i)
-		txID, code, err := postTransact(baseURL, appID, attrID, entity)
+		entity := writeEntityID(i)
+		txID, code, body, err := postTransact(baseURL, appID, attrID, entity)
 		if err == nil && code == 200 {
 			journal = append(journal, journalEntry{Entity: entity, TxID: txID})
 		} else {
 			rejected++
+			if len(journal) == 0 && rejected == 1 {
+				return nil, rejected, fmt.Errorf("writer: first write rejected (status %d): %s", code, body)
+			}
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -769,25 +856,44 @@ func writerLoop(baseURL, appID, attrID string, writes int) ([]journalEntry, int,
 	return journal, rejected, nil
 }
 
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
+}
+
+// writeEntityID derives a stable UUID-shaped eid for write index i
+// (transact parses eids as UUIDs).
+func writeEntityID(i int) string {
+	var u [16]byte
+	u[6], u[8] = 0x40, 0x80 // v4-ish layout bits
+	for pos, shift := 15, 0; pos >= 10 && shift < 48; pos, shift = pos-1, shift+8 {
+		u[pos] = byte(i >> uint(shift))
+	}
+	return formatUUID(u)
+}
+
 // postTransact adds triple (entity, attrID, 1). Returns tx-id, HTTP status,
-// and transport/decode error if any.
-func postTransact(baseURL, appID, attrID, entity string) (int64, int, error) {
+// the raw response body (for diagnostics), and transport error if any.
+func postTransact(baseURL, appID, attrID, entity string) (int64, int, string, error) {
 	body := fmt.Sprintf(
 		`{"app-id":%q,"tx-steps":[["add-triple",%q,%q,1]]}`,
 		appID, entity, attrID)
-	resp, err := http.Post(baseURL+"/runtime/transact", "application/json", strings.NewReader(body))
+	resp, err := chaosHTTP.Post(baseURL+"/runtime/transact", "application/json", strings.NewReader(body))
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
 	var out struct {
 		TxID int64 `json:"tx-id"`
 	}
-	_ = json.NewDecoder(resp.Body).Decode(&out)
+	_ = json.Unmarshal(raw, &out)
 	if resp.StatusCode != 200 {
-		return out.TxID, resp.StatusCode, fmt.Errorf("transact status %d", resp.StatusCode)
+		return out.TxID, resp.StatusCode, strings.TrimSpace(string(raw)), fmt.Errorf("transact status %d", resp.StatusCode)
 	}
-	return out.TxID, resp.StatusCode, nil
+	return out.TxID, resp.StatusCode, strings.TrimSpace(string(raw)), nil
 }
 
 func diffSets(want, got map[string]bool) (extra, missing []string) {
@@ -883,6 +989,28 @@ func findRepoRoot() string {
 		}
 		dir = parent
 	}
+
+}
+
+// exportHead exports the repo's HEAD commit into a temp dir (read-only with
+// respect to the live working tree) and returns its path.
+func exportHead(repoRoot string) (string, error) {
+	dir, err := os.MkdirTemp("", "chaos-src-*")
+	if err != nil {
+		return "", err
+	}
+	tarball := filepath.Join(dir, "..", filepath.Base(dir)+"-head.tar")
+	defer func() { _ = os.Remove(tarball) }()
+	arch := exec.Command("git", "archive", "--format=tar", "-o", tarball, "HEAD")
+	arch.Dir = repoRoot
+	if out, err := arch.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("git archive: %v\n%s", err, out)
+	}
+	untar := exec.Command("tar", "-xf", tarball, "-C", dir)
+	if out, err := untar.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("tar extract: %v\n%s", err, out)
+	}
+	return dir, nil
 }
 
 func freePort() (int, error) {
@@ -890,6 +1018,6 @@ func freePort() (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer l.Close()
+	defer func() { _ = l.Close() }()
 	return l.Addr().(*net.TCPAddr).Port, nil
 }

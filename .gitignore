@@ -7,3 +7,6 @@ tmp/
 corpus/.tmp
 tools/corpusctl/corpusctl
 tools/schemagen/schemagen
+instantd
+chaos
+/tools/chaos/chaos

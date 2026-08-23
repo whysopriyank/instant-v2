@@ -3,6 +3,7 @@ package sync
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
@@ -94,14 +95,20 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		replies, err := h.Manager.Handle(ctx, sess, f)
-		if err != nil && len(replies) == 0 {
+		closing := errors.Is(err, ErrCloseSession)
+		if err != nil && !closing && len(replies) == 0 {
 			sendErr(500, "internal", err.Error())
 			continue
 		}
 		for _, rf := range replies {
-			if err := send(rf); err != nil {
+			if serr := send(rf); serr != nil {
 				return
 			}
+		}
+		if closing {
+			// e.g. subscription-cap breach: the error frame above went out;
+			// tear the connection down (deferred Close runs on return).
+			return
 		}
 		// add-query: run the initial snapshot immediately.
 		if op == "add-query" {
@@ -110,16 +117,24 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				if sub, ok := h.Store.Get(key); ok && h.Refresh != nil {
 					result, rerr := h.Refresh(ctx, sub)
 					if rerr == nil {
-						payload, _ := json.Marshal([]map[string]any{{
-							"instaql-query":  json.RawMessage(rawQ),
-							"instaql-result": result,
-						}})
-						_ = send(Frame{
-							"op":              json.RawMessage(`"refresh-ok"`),
-							"computations":    payload,
-							"processed-tx-id": json.RawMessage(mustJSON(0)),
-							"client-event-id": mustJSON(mustString(f, "client-event-id")),
-						})
+						// Baseline for delta-refresh diffs is always the flat
+						// envelope; the wire gets the v1 node-list.
+						sub.SetSnapshot(result)
+						nodes, nerr := nodelistFor(ctx, h.Manager.Deps.Catalogs, sess.AppID, result)
+						if nerr == nil {
+							payload, _ := json.Marshal([]map[string]any{{
+								"instaql-query":  json.RawMessage(rawQ),
+								"instaql-result": nodes,
+							}})
+							_ = send(Frame{
+								"op":              json.RawMessage(`"refresh-ok"`),
+								"computations":    payload,
+								"processed-tx-id": json.RawMessage(mustJSON(0)),
+								"client-event-id": mustJSON(mustString(f, "client-event-id")),
+							})
+						} else {
+							sendErr(500, "internal", nerr.Error())
+						}
 					} else {
 						sendErr(400, "invalid-query", rerr.Error())
 					}
