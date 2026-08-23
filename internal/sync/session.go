@@ -177,7 +177,9 @@ func (m *Manager) HandleInit(ctx context.Context, f Frame) (*Session, Frame, err
 		"session-id": json.RawMessage(mustJSON(sess.ID)),
 		"attrs":      b,
 		"auth":       json.RawMessage(mustJSON(authObj)),
-		"app-status": json.RawMessage(`{"status":"ok"}`),
+		// v1 app statuses are :active|:read-only|:disabled (app.clj:341) and the
+		// frozen SDK rejects writes unless status === "active" (Reactor._setAppStatus).
+		"app-status": json.RawMessage(`{"status":"active"}`),
 	}
 	if eid, _ := f.String("client-event-id"); eid != "" {
 		reply["client-event-id"] = json.RawMessage(mustJSON(eid))
