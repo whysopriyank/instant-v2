@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"embed"
 	"fmt"
+	"io/fs"
 
 	"github.com/pressly/goose/v3"
 )
@@ -16,7 +17,11 @@ var migrationsFS embed.FS
 // Migrate applies all pending embedded migrations under an advisory lock so that
 // concurrent instantd instances do not race DDL.
 func Migrate(ctx context.Context, db *sql.DB) error {
-	g, err := goose.NewProvider(goose.DialectPostgres, db, migrationsFS)
+	mfs, err := fs.Sub(migrationsFS, "migrations")
+	if err != nil {
+		return fmt.Errorf("migrations sub-fs: %w", err)
+	}
+	g, err := goose.NewProvider(goose.DialectPostgres, db, mfs)
 	if err != nil {
 		return fmt.Errorf("goose provider: %w", err)
 	}
