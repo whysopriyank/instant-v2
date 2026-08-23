@@ -21,7 +21,7 @@ import (
 )
 
 // fakeDeps builds a Manager+Store+Refresh wired to a live DB without HTTP.
-func fakeStack(t *testing.T) (*syncpkg.Manager, *reactive.Store, *reactive.Notifier, *instaql.Executor, [16]byte, *platform.AttrCatalog, qattr) {
+func fakeStack(t *testing.T) (*syncpkg.Manager, *reactive.Store, *reactive.Notifier, *instaql.Executor, [16]byte, *platform.CatalogCache, qattr) {
 	t.Helper()
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
@@ -52,8 +52,7 @@ func fakeStack(t *testing.T) (*syncpkg.Manager, *reactive.Store, *reactive.Notif
 		}
 		return e3
 	})
-	cat, err := cats.For(ctx, uuidStr(appID))
-	if err != nil {
+	if _, err := cats.For(ctx, uuidStr(appID)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -68,6 +67,7 @@ func fakeStack(t *testing.T) (*syncpkg.Manager, *reactive.Store, *reactive.Notif
 	go notifier.Run(ctx)
 
 	mgr := syncpkg.NewManager(syncpkg.Deps{
+		Rooms:    syncpkg.NewRoomHub(),
 		DB:       st,
 		Catalogs: cats,
 		Store:    store,
@@ -76,7 +76,7 @@ func fakeStack(t *testing.T) (*syncpkg.Manager, *reactive.Store, *reactive.Notif
 		},
 	})
 	t.Cleanup(func() { _ = pool })
-	return mgr, store, notifier, ex, appID, cat, qattr{title: title.ID, done: done.ID, link: link.ID}
+	return mgr, store, notifier, ex, appID, cats, qattr{title: title.ID, done: done.ID, link: link.ID}
 }
 
 type qattr struct{ title, done, link [16]byte }
@@ -84,13 +84,12 @@ type qattr struct{ title, done, link [16]byte }
 // TestSessionFlow runs init → add-query → transact → refresh-ok over an
 // httptest WS server, proving the reactive loop end-to-end.
 func TestSessionFlow(t *testing.T) {
-	mgr, store, notifier, ex, appID, _, ids := fakeStack(t)
-	catsHolder := platform.NewCatalogCache(mustPool(t, os.Getenv("DATABASE_URL")), mustPool(t, os.Getenv("DATABASE_URL")))
+	mgr, store, notifier, ex, appID, cats, ids := fakeStack(t)
 	wsHandler := &syncpkg.WSHandler{
 		Manager: mgr,
 		Store:   store,
 		Refresh: func(ctx context.Context, sub *reactive.Subscription) (json.RawMessage, error) {
-			return runQuery(ex, catsHolder, sub)
+			return runQuery(ex, cats, sub)
 		},
 	}
 	srv := httptest.NewServer(wsHandler)
@@ -152,7 +151,7 @@ func TestSessionFlow(t *testing.T) {
 	_ = notifier
 }
 
-func expectOp(t *testing.T, frames chan map[string]any, op string) {
+func expectOp(t *testing.T, frames chan map[string]any, op string) map[string]any {
 	t.Helper()
 	deadline := time.After(5 * time.Second)
 	for {
@@ -164,7 +163,7 @@ func expectOp(t *testing.T, frames chan map[string]any, op string) {
 				t.Fatalf("connection closed waiting for %s", op)
 			}
 			if got, _ := f["op"].(string); got == op {
-				return
+				return f
 			}
 		}
 	}

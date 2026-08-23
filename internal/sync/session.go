@@ -58,12 +58,19 @@ func Negotiate(versions map[string]string) Features {
 	return out
 }
 
+// Authenticator resolves an init refresh-token to a user record. Implemented
+// by internal/authn.Service.
+type Authenticator interface {
+	VerifyRefreshTokenAsMap(ctx context.Context, appID [16]byte, rawToken string) (map[string]any, bool, error)
+}
+
 // Deps are the services a session needs.
 type Deps struct {
 	DB       *storage.DB
 	Catalogs *platform.CatalogCache
 	Store    *reactive.Store
-	Auth     func(ctx context.Context, appID string, refreshToken string) (map[string]any, error)
+	Auth     Authenticator
+	Rooms    *RoomHub
 	OnCommit func(ctx context.Context, appID string, attrIDs []string, txID int64)
 	Logger   *slog.Logger
 }
@@ -105,6 +112,7 @@ func (m *Manager) HandleInit(ctx context.Context, f Frame) (*Session, Frame, err
 	if appID == "" {
 		return nil, ErrFrame(400, "missing-app-id", "init requires app-id"), fmt.Errorf("missing app-id")
 	}
+	_ = ctx // reserved for async auth resolution
 	var versions map[string]string
 	if raw, ok := f["versions"]; ok {
 		_ = json.Unmarshal(raw, &versions)
@@ -124,25 +132,37 @@ func (m *Manager) HandleInit(ctx context.Context, f Frame) (*Session, Frame, err
 		}
 		sess.Admin = ok
 	}
+	var user map[string]any
 	if rt, _ := f.String("refresh-token"); rt != "" && m.Deps.Auth != nil {
-		user, err := m.Deps.Auth(ctx, appID, rt)
-		if err == nil && user != nil {
-			sess.AuthUser = user
+		appUUID, perr := platform.ScanUUIDErr(appID)
+		if perr == nil {
+			if u, ok, aerr := m.Deps.Auth.VerifyRefreshTokenAsMap(ctx, appUUID, rt); aerr == nil && ok {
+				user = u
+				sess.AuthUser = u
+			}
 		}
 	}
 	cat, err := m.Deps.Catalogs.For(ctx, appID)
 	if err != nil {
 		return nil, ErrFrame(404, "unknown-app", "no such app"), err
 	}
-	attrsPayload := json.RawMessage("[]")
-	if !sess.Features["skip-attrs"] {
-		b, _ := json.Marshal(cat.WireAttrs())
-		attrsPayload = b
+	// v1 ALWAYS includes attrs in init-ok (session.clj L186); skip-attrs gates
+	// whether refresh frames re-send unchanged attrs, not init.
+	b, _ := json.Marshal(cat.WireAttrs())
+	authObj := map[string]any{
+		"app":    map[string]any{"id": appID},
+		"user":   user,
+		"admin?": sess.Admin,
 	}
 	reply := Frame{
 		"op":         json.RawMessage(`"init-ok"`),
 		"session-id": json.RawMessage(mustJSON(sess.ID)),
-		"attrs":      attrsPayload,
+		"attrs":      b,
+		"auth":       json.RawMessage(mustJSON(authObj)),
+		"app-status": json.RawMessage(`{"status":"ok"}`),
+	}
+	if eid, _ := f.String("client-event-id"); eid != "" {
+		reply["client-event-id"] = json.RawMessage(mustJSON(eid))
 	}
 	return sess, reply, nil
 }
@@ -173,13 +193,21 @@ func (m *Manager) Handle(ctx context.Context, sess *Session, f Frame) ([]Frame, 
 		return m.handleTransact(ctx, sess, f)
 	case "error":
 		return nil, nil // client-side reports logged upstream; no reply
-	case "join-room", "leave-room", "set-presence", "refresh-presence",
-		"client-broadcast", "server-broadcast", "start-sync", "remove-sync",
+	case "join-room":
+		return m.Deps.Rooms.Join(ctx, sess, f)
+	case "leave-room":
+		return m.Deps.Rooms.Leave(ctx, sess, f)
+	case "set-presence":
+		return m.Deps.Rooms.SetPresence(ctx, sess, f)
+	case "refresh-presence":
+		// Client-initiated resync: full current room state to requester only.
+		return m.Deps.Rooms.RefreshPresence(ctx, sess, f)
+	case "client-broadcast":
+		return m.Deps.Rooms.ClientBroadcast(ctx, sess, f)
+	case "server-broadcast", "start-sync", "remove-sync",
 		"refresh-sync-table", "resync-table", "start-stream", "append-stream",
 		"subscribe-stream", "unsubscribe-stream":
-		// Rooms/presence/streams arrive in Phase 6 hardening; accepted and
-		// acknowledged so clients don't stall, semantics deferred with the
-		// in-process pubsub interface stub.
+		// Delta-sync/stream surface arrives in Phase 6; ack so clients don't stall.
 		return []Frame{{"op": mustRaw(fmt.Sprintf("%q", op+"-ok"))}}, nil
 	default:
 		// Unknown ops are logged-and-ignored — the forward-compat lever.

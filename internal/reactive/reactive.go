@@ -26,12 +26,12 @@ type Frame struct {
 
 // Subscription is one registered live query.
 type Subscription struct {
-	ID      string
-	AppID   string
-	Query   json.RawMessage
-	Topics  map[string]bool // attr-id set from the compiled plan
-	TxID    int64
-	Emit    func(Frame)
+	ID        string
+	AppID     string
+	Query     json.RawMessage
+	Topics    map[string]bool // attr-id set from the compiled plan
+	TxID      int64
+	Emit      func(Frame)
 	Cancelled bool
 }
 
@@ -157,8 +157,15 @@ func (n *Notifier) Notify(ctx context.Context, appID string, attrIDs []string, t
 	}
 }
 
-// Run processes pending refreshes until ctx ends. One goroutine drains all
-// apps; refreshes are serialized to keep per-app ordering deterministic.
+// Workers is the refresh concurrency. Queries hit Postgres independently, so
+// draining in parallel is safe; per-subscription ordering stays deterministic
+// because a sub re-dirtied mid-refresh is simply re-enqueued with its newer
+// tx-id and drained again.
+var Workers = 16
+
+// Run processes pending refreshes until ctx ends. Each drain pass snapshots
+// the pending set and re-queries it through a bounded worker pool — one pass
+// costs O(dirty/workers) instead of serializing every subscription.
 func (n *Notifier) Run(ctx context.Context) {
 	log := n.Logger
 	if log == nil {
@@ -171,39 +178,55 @@ func (n *Notifier) Run(ctx context.Context) {
 			return
 		case <-n.wake:
 		}
+
 		for {
+			// Snapshot one drain batch.
 			n.mu.Lock()
-			id := ""
-			txID := int64(0)
-			for sid, t := range n.pending {
-				id, txID = sid, t
-				break
-			}
-			if id == "" {
+			if len(n.pending) == 0 {
 				n.mu.Unlock()
 				break
 			}
-			delete(n.pending, id)
+			batch := n.pending
+			n.pending = map[string]int64{}
 			n.mu.Unlock()
 
-			sub, ok := n.Store.Get(id)
-			if !ok || sub.Cancelled || txID <= sub.TxID {
-				continue
+			var wg sync.WaitGroup
+			sem := make(chan struct{}, Workers)
+			for id, txID := range batch {
+				wg.Add(1)
+				select {
+				case sem <- struct{}{}:
+				case <-ctx.Done():
+					wg.Done()
+					continue
+				}
+				go func(id string, txID int64) {
+					defer func() { <-sem; wg.Done() }()
+					n.refreshOne(ctx, log, id, txID)
+				}(id, txID)
 			}
-			result, err := n.Refresh(ctx, sub)
-			if err != nil {
-				log.Error("reactive: refresh failed", "sub", id, "err", err)
-				continue
-			}
-			sub.TxID = txID
-			if sub.Emit != nil {
-				sub.Emit(Frame{
-					SubID:         id,
-					QueryJSON:     sub.Query,
-					ResultJSON:    result,
-					ProcessedTxID: txID,
-				})
-			}
+			wg.Wait()
 		}
+	}
+}
+
+func (n *Notifier) refreshOne(ctx context.Context, log *slog.Logger, id string, txID int64) {
+	sub, ok := n.Store.Get(id)
+	if !ok || sub.Cancelled || txID <= sub.TxID {
+		return
+	}
+	result, err := n.Refresh(ctx, sub)
+	if err != nil {
+		log.Error("reactive: refresh failed", "sub", id, "err", err)
+		return
+	}
+	sub.TxID = txID // watermark AFTER successful emit materialization
+	if sub.Emit != nil {
+		sub.Emit(Frame{
+			SubID:         id,
+			QueryJSON:     sub.Query,
+			ResultJSON:    result,
+			ProcessedTxID: txID,
+		})
 	}
 }

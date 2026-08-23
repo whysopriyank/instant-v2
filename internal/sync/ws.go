@@ -19,6 +19,8 @@ type WSHandler struct {
 	Store   *reactive.Store
 	// Refresh compiles+runs a subscription query; wired from instaql in assembly.
 	Refresh func(ctx context.Context, sub *reactive.Subscription) (json.RawMessage, error)
+
+	live connRegistry // live conns for graceful drain
 }
 
 func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -29,6 +31,11 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
+	// refresh-ok carries full InstaQL results; large apps blow past the
+	// 32 KiB default read limit before any sane bound. Writes are unbounded.
+	conn.SetReadLimit(64 << 20)
+	h.live.add(conn)
+	defer h.live.remove(conn)
 	defer conn.Close(websocket.StatusNormalClosure, "")
 
 	ctx := r.Context()
@@ -52,11 +59,12 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	for {
 		_, data, err := conn.Read(ctx)
 		if err != nil {
-			// Tear down this session's subscriptions.
+			// Tear down this session's subscriptions and rooms.
 			if sess != nil {
 				for id := range sess.Subs {
 					h.Store.Remove(id)
 				}
+				h.Manager.Deps.Rooms.LeaveAll(sess)
 			}
 			return
 		}

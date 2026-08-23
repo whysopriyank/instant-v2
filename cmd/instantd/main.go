@@ -15,7 +15,9 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/jackc/pgx/v5/pgxpool"
+	_ "github.com/jackc/pgx/v5/stdlib"
 
+	"github.com/instant-v2/instant-v2/internal/authn"
 	"github.com/instant-v2/instant-v2/internal/config"
 	"github.com/instant-v2/instant-v2/internal/instaql"
 	"github.com/instant-v2/instant-v2/internal/platform"
@@ -80,7 +82,14 @@ func run(logger *slog.Logger) error {
 		}
 		logger.Info("schema ready", "version", v)
 
-		pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+		poolCfg, err := pgxpool.ParseConfig(cfg.DatabaseURL)
+		if err != nil {
+			return err
+		}
+		if poolCfg.MaxConns < 32 {
+			poolCfg.MaxConns = 32 // reactive refreshes + transacts share the pool
+		}
+		pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 		if err != nil {
 			return err
 		}
@@ -97,11 +106,23 @@ func run(logger *slog.Logger) error {
 		}
 		go notifier.Run(ctx)
 
+		authSvc := &authn.Service{
+			DB:       st,
+			Pool:     pool,
+			Catalogs: cats,
+			Logger:   logger,
+		}
 		mgr := syncpkg.NewManager(syncpkg.Deps{
 			DB:       st,
 			Catalogs: cats,
 			Store:    store,
-			Logger:   logger,
+			Rooms:    syncpkg.NewRoomHub(),
+			Auth:     authSvc,
+			OnCommit: func(ctx context.Context, appID string, attrIDs []string, txID int64) {
+				// Single-node direct post-commit invalidation.
+				notifier.Notify(ctx, appID, attrIDs, txID)
+			},
+			Logger: logger,
 		})
 		ws = &syncpkg.WSHandler{
 			Manager: mgr,
@@ -128,6 +149,8 @@ func run(logger *slog.Logger) error {
 		}
 		mux.Handle("GET /runtime/session", ws)
 
+		mux.Handle("POST /runtime/auth/", &authn.Handler{Service: authSvc})
+
 		// Post-commit invalidation bridge: wraps transact via HTTP-level hook.
 		bridge := &notifierBridge{pool: pool, n: notifier}
 		mux.Handle("POST /runtime/transact", transactHandler(st, cats, bridge))
@@ -144,6 +167,14 @@ func run(logger *slog.Logger) error {
 	select {
 	case <-ctx.Done():
 		logger.Info("shutdown signal received")
+		// Phase 4 order: stop accepting → drain live WS sessions (1001) →
+		// then close the HTTP server.
+		if ws != nil {
+			drainCtx, dcancel := context.WithTimeout(context.Background(), 10*time.Second)
+			ws.Drain(drainCtx)
+			dcancel()
+			logger.Info("ws sessions drained")
+		}
 		shutCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		return srv.Shutdown(shutCtx)
