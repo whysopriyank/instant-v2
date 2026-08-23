@@ -1,0 +1,5 @@
+{"dir":"meta","raw":{"suite":"00-smoke","sdkVersion":"0.22.0","seedFixture":"smoke","featureGates":{}}}
+{"dir":"c2s","raw":{"op":"init","app-id":"00000000-0000-4000-8000-000000000001","versions":{"@instantdb/core":"0.22.0"},"client-event-id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}}
+{"dir":"s2c","raw":{"op":"init-ok","session-id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","auth":null,"attrs":[],"client-event-id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}}
+{"dir":"c2s","raw":{"op":"add-query","q":{"posts":{}},"client-event-id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc"}}
+{"dir":"s2c","raw":{"op":"refresh-ok","computations":[{"instaql-query":{"posts":{}},"instaql-result":{"data":{"posts":[]}}}],"processed-tx-id":0,"processed-isn":0,"client-event-id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc"}}

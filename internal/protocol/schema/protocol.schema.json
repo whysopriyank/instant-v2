@@ -1,0 +1,323 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://instant-v2.dev/schema/protocol",
+  "title": "Instant v2 wire protocol",
+  "description": "Frozen surface from docs/03-protocol.md — v1 parity contract. Generated artifacts: internal/protocol/*.go + internal/protocol/protocol.d.ts.",
+  "type": "object",
+  "definitions": {
+    "wsOp": {
+      "type": "string",
+      "enum": [
+        "init",
+        "add-query",
+        "remove-query",
+        "transact",
+        "error",
+        "join-room",
+        "leave-room",
+        "set-presence",
+        "refresh-presence",
+        "client-broadcast",
+        "server-broadcast",
+        "start-sync",
+        "remove-sync",
+        "refresh-sync-table",
+        "resync-table",
+        "start-stream",
+        "append-stream",
+        "subscribe-stream",
+        "unsubscribe-stream",
+        "init-ok",
+        "add-query-ok",
+        "add-query-exists",
+        "remove-query-ok",
+        "refresh-ok",
+        "transact-ok",
+        "presence",
+        "app-status-changed"
+      ]
+    },
+    "clientEnvelope": {
+      "type": "object",
+      "required": ["op"],
+      "properties": {
+        "op": { "$ref": "#/definitions/wsOp" },
+        "client-event-id": { "type": "string" },
+        "app-id": { "type": "string" },
+        "refresh-token": { "type": "string" },
+        "versions": { "type": "object", "additionalProperties": { "type": "string" } },
+        "q": { "type": "object", "description": "InstaQL query (see definitions/instaQLOptions)" },
+        "tx-steps": { "type": "array", "items": { "$ref": "#/definitions/txStep" } },
+        "room-type": { "type": "string" },
+        "room-id": { "type": "string" },
+        "data": {},
+        "is-patch": { "type": "boolean" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "op": { "const": "init" } } },
+          "then": {
+            "properties": {
+              "__admin-token": { "type": "string" }
+            }
+          }
+        }
+      ]
+    },
+    "serverEnvelope": {
+      "type": "object",
+      "required": ["op"],
+      "properties": {
+        "op": { "$ref": "#/definitions/wsOp" },
+        "client-event-id": { "type": "string" },
+        "session-id": { "type": "string" },
+        "auth": { "type": ["object", "null"] },
+        "attrs": { "type": "array", "items": { "$ref": "#/definitions/attr" } },
+        "computations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["instaql-query", "instaql-result"],
+            "properties": {
+              "instaql-query": { "type": "object" },
+              "instaql-result": { "type": "object" }
+            }
+          }
+        },
+        "processed-tx-id": { "type": "integer" },
+        "processed-isn": { "type": "integer" },
+        "tx-id": { "type": "integer" },
+        "isn": { "type": "integer" },
+        "status": { "type": "integer" },
+        "type": { "type": "string" },
+        "message": { "type": "string" },
+        "hint": { "type": "string" }
+      }
+    },
+    "txStep": {
+      "description": "One element of the frozen tx-steps grammar (docs/03 §4). Array form, op is element 0. See internal/protocol for the tagged-union type.",
+      "oneOf": [
+        {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 5,
+          "prefixItems": [
+            { "const": "add-triple" },
+            {},
+            {},
+            {}
+          ],
+          "items": false
+        },
+        {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "prefixItems": [
+            { "const": "deep-merge-triple" },
+            {},
+            {},
+            {}
+          ]
+        },
+        {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "prefixItems": [
+            { "const": "retract-triple" },
+            {},
+            {},
+            {}
+          ]
+        },
+        {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "prefixItems": [
+            { "const": "delete-entity" },
+            {},
+            { "type": "string" }
+          ]
+        },
+        {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            { "const": "add-attr" },
+            { "$ref": "#/definitions/attr" }
+          ]
+        },
+        {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            { "const": "update-attr" },
+            { "type": "object" }
+          ]
+        },
+        {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            { "enum": ["delete-attr", "restore-attr"] },
+            { "type": "string" }
+          ]
+        },
+        {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            { "const": "rule-params" },
+            { "type": "object", "description": "Ephemeral per-transaction CEL params; not persisted" }
+          ]
+        }
+      ]
+    },
+    "attr": {
+      "type": "object",
+      "required": ["id", "value-type", "cardinality", "forward-identity"],
+      "properties": {
+        "id": { "type": "string" },
+        "value-type": { "type": "string", "enum": ["blob", "ref"] },
+        "cardinality": { "type": "string", "enum": ["one", "many"] },
+        "forward-identity": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "reverse-identity": {
+          "type": ["array", "null"],
+          "items": { "type": "string" }
+        },
+        "unique?": { "type": "boolean" },
+        "index?": { "type": "boolean" },
+        "required?": { "type": "boolean" },
+        "primary?": { "type": "boolean" },
+        "on-delete": { "type": ["string", "null"] },
+        "on-delete-reverse": { "type": ["string", "null"] },
+        "checked-data-type": { "type": ["string", "null"], "enum": ["string", "number", "boolean", "date", "json", null] },
+        "indexing?": { "type": "boolean" },
+        "setting-unique?": { "type": "boolean" }
+      }
+    },
+    "instaQLOptions": {
+      "type": "object",
+      "properties": {
+        "where": { "type": "object" },
+        "order": { "type": "object" },
+        "limit": { "type": "integer" },
+        "first": { "type": "integer" },
+        "last": { "type": "integer" },
+        "offset": { "type": "integer" },
+        "before": { "type": "string" },
+        "after": { "type": "string" },
+        "beforeInclusive": { "type": "boolean" },
+        "afterInclusive": { "type": "boolean" },
+        "aggregate": { "type": "string", "enum": ["count"] },
+        "fields": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "whereOps": {
+      "type": "string",
+      "enum": ["$in", "in", "$not", "$ne", "$isNull", "$gt", "$gte", "$lt", "$lte", "$like", "$ilike", "$entityIdStartsWith"]
+    },
+    "errorEnvelope": {
+      "type": "object",
+      "required": ["status", "type", "message"],
+      "properties": {
+        "status": { "type": "integer" },
+        "type": { "type": "string" },
+        "message": { "type": "string" },
+        "hint": { "type": "string" }
+      }
+    },
+    "ruleDoc": {
+      "description": "One rules.code JSONB doc per app (docs/03 §8). Keys are etypes, 'attrs', '$default', '$rateLimits'.",
+      "type": "object",
+      "properties": {
+        "$default": { "type": "object" },
+        "attrs": { "type": "object" },
+        "$rateLimits": { "type": "object" }
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "bind": { "type": "array", "items": { "type": "string" } },
+          "allow": {
+            "type": "object",
+            "properties": {
+              "view": { "type": "string" },
+              "create": { "type": "string" },
+              "update": { "type": "string" },
+              "delete": { "type": "string" },
+              "link": { "type": "string" },
+              "unlink": { "type": "string" },
+              "$default": { "type": "string" }
+            }
+          },
+          "fields": {
+            "type": "object",
+            "additionalProperties": { "type": "string" }
+          }
+        }
+      }
+    },
+    "adminRoute": {
+      "type": "string",
+      "enum": [
+        "/admin/query",
+        "/admin/transact",
+        "/admin/query_perms_check",
+        "/admin/transact_perms_check",
+        "/admin/subscribe-query",
+        "/admin/sse",
+        "/admin/sign_out",
+        "/admin/refresh_tokens",
+        "/admin/users",
+        "/admin/schema",
+        "/admin/rooms/presence"
+      ]
+    },
+    "runtimeRoute": {
+      "type": "string",
+      "enum": [
+        "/runtime/auth/send_magic_code",
+        "/runtime/auth/verify_magic_code",
+        "/runtime/auth/sign_out",
+        "/runtime/auth/refresh_tokens",
+        "/runtime/auth/sign_in_guest",
+        "/runtime/session",
+        "/runtime/sse",
+        "/runtime/signout",
+        "/runtime/framework/query",
+        "/runtime/oauth/start",
+        "/runtime/oauth/callback",
+        "/runtime/oauth/token",
+        "/runtime/oauth/id_token",
+        "/runtime/openid-configuration"
+      ]
+    },
+    "storageRoute": {
+      "type": "string",
+      "enum": [
+        "/storage/upload",
+        "/storage/files",
+        "/storage/signed-upload-url",
+        "/storage/signed-download-url"
+      ]
+    }
+  },
+  "properties": {
+    "_comment": {
+      "type": "string",
+      "description": "This root object is a schema envelope only; frame envelopes are the two refs below."
+    }
+  }
+}
