@@ -322,3 +322,10 @@ func (d *DB) WithTx(ctx context.Context, fn func(tx pgx.Tx) error) error {
 	}
 	return tx.Commit(ctx)
 }
+
+// SetTx inserts triples inside an existing transaction with the supplied
+// catalog, preserving the single-tx invariant the transact pipeline needs.
+func (d *DB) SetTx(ctx context.Context, tx pgx.Tx, appID [16]byte, cat *platform.AttrCatalog, ts []triple.Triple, overwriteT bool) error {
+	_, err := insertBatch(ctx, tx, appID, cat, ts, overwriteT)
+	return err
+}

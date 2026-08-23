@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 // shippedFiles asserts that the embedded migrations directory contains at least
