@@ -17,12 +17,15 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib"
 
+	"github.com/instant-v2/instant-v2/internal/adminapi"
 	"github.com/instant-v2/instant-v2/internal/authn"
 	"github.com/instant-v2/instant-v2/internal/config"
 	"github.com/instant-v2/instant-v2/internal/instaql"
 	"github.com/instant-v2/instant-v2/internal/platform"
 	"github.com/instant-v2/instant-v2/internal/reactive"
+	"github.com/instant-v2/instant-v2/internal/runtimeapi"
 	"github.com/instant-v2/instant-v2/internal/storage"
+	"github.com/instant-v2/instant-v2/internal/storageapi"
 	syncpkg "github.com/instant-v2/instant-v2/internal/sync"
 	"github.com/instant-v2/instant-v2/internal/transact"
 )
@@ -147,9 +150,46 @@ func run(logger *slog.Logger) error {
 				return json.Marshal(res)
 			},
 		}
+		sseH := &syncpkg.SSEHandler{
+			Manager: mgr,
+			Store:   store,
+			Refresh: refreshFor(ex, cats),
+		}
 		mux.Handle("GET /runtime/session", ws)
+		mux.HandleFunc("GET /runtime/sse", sseH.ServeHTTP)
+		mux.HandleFunc("POST /runtime/sse", sseH.ServeHTTP)
 
+		runtimeH := &runtimeapi.Handler{
+			Pool:     pool,
+			DB:       st,
+			Catalogs: cats,
+			Auth:     authSvc,
+		}
+		// Exact-path routes win over the authn prefix below.
+		mux.Handle("POST /runtime/auth/refresh_tokens", runtimeH)
+		mux.Handle("POST /runtime/signout", runtimeH)
+		mux.Handle("POST /runtime/framework/query", runtimeH)
+		mux.Handle("GET /runtime/openid-configuration", runtimeH)
+		mux.Handle("GET /runtime/{app_id}/.well-known/openid-configuration", runtimeH)
 		mux.Handle("POST /runtime/auth/", &authn.Handler{Service: authSvc})
+
+		mux.Handle("/admin/", &adminapi.Handler{
+			Pool:     pool,
+			DB:       st,
+			Catalogs: cats,
+			Logger:   logger,
+		})
+
+		storeSecret := []byte(os.Getenv("INSTANT_V2_STORAGE_SECRET"))
+		if len(storeSecret) == 0 {
+			storeSecret = []byte(cfg.DatabaseURL) // deterministic dev fallback
+		}
+		mux.Handle("/storage/", &storageapi.Handler{
+			Store:    storageapi.NewDiskBackend(os.TempDir()+"/instantv2-files", storeSecret),
+			Secret:   storeSecret,
+			Triples:  st,
+			Catalogs: cats,
+		})
 
 		// Post-commit invalidation bridge: wraps transact via HTTP-level hook.
 		bridge := &notifierBridge{pool: pool, n: notifier}
