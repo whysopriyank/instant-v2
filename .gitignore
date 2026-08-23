@@ -1,0 +1,9 @@
+.DS_Store
+bin/
+dist/
+tmp/
+*.out
+*.test
+corpus/.tmp
+tools/corpusctl/corpusctl
+tools/schemagen/schemagen
