@@ -7,8 +7,6 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-
-	syncpkg "github.com/instant-v2/instant-v2/internal/sync"
 )
 
 // TestGracefulShutdownDrain proves a live session receives close code 1001
@@ -16,7 +14,7 @@ import (
 // connection is gone.
 func TestGracefulShutdownDrain(t *testing.T) {
 	env := newWSEnv(t)
-	handler := env.Server.Config.Handler.(*syncpkg.WSHandler)
+	handler := env.WS
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

@@ -3,6 +3,7 @@ package sync_test
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -20,6 +21,8 @@ type wsEnv struct {
 	AppID  string
 	IDs    qattr
 	Server *httptest.Server
+	WS     *syncpkg.WSHandler
+	SSE    *syncpkg.SSEHandler
 }
 
 func newWSEnv(t *testing.T) *wsEnv {
@@ -32,11 +35,21 @@ func newWSEnv(t *testing.T) *wsEnv {
 			return runQuery(ex, cats, sub)
 		},
 	}
+	sseHandler := &syncpkg.SSEHandler{
+		Manager: mgr,
+		Store:   store,
+		Refresh: handler.Refresh,
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/runtime/session", handler)
+	mux.Handle("/runtime/sse", sseHandler)
 	env := &wsEnv{
 		Mgr:    mgr,
 		AppID:  uuidStr(appID),
 		IDs:    ids,
-		Server: httptest.NewServer(handler),
+		Server: httptest.NewServer(mux),
+		WS:     handler,
+		SSE:    sseHandler,
 	}
 	t.Cleanup(env.Server.Close)
 	return env
@@ -45,7 +58,7 @@ func newWSEnv(t *testing.T) *wsEnv {
 // dial opens a WebSocket to env's server and starts a reader pump.
 func (e *wsEnv) dial(t *testing.T, ctx context.Context) (*websocket.Conn, chan map[string]any) {
 	t.Helper()
-	wsURL := "ws" + strings.TrimPrefix(e.Server.URL, "http")
+	wsURL := "ws" + strings.TrimPrefix(e.Server.URL, "http") + "/runtime/session"
 	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{CompressionMode: websocket.CompressionDisabled})
 	if err != nil {
 		t.Fatalf("dial: %v", err)

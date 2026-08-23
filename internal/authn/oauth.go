@@ -447,9 +447,15 @@ type ResolvedProvider struct {
 	ClientSecret string
 	TokenURL     string
 	UserInfo     string
-	authURL      string
-	scope        string
-	extraAuth    url.Values
+	Issuer       string // OIDC issuer for id_token verification
+	JWKSURL      string // JWKS discovery URL
+	// TrustUnsignedFallback allows id_tokens when JWKS is unreachable —
+	// NEVER set in production; test convenience only.
+	TrustUnsignedFallback bool
+
+	authURL   string
+	scope     string
+	extraAuth url.Values
 }
 
 // resolveProvider maps client-name to a concrete provider config. Custom OIDC

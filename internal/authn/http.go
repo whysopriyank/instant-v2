@@ -40,6 +40,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.oauthCallback(w, r)
 	case "/runtime/oauth/token":
 		h.oauthToken(w, r)
+	case "/runtime/oauth/id_token":
+		h.oauthIDToken(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -259,6 +261,28 @@ func (h *Handler) oauthToken(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := h.Service.OAuthToken(r.Context(), appID,
 		str(m, "code"), str(m, "code_verifier"))
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"message": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// oauthIDToken ports oauth-id-token-callback: the client presents a
+// third-party id_token directly; we verify it against the provider JWKS.
+func (h *Handler) oauthIDToken(w http.ResponseWriter, r *http.Request) {
+	m := readBody(r)
+	appID, err := h.parseAppID(m)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"message": err.Error()})
+		return
+	}
+	clientName := str(m, "client_name")
+	if clientName == "" {
+		clientName = "google"
+	}
+	res, err := h.Service.IDTokenSignIn(r.Context(), appID,
+		clientName, str(m, "id_token"), str(m, "nonce"))
 	if err != nil {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"message": err.Error()})
 		return

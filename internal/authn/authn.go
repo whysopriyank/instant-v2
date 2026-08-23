@@ -94,6 +94,10 @@ type Service struct {
 	// Providers overrides the builtin oauth registry (tests; custom OIDC
 	// clients land with apps.rules persistence in Phase 5).
 	Providers map[string]*ResolvedProvider
+	// Apple signs client-secret assertions when configured (.p8 material).
+	Apple *AppleSigner
+
+	jwks jwksCache
 }
 
 // Mailer delivers magic codes; self-hosted installs may no-op.
