@@ -26,7 +26,12 @@ Each workstream may run independently — none shares a package with another.
 - [x] Connection + per-app rate-limit policy (`internal/ratelimit`, token buckets per app+class, 429+Retry-After) (Bucket4j-equivalent, local-first; interface stub from Phase 2 made concrete).
 - [x] Resource limits: per-app subscription cap (+429 close) and invalidator queue-depth gauge, WAL backpressure signal when invalidator queue depth grows.
 - [x] Chaos harness: PG bounce mid-stream (`tools/chaos`; 8/8 reconnect, LSN checkpoint resume, zero phantom reads, journal-exact final state) → sessions reconnect, LSN resumes without phantom reads; `replay --target v2` still diffs 0 post-chaos.
-- [ ] Capacity target (OPEN): steady-state throughput within 30% of v1's Postgres-bound ceiling (the gate is regression protection, not ambition).
+- [x] Capacity target — MEASURED-V2-ONLY (comparative claim withdrawn): v2 numbers from Phase 4 soak stand (5000 sessions × 30 min, 13.4k tx @ 8/s sustained, 60k refreshes delivered, 0 drops; delta-refresh benchmark ~4285× wire savings on single-row mutation of 10k entities). No v1 baseline exists because no Java/Clojure environment was stood up; standing one up remains the only way to publish a v1-vs-v2 comparison.
+- [x] Browser examples replay — vite-vanilla ported with self-host URI overrides; exact browser surface driven via frozen @instantdb/core 1.0.65 from the example's node_modules (subscribeQuery snapshot on enriched ack, transact add/toggle/delete, live push each mutation). Visual browser verification NOT performed (no working browser device in session); found+fixed app-status 'ok'→'active' conformance bug during replay.
+- [x] Corpus fixture regeneration — 00-smoke rewritten to real v1 shapes (init-ok auth/app-status:'active', enriched add-query-ok); canonicalizer normalizes volatile session-id; replay green; chaos corpus step green.
+- [x] S3 backup backend — ObjectStore interface + minio-go S3Store; /object export-download + restore-object routes; fake-S3 tests under -race.
+- [x] Signed release publishing — goreleaser check passes; snapshot builds all 4 targets; cosign keygen→sign-blob→verify proven offline; CI does keyless signing at tag time (UPGRADE.md documents secrets + offline smoke).
+- [ ] BLOCKED (user decision): live v1 differential/capacity baseline steady-state throughput within 30% of v1's Postgres-bound ceiling (the gate is regression protection, not ambition).
 
 ## 6D — Docs + examples + release
 
