@@ -45,3 +45,20 @@ stack) who want to move to the Go daemon.
 
 Because v2 is additive on the same tables, stopping instantd and restarting v1
 against the same `DATABASE_URL` is a valid rollback path within a release.
+
+## Cutting a signed release
+
+1. Tag: `git tag vX.Y.Z && git push origin vX.Y.Z` — CI (.github/workflows/ci.yml) runs
+   `goreleaser release --clean`. Requires these repo secrets/variables:
+   - `GITHUB_TOKEN` (automatic), `COSIGN_YES=true` (keyless OIDC signing)
+   - `GITHUB_REPOSITORY` is provided by Actions.
+2. Artifacts per release: tar.gz archives (linux/darwin × amd64/arm64),
+   checksums.txt (cosign-signed), SBOMs, multi-arch GHCR manifest
+   `ghcr.io/<repo>:<tag>` + `:latest`, per-arch image digests signed keyless.
+3. Local dry-run without publishing:
+   - `goreleaser check`
+   - `goreleaser build --snapshot --clean`
+4. Offline signing smoke (no Rekor/network):
+   `cosign sign-blob --key k.key --signing-config sc.json --new-bundle-format --bundle b.bundle FILE`
+   then verify with `--bundle b.bundle --insecure-ignore-tlog`.
+   Current cosign CLI refuses `--tlog-upload=false`; use a signing-config.

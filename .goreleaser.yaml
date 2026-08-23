@@ -25,22 +25,38 @@ sboms:
 
 dockers:
   - use: buildx
-    goos: [linux]
-    goarch: [amd64, arm64]
+    goos: linux
+    goarch: amd64
     image_templates:
-      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY }}:{{ .Version }}"
-      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY }}:latest"
+      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY }}:{{ .Version }}-amd64"
     build_flag_templates:
-      - "--platform=linux/{{ .Arch }}"
+      - "--platform=linux/amd64"
     dockerfile: Dockerfile
+  - use: buildx
+    goos: linux
+    goarch: arm64
+    image_templates:
+      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY }}:{{ .Version }}-arm64"
+    build_flag_templates:
+      - "--platform=linux/arm64"
+    dockerfile: Dockerfile
+
+docker_manifests:
+  - name_template: "ghcr.io/{{ .Env.GITHUB_REPOSITORY }}:{{ .Version }}"
+    image_templates:
+      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY }}:{{ .Version }}-amd64"
+      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY }}:{{ .Version }}-arm64"
+  - name_template: "ghcr.io/{{ .Env.GITHUB_REPOSITORY }}:latest"
+    image_templates:
+      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY }}:{{ .Version }}-amd64"
+      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY }}:{{ .Version }}-arm64"
 
 docker_signs:
   - cmd: cosign
     artifacts: images
     output: true
-    certificate: "{{ .Env.COSIGN_CERTIFICATE }}"
     args:
-      - "sign-blob"
+      - "sign"
       - "--output-signature=${signature}"
       - "${artifact}"
       - "--yes"
@@ -49,7 +65,6 @@ signs:
   - cmd: cosign
     artifacts: checksum
     output: true
-    certificate: "{{ .Env.COSIGN_CERTIFICATE }}"
     args:
       - "sign-blob"
       - "--output-signature=${signature}"
