@@ -691,6 +691,20 @@ func connectSession(n int, wsURL, appID string) (*sessionStats, error) {
 		stats.Frames++
 		switch f.op() {
 		case "add-query-ok":
+			// v1 rides the initial answer on the ack itself
+			// (session.clj:264-270); accept either shape.
+			if _, has := f["result"]; !has {
+				continue
+			}
+			ids, perr := extractEntitiesFromResult(f["result"])
+			if perr != nil {
+				return stats, fmt.Errorf("parse add-query-ok result: %w", perr)
+			}
+			for id := range ids {
+				stats.finalIDs[id] = true
+			}
+			stats.FinalCount = len(ids)
+			gotInitial = true
 		case "refresh-ok":
 			stats.mu.Lock()
 			stats.rawResult = string(f["computations"])
@@ -780,7 +794,12 @@ func extractEntities(f frame) (map[string]bool, error) {
 	if len(comps) == 0 {
 		return nil, errors.New("empty computations")
 	}
+	return extractEntitiesFromResult(comps[0].Result)
+}
 
+// extractEntitiesFromResult decodes entity ids from either the node-list
+// instaql-result (WS path) or the bare object-tree (SSE/admin path).
+func extractEntitiesFromResult(raw json.RawMessage) (map[string]bool, error) {
 	out := map[string]bool{}
 
 	// Node-list shape: try first; fall back to the flat envelope.
@@ -793,7 +812,7 @@ func extractEntities(f frame) (map[string]bool, error) {
 			} `json:"datalog-result"`
 		} `json:"data"`
 	}
-	if err := json.Unmarshal(comps[0].Result, &nodes); err == nil && len(nodes) > 0 {
+	if err := json.Unmarshal(raw, &nodes); err == nil && len(nodes) > 0 {
 		for _, n := range nodes {
 			for _, row := range n.Data.DatalogResult.JoinRows {
 				for _, t := range row {
@@ -815,8 +834,8 @@ func extractEntities(f frame) (map[string]bool, error) {
 			ID string `json:"id"`
 		} `json:"data"`
 	}
-	if err := json.Unmarshal(comps[0].Result, &res); err != nil {
-		return nil, fmt.Errorf("unmarshal %s: %w", comps[0].Result, err)
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return nil, fmt.Errorf("unmarshal %s: %w", raw, err)
 	}
 	for _, es := range res.Data {
 		for _, e := range es {

@@ -29,9 +29,9 @@ type Meta struct {
 
 // Scenario is the decoded form of a single corpus *.ndjson file.
 type Scenario struct {
-	Meta    Meta
-	Steps   []Step
-	File    string // source path, for diagnostics only
+	Meta  Meta
+	Steps []Step
+	File  string // source path, for diagnostics only
 }
 
 // CanonicalBytes sorts JSON object keys recursively and lowercases any string
@@ -56,9 +56,19 @@ func CanonicalBytes(b []byte) ([]byte, error) {
 	return out, nil
 }
 
+// NormalizedSessionID replaces per-session volatile identifiers so goldens
+// compare stable across runs (v1 and v2 both mint random session ids).
+const NormalizedSessionID = "<session-id>"
+
 func canonicalizeValue(v any) any {
 	switch x := v.(type) {
 	case map[string]any:
+		if sv, ok := x["session-id"]; ok {
+			if _, isStr := sv.(string); isStr {
+				x = cloneMap(x)
+				x["session-id"] = NormalizedSessionID
+			}
+		}
 		keys := make([]string, 0, len(x))
 		for k := range x {
 			keys = append(keys, k)
@@ -83,6 +93,14 @@ func canonicalizeValue(v any) any {
 	default:
 		return v
 	}
+}
+
+func cloneMap(m map[string]any) map[string]any {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }
 
 func isUUIDish(s string) bool {

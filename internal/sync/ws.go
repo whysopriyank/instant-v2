@@ -100,6 +100,39 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			sendErr(500, "internal", err.Error())
 			continue
 		}
+		// add-query: v1 rides the INITIAL ANSWER on the add-query-ok ack itself
+		// (session.clj:264-270 sends q/result/result-meta/processed-*), with no
+		// follow-up refresh-ok. Enrich the ack in place before sending.
+		if op == "add-query" && len(replies) > 0 {
+			if rop, _ := replies[0].GetOp(); rop == "add-query-ok" {
+				rawQ, _ := f["q"]
+				key := subKey(sess.ID, string(rawQ))
+				sub, ok := h.Store.Get(key)
+				if !ok || h.Refresh == nil {
+					sendErr(500, "internal", "subscription missing after add-query")
+					return
+				}
+				result, rerr := h.Refresh(ctx, sub)
+				if rerr != nil {
+					sendErr(400, "invalid-query", rerr.Error())
+					return
+				}
+				// Baseline for delta-refresh diffs is always the flat envelope;
+				// the wire gets the v1 node-list.
+				sub.SetSnapshot(result)
+				nodes, nerr := nodelistFor(ctx, h.Manager.Deps.Catalogs, sess.AppID, result)
+				if nerr != nil {
+					sendErr(500, "internal", nerr.Error())
+					return
+				}
+				replies[0]["q"] = json.RawMessage(rawQ)
+				replies[0]["result"] = nodes
+				replies[0]["result-meta"] = resultMetaOf(result)
+				replies[0]["processed-tx-id"] = json.RawMessage(mustJSON(0))
+				replies[0]["processed-isn"] = json.RawMessage(mustJSON(0))
+				replies = replies[:1] // ack only; no follow-up refresh-ok
+			}
+		}
 		for _, rf := range replies {
 			if serr := send(rf); serr != nil {
 				return
@@ -109,37 +142,6 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// e.g. subscription-cap breach: the error frame above went out;
 			// tear the connection down (deferred Close runs on return).
 			return
-		}
-		// add-query: run the initial snapshot immediately.
-		if op == "add-query" {
-			if rawQ, ok := f["q"]; ok {
-				key := subKey(sess.ID, string(rawQ))
-				if sub, ok := h.Store.Get(key); ok && h.Refresh != nil {
-					result, rerr := h.Refresh(ctx, sub)
-					if rerr == nil {
-						// Baseline for delta-refresh diffs is always the flat
-						// envelope; the wire gets the v1 node-list.
-						sub.SetSnapshot(result)
-						nodes, nerr := nodelistFor(ctx, h.Manager.Deps.Catalogs, sess.AppID, result)
-						if nerr == nil {
-							payload, _ := json.Marshal([]map[string]any{{
-								"instaql-query":  json.RawMessage(rawQ),
-								"instaql-result": nodes,
-							}})
-							_ = send(Frame{
-								"op":              json.RawMessage(`"refresh-ok"`),
-								"computations":    payload,
-								"processed-tx-id": json.RawMessage(mustJSON(0)),
-								"client-event-id": mustJSON(mustString(f, "client-event-id")),
-							})
-						} else {
-							sendErr(500, "internal", nerr.Error())
-						}
-					} else {
-						sendErr(400, "invalid-query", rerr.Error())
-					}
-				}
-			}
 		}
 	}
 }

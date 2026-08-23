@@ -135,8 +135,10 @@ func TestSessionFlow(t *testing.T) {
 	// 2. add-query todos
 	q := map[string]any{"todos": map[string]any{}}
 	send(map[string]any{"op": "add-query", "q": q, "client-event-id": "q1"})
-	expectOp(t, frames, "add-query-ok")
-	expectOp(t, frames, "refresh-ok") // initial snapshot
+	ack := expectOp(t, frames, "add-query-ok")
+	if _, ok := ack["result"]; !ok { // v1: initial answer rides the ack
+		t.Fatalf("add-query-ok missing initial result: %v", ack)
+	}
 
 	// 3. transact: create one todo
 	steps := []any{

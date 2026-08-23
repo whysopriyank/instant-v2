@@ -66,13 +66,20 @@ func dialInit(t *testing.T, ctx context.Context, env *wsEnv, version string) (*w
 	return conn, frames
 }
 
-func addQueryTodos(t *testing.T, ctx context.Context, conn *websocket.Conn, frames chan map[string]any) {
+// addQueryTodos sends add-query and returns the enriched ack. v1 rides the
+// INITIAL ANSWER on add-query-ok itself (session.clj:264-270); there is no
+// follow-up snapshot refresh-ok.
+func addQueryTodos(t *testing.T, ctx context.Context, conn *websocket.Conn, frames chan map[string]any) map[string]any {
 	t.Helper()
 	sendFrame(t, conn, ctx, map[string]any{
 		"op": "add-query", "q": map[string]any{"todos": map[string]any{}},
 		"client-event-id": "q1",
 	})
-	expectOp(t, frames, "add-query-ok")
+	ack := expectOp(t, frames, "add-query-ok")
+	if _, ok := ack["result"]; !ok {
+		t.Fatalf("add-query-ok missing initial result (v1 session.clj:264): %v", ack)
+	}
+	return ack
 }
 
 func transactTodo(t *testing.T, ctx context.Context, conn *websocket.Conn,
@@ -116,36 +123,29 @@ func TestDeltaRefreshNegotiation(t *testing.T) {
 		transactTodo(t, ctx, oldConn, oldFrames, "add-triple", eids[i], titleAttr, fmt.Sprintf("title-%d", i))
 	}
 
-	addQueryTodos(t, ctx, oldConn, oldFrames)
-	initOld := expectOp(t, oldFrames, "refresh-ok") // initial snapshot (full)
+	initOld := addQueryTodos(t, ctx, oldConn, oldFrames) // initial answer on ack
 
 	newConn, newFrames := dialInit(t, ctx, env, "0.23.0")
-	addQueryTodos(t, ctx, newConn, newFrames)
-	initNew := expectOp(t, newFrames, "refresh-ok") // initial snapshot (full)
+	initNew := addQueryTodos(t, ctx, newConn, newFrames)
 
-	// Both initial snapshots are full envelopes with the exact legacy shape.
-	for name, snap := range map[string]map[string]any{
+	// Both initial answers ride the ack with v1's exact field set.
+	for name, ack := range map[string]map[string]any{
 		"old": initOld,
 		"new": initNew,
 	} {
-		// Snapshots echo client-event-id; async refreshes don't.
 		wantKeys := map[string]bool{
-			"op": true, "computations": true,
-			"processed-tx-id": true, "client-event-id": true,
+			"op": true, "q": true, "result": true, "result-meta": true,
+			"processed-tx-id": true, "processed-isn": true, "client-event-id": true,
 		}
-		if len(snap) != len(wantKeys) {
-			t.Fatalf("%s snapshot keys drifted: %v", name, snap)
+		if len(ack) != len(wantKeys) {
+			t.Fatalf("%s ack keys drifted: %v", name, ack)
 		}
 		for k := range wantKeys {
-			if _, has := snap[k]; !has {
-				t.Fatalf("%s snapshot missing %s", name, k)
+			if _, has := ack[k]; !has {
+				t.Fatalf("%s ack missing %s", name, k)
 			}
 		}
-		entry := computationsOf(t, snap)
-		if _, hasDelta := entry["delta"]; hasDelta {
-			t.Fatalf("%s snapshot must not carry a delta", name)
-		}
-		result, _ := json.Marshal(entry["instaql-result"])
+		result, _ := json.Marshal(ack["result"])
 		extractTriplesMirror(t, result) // frozen SDK can consume it
 	}
 
@@ -310,7 +310,6 @@ func TestSubscriptionCap(t *testing.T) {
 
 	connA, framesA := dialInit(t, ctx, env, "0.23.0")
 	addQueryTodos(t, ctx, connA, framesA)
-	expectOp(t, framesA, "refresh-ok")
 
 	// Second session breaches the per-app cap.
 	connB, framesB := dialInit(t, ctx, env, "0.23.0")
@@ -339,7 +338,6 @@ func TestSubscriptionCap(t *testing.T) {
 	time.Sleep(300 * time.Millisecond) // let the server reap the conn
 	connC, framesC := dialInit(t, ctx, env, "0.23.0")
 	addQueryTodos(t, ctx, connC, framesC)
-	expectOp(t, framesC, "refresh-ok")
 }
 
 var _ = syncpkg.ErrCloseSession
