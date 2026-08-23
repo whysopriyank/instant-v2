@@ -16,6 +16,14 @@
 //	                                     same response. The zip is buffered
 //	                                     to a temp file (archive/zip needs
 //	                                     ReaderAt).
+//
+// S3 backends (when Handler.S3 is wired):
+//
+//	PUT  /backup/{app_id}/object?key=K  → streams an export dump into the
+//	                                     object store under key K; responds
+//	                                     {"counts": {...}, "key": K}.
+//	POST /backup/{app_id}/restore-object?key=K → streams object K through
+//	                                     Import; responds {"counts": ...}.
 package backup
 
 import (
@@ -42,6 +50,8 @@ type Handler struct {
 	// AdminTokenCheck reports whether token authorizes appID. Required.
 	AdminTokenCheck func(ctx context.Context, appID, token string) (bool, error)
 	Logger          *slog.Logger
+	// S3 optionally enables the /object routes. When nil they answer 503.
+	S3 ObjectStore
 }
 
 func (h *Handler) logger() *slog.Logger {
@@ -97,7 +107,90 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"counts": counts})
+	case "object":
+		h.handlePutObject(w, r, appID)
+	case "restore-object":
+		h.handleRestoreObject(w, r, appID)
 	}
+}
+
+// handleGetObject streams a stored dump back to the caller.
+func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request, key string) {
+	rc, err := h.S3.Get(r.Context(), key)
+	if err != nil {
+		if errors.Is(err, ErrObjectNotFound) {
+			writeErr(w, http.StatusNotFound, err.Error())
+			return
+		}
+		h.logger().Error("backup: s3 get", "err", err)
+		writeErr(w, http.StatusBadGateway, "object store get failed")
+		return
+	}
+	defer func() { _ = rc.Close() }()
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	_, _ = io.Copy(w, rc)
+}
+
+// handlePutObject exports straight into the object store: no temp file, the
+// hashWriter pipeline writes once to the network stream.
+func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request, appID [16]byte) {
+	if h.S3 == nil {
+		writeErr(w, http.StatusServiceUnavailable, "no object store wired")
+		return
+	}
+	key := r.URL.Query().Get("key")
+	if key == "" {
+		writeErr(w, http.StatusBadRequest, "query param key is required")
+		return
+	}
+	if r.Method == http.MethodGet {
+		h.handleGetObject(w, r, key)
+		return
+	}
+	pr, pw := io.Pipe()
+	go func() {
+		_, err := Export(r.Context(), pw, h.Pool, appID, ExportOptions{})
+		pw.CloseWithError(err)
+	}()
+	putErr := h.S3.Put(r.Context(), key, pr, -1)
+	// Release the export goroutine no matter how Put ended; otherwise a
+	// short put leaves Export blocked on the pipe forever.
+	pr.CloseWithError(putErr)
+	if putErr != nil {
+		h.logger().Error("backup: s3 put", "err", putErr)
+		writeErr(w, http.StatusBadGateway, "object store put failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"key": key})
+}
+
+func (h *Handler) handleRestoreObject(w http.ResponseWriter, r *http.Request, appID [16]byte) {
+	if h.S3 == nil {
+		writeErr(w, http.StatusServiceUnavailable, "no object store wired")
+		return
+	}
+	key := r.URL.Query().Get("key")
+	if key == "" {
+		writeErr(w, http.StatusBadRequest, "query param key is required")
+		return
+	}
+	rc, err := h.S3.Get(r.Context(), key)
+	if err != nil {
+		if errors.Is(err, ErrObjectNotFound) {
+			writeErr(w, http.StatusNotFound, err.Error())
+			return
+		}
+		h.logger().Error("backup: s3 get", "err", err)
+		writeErr(w, http.StatusBadGateway, "object store get failed")
+		return
+	}
+	defer func() { _ = rc.Close() }()
+	counts, ierr := Import(r.Context(), h.Pool, rc)
+	if ierr != nil {
+		h.writeImportError(w, ierr)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"counts": counts})
 }
 
 // parseBackupRoute splits /backup/{app_id}[/{action}].
@@ -114,12 +207,15 @@ func parseBackupRoute(path string) (appID, action string, ok bool) {
 	return rest, "", true
 }
 
+// routeMethodOK validates /backup/{app}[/{action}] verb pairs.
 func routeMethodOK(method, action string) bool {
 	switch action {
 	case "":
 		return method == http.MethodGet
-	case "restore", "restore-v1zip":
+	case "restore", "restore-v1zip", "restore-object":
 		return method == http.MethodPost
+	case "object":
+		return method == http.MethodPut || method == http.MethodGet
 	default:
 		return false
 	}
