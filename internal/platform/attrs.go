@@ -187,3 +187,53 @@ func newUUIDv4() [16]byte {
 	u[8] = (u[8] & 0x3f) | 0x80
 	return u
 }
+
+// Attrs returns all attrs in the catalog (unordered).
+func (c *AttrCatalog) Attrs() []Attr {
+	out := make([]Attr, 0, len(c.byID))
+	for _, a := range c.byID {
+		out = append(out, a)
+	}
+	return out
+}
+
+// GetOrCreateAttrRev is GetOrCreateAttr with explicit reverse naming — the
+// shape v1's add-attr produces (forward identity + reverse identity pair).
+func GetOrCreateAttrRev(
+	ctx context.Context, tx pgx.Tx, appID [16]byte,
+	etype, label string,
+	revEtype, revLabel *string,
+	valueType, cardinality string,
+	isUnique, isIndexed bool,
+) (Attr, error) {
+	var existing [16]byte
+	err := tx.QueryRow(ctx,
+		`SELECT id FROM attrs WHERE app_id=$1 AND etype=$2 AND label=$3 AND deletion_marked_at IS NULL`,
+		appID, etype, label).Scan(&existing)
+	switch {
+	case err == nil:
+		return loadAttrByID(ctx, tx, existing)
+	case err != pgx.ErrNoRows:
+		return Attr{}, err
+	}
+	attrID := newUUIDv4()
+	fwd := newUUIDv4()
+	rev := newUUIDv4()
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO attrs (id, app_id, etype, label, reverse_etype, reverse_label,
+		                   value_type, cardinality, is_unique, is_indexed,
+		                   forward_ident, reverse_ident)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+		attrID, appID, etype, label, revEtype, revLabel,
+		valueType, cardinality, isUnique, isIndexed, fwd, rev); err != nil {
+		return Attr{}, err
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO idents (id, app_id, attr_id, etype, label)
+		VALUES ($1,$2,$3,$4,$5)
+		ON CONFLICT (app_id, etype, label) DO NOTHING`,
+		newUUIDv4(), appID, attrID, etype, label); err != nil {
+		return Attr{}, err
+	}
+	return loadAttrByID(ctx, tx, attrID)
+}

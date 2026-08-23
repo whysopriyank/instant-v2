@@ -163,6 +163,8 @@ CREATE TABLE triples(
 
   checked_data_type checked_data_type,
 
+  created_at timestamp with time zone NOT NULL DEFAULT NOW(),
+
   PRIMARY KEY(app_id, entity_id, attr_id, value_md5)
 );
 
