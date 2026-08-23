@@ -50,13 +50,13 @@ func TestNotifierCoalesces(t *testing.T) {
 		AppID:  "app1",
 		Query:  json.RawMessage(`{"posts":{}}`),
 		Topics: map[string]bool{"attr-a": true},
-		TxID:   5,
 		Emit: func(f Frame) {
 			mu.Lock()
 			frames++
 			mu.Unlock()
 		},
 	}
+	sub.TxID.Store(5)
 	if _, err := s.Add(sub); err != nil {
 		t.Fatalf("add: %v", err)
 	}
@@ -74,11 +74,20 @@ func TestNotifierCoalesces(t *testing.T) {
 	for i := range 10 {
 		n.Notify(ctx, "app1", []string{"attr-a"}, int64(6+i))
 	}
-	time.Sleep(100 * time.Millisecond)
-	mu.Lock()
-	defer mu.Unlock()
-	if frames == 0 {
-		t.Fatal("no frames emitted")
+	// Poll instead of a fixed sleep: under -race the drain goroutine may
+	// not have started within any fixed window.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		mu.Lock()
+		got := frames
+		mu.Unlock()
+		if got > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no frames emitted")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -89,9 +98,9 @@ func TestNotifierIgnoresStaleTxIDs(t *testing.T) {
 		ID: "s1", AppID: "app1",
 		Query:  json.RawMessage(`{}`),
 		Topics: map[string]bool{"a": true},
-		TxID:   10,
 		Emit:   func(Frame) { called = true },
 	}
+	sub.TxID.Store(10)
 	if _, err := s.Add(sub); err != nil {
 		t.Fatalf("add: %v", err)
 	}

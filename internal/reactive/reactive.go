@@ -32,11 +32,13 @@ type Frame struct {
 
 // Subscription is one registered live query.
 type Subscription struct {
-	ID        string
-	AppID     string
-	Query     json.RawMessage
-	Topics    map[string]bool // attr-id set from the compiled plan
-	TxID      int64
+	ID     string
+	AppID  string
+	Query  json.RawMessage
+	Topics map[string]bool // attr-id set from the compiled plan
+	// TxID is the last processed transaction watermark. Atomic: Notify
+	// reads it on caller goroutines while drain workers write it.
+	TxID      atomic.Int64
 	Delta     bool // session negotiated `delta-refresh`; eligible refreshes ship patches
 	Emit      func(Frame)
 	Cancelled bool
@@ -209,7 +211,7 @@ func (n *Notifier) Notify(ctx context.Context, appID string, attrIDs []string, t
 	}
 	added := 0
 	for _, id := range n.Store.SubsForTopics(attrIDs) {
-		if sub, ok := n.Store.Get(id); ok && sub.AppID == appID && txID > sub.TxID {
+		if sub, ok := n.Store.Get(id); ok && sub.AppID == appID && txID > sub.TxID.Load() {
 			n.pending[id] = txID
 			added++
 		}
@@ -281,7 +283,7 @@ func (n *Notifier) Run(ctx context.Context) {
 
 func (n *Notifier) refreshOne(ctx context.Context, log *slog.Logger, id string, txID int64) {
 	sub, ok := n.Store.Get(id)
-	if !ok || sub.Cancelled || txID <= sub.TxID {
+	if !ok || sub.Cancelled || txID <= sub.TxID.Load() {
 		return
 	}
 	result, err := n.Refresh(ctx, sub)
@@ -305,7 +307,7 @@ func (n *Notifier) refreshOne(ctx context.Context, log *slog.Logger, id string, 
 	}
 	sub.SetSnapshot(result) // baseline is ALWAYS the latest full result
 
-	sub.TxID = txID // watermark AFTER successful emit materialization
+	sub.TxID.Store(txID) // watermark AFTER successful emit materialization
 	if sub.Emit != nil {
 		sub.Emit(Frame{
 			SubID:         id,

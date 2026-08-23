@@ -146,10 +146,5 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func mustString(f Frame, key string) string {
-	s, _ := f.String(key)
-	return s
-}
-
 var _ = fmt.Sprintf
 var _ = instaql.Executor{}
