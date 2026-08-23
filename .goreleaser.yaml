@@ -1,0 +1,60 @@
+version: 2
+
+project_name: instantd
+
+builds:
+  - id: instantd
+    main: ./cmd/instantd
+    binary: instantd
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - formats: [tar.gz]
+    name_template: "instantd_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+sboms:
+  - artifacts: archive
+
+dockers:
+  - use: buildx
+    goos: [linux]
+    goarch: [amd64, arm64]
+    image_templates:
+      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY }}:{{ .Version }}"
+      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY }}:latest"
+    build_flag_templates:
+      - "--platform=linux/{{ .Arch }}"
+    dockerfile: Dockerfile
+
+docker_signs:
+  - cmd: cosign
+    artifacts: images
+    output: true
+    certificate: "{{ .Env.COSIGN_CERTIFICATE }}"
+    args:
+      - "sign-blob"
+      - "--output-signature=${signature}"
+      - "${artifact}"
+      - "--yes"
+
+signs:
+  - cmd: cosign
+    artifacts: checksum
+    output: true
+    certificate: "{{ .Env.COSIGN_CERTIFICATE }}"
+    args:
+      - "sign-blob"
+      - "--output-signature=${signature}"
+      - "${artifact}"
+      - "--yes"
+
+release:
+  draft: true

@@ -247,11 +247,10 @@ func TestAdminQueryAndSchema(t *testing.T) {
 	if code != 200 {
 		t.Fatalf("query: %d %v", code, resp)
 	}
-	data, _ := resp["data"].(map[string]any)
-	todosJSON, _ := json.Marshal(data["todos"])
+	todosJSON, _ := json.Marshal(resp["todos"]) // bare object-tree, no "data" wrapper
 	var todos []map[string]any
 	if err := json.Unmarshal(todosJSON, &todos); err != nil {
-		t.Fatalf("data.todos shape: %v (%v)", err, data["todos"])
+		t.Fatalf("bare todos shape: %v (%v)", err, resp["todos"])
 	}
 	if len(todos) != 2 {
 		t.Fatalf("expected 2 todos, got %d", len(todos))

@@ -14,13 +14,19 @@ import (
 	"log/slog"
 	"sort"
 	"sync"
+	"sync/atomic"
 )
 
 // Frame is one outbound refresh payload for a subscription.
+//
+// Delta-refresh sessions receive PatchJSON (a structural patch) instead of
+// the full ResultJSON envelope when the change set is expressible as such;
+// ResultJSON always carries the authoritative full result either way.
 type Frame struct {
 	SubID         string          `json:"-"`
 	QueryJSON     json.RawMessage `json:"instaql-query"`
 	ResultJSON    json.RawMessage `json:"instaql-result"`
+	PatchJSON     json.RawMessage `json:"-"`
 	ProcessedTxID int64           `json:"processed-tx-id"`
 }
 
@@ -31,26 +37,72 @@ type Subscription struct {
 	Query     json.RawMessage
 	Topics    map[string]bool // attr-id set from the compiled plan
 	TxID      int64
+	Delta     bool // session negotiated `delta-refresh`; eligible refreshes ship patches
 	Emit      func(Frame)
 	Cancelled bool
+
+	mu   sync.Mutex
+	last json.RawMessage // last full snapshot; diff baseline for delta-refresh
+}
+
+// Snapshot returns the last full result emitted for this subscription
+// (nil before the first snapshot). Diff baseline for delta-refresh.
+func (s *Subscription) Snapshot() json.RawMessage {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.last
+}
+
+// SetSnapshot records the full result as the diff baseline after it has been
+// delivered. Called by the notifier after each refresh and by the sync layer
+// after seeding an initial snapshot.
+func (s *Subscription) SetSnapshot(result json.RawMessage) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.last = result
 }
 
 // Store is a per-app subscription registry with an inverted topic index.
 type Store struct {
-	mu     sync.RWMutex
-	byID   map[string]*Subscription
-	topics map[string]map[string]struct{} // topicAttrID -> subIDs
-	nextID int64
+	// MaxSubsPerApp caps concurrent subscriptions per app id; 0 = unlimited.
+	// Set before the first Add. Breaches fail Add with a *SubLimitError so
+	// the transport can reject the query and drop the connection.
+	MaxSubsPerApp int
+
+	mu      sync.RWMutex
+	byID    map[string]*Subscription
+	topics  map[string]map[string]struct{} // topicAttrID -> subIDs
+	appSubs map[string]int                 // appID -> active sub count
+	nextID  int64
 }
 
 func NewStore() *Store {
-	return &Store{byID: map[string]*Subscription{}, topics: map[string]map[string]struct{}{}}
+	return &Store{
+		byID:    map[string]*Subscription{},
+		topics:  map[string]map[string]struct{}{},
+		appSubs: map[string]int{},
+	}
 }
 
-// Add registers a subscription; topics is its attr-id set.
-func (s *Store) Add(sub *Subscription) string {
+// SubLimitError is returned by Store.Add when MaxSubsPerApp is exceeded.
+type SubLimitError struct {
+	AppID string
+	Max   int
+}
+
+func (e *SubLimitError) Error() string {
+	return fmt.Sprintf("reactive: per-app subscription cap (%d) exceeded for app %s", e.Max, e.AppID)
+}
+
+// Add registers a subscription; topics is its attr-id set. Returns a
+// *SubLimitError when the store's MaxSubsPerApp cap for this app is hit —
+// the subscription is then NOT registered.
+func (s *Store) Add(sub *Subscription) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.MaxSubsPerApp > 0 && s.appSubs[sub.AppID] >= s.MaxSubsPerApp {
+		return "", &SubLimitError{AppID: sub.AppID, Max: s.MaxSubsPerApp}
+	}
 	s.nextID++
 	if sub.ID == "" {
 		sub.ID = fmt.Sprintf("sub-%d", s.nextID)
@@ -64,7 +116,8 @@ func (s *Store) Add(sub *Subscription) string {
 		}
 		m[sub.ID] = struct{}{}
 	}
-	return sub.ID
+	s.appSubs[sub.AppID]++
+	return sub.ID, nil
 }
 
 // Remove tears down a subscription.
@@ -83,6 +136,9 @@ func (s *Store) Remove(id string) bool {
 				delete(s.topics, t)
 			}
 		}
+	}
+	if s.appSubs[sub.AppID] > 0 {
+		s.appSubs[sub.AppID]--
 	}
 	sub.Cancelled = true
 	return true
@@ -135,7 +191,14 @@ type Notifier struct {
 	pending map[string]int64 // subID → latest tx-id awaiting refresh
 	wake    chan struct{}
 	once    sync.Once
+
+	gauge atomic.Int64 // pending refreshes; lock-free backpressure signal
 }
+
+// QueueDepth reports how many subscriptions currently await a refresh. The
+// WAL invalidator can poll this as a backpressure gauge (e.g. log or shed
+// checkpoint frequency when it climbs); it never blocks.
+func (n *Notifier) QueueDepth() int { return int(n.gauge.Load()) }
 
 // Notify enqueues invalidation for the given attrs after txID committed.
 // Coalescing: multiple notifications collapse into one refresh per sub.
@@ -144,10 +207,15 @@ func (n *Notifier) Notify(ctx context.Context, appID string, attrIDs []string, t
 	if n.pending == nil {
 		n.pending = map[string]int64{}
 	}
+	added := 0
 	for _, id := range n.Store.SubsForTopics(attrIDs) {
 		if sub, ok := n.Store.Get(id); ok && sub.AppID == appID && txID > sub.TxID {
 			n.pending[id] = txID
+			added++
 		}
+	}
+	if added > 0 {
+		n.gauge.Add(int64(added))
 	}
 	n.mu.Unlock()
 	n.once.Do(func() { n.wake = make(chan struct{}, 1) })
@@ -188,7 +256,7 @@ func (n *Notifier) Run(ctx context.Context) {
 			}
 			batch := n.pending
 			n.pending = map[string]int64{}
-			n.mu.Unlock()
+			n.gauge.Add(-int64(len(batch)))
 
 			var wg sync.WaitGroup
 			sem := make(chan struct{}, Workers)
@@ -220,12 +288,29 @@ func (n *Notifier) refreshOne(ctx context.Context, log *slog.Logger, id string, 
 		log.Error("reactive: refresh failed", "sub", id, "err", err)
 		return
 	}
+
+	// Delta-refresh: diff against the previous full snapshot. Any ambiguity
+	// (aggregates, reordering, >MaxTouchedRatio churn, malformed shapes)
+	// leaves patchJSON empty and the client gets the full envelope.
+	var patchJSON json.RawMessage
+	if sub.Delta {
+		if prev := sub.Snapshot(); prev != nil {
+			if p, ok := DiffResults(prev, result); ok {
+				if b, merr := json.Marshal(p); merr == nil {
+					patchJSON = b
+				}
+			}
+		}
+	}
+	sub.SetSnapshot(result) // baseline is ALWAYS the latest full result
+
 	sub.TxID = txID // watermark AFTER successful emit materialization
 	if sub.Emit != nil {
 		sub.Emit(Frame{
 			SubID:         id,
 			QueryJSON:     sub.Query,
 			ResultJSON:    result,
+			PatchJSON:     patchJSON,
 			ProcessedTxID: txID,
 		})
 	}

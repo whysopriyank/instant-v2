@@ -30,9 +30,9 @@ Each workstream may run independently — none shares a package with another.
 
 ## 6D — Docs + examples + release
 
-- [ ] Docs narrative: "self-host first" getting-started, replacing hosted-docs assumptions (`instantdb.com` → local).
+- [x] Docs narrative: "self-host first" getting-started, replacing hosted-docs assumptions (`instantdb.com` → local). → docs/07-selfhost.md
 - [ ] Every `examples/*` from v1 (chat, cursor presence, etc.) replayed against v2 end-to-end.
-- [ ] Signed container image (`goreleaser`), SBOM, `UPGRADE.md` for v1 self-host operators, migration guide for admin tokens.
+- [x] Signed container image (`goreleaser`), SBOM, `UPGRADE.md` for v1 self-host operators, migration guide for admin tokens. → .goreleaser.yaml (cosign sign-blob for image+checksums, syft SBOM step), UPGRADE.md; actual publishing happens at tag time
 - [ ] `v1.0.0` tag; post-release corpus stewardship note (who adds scenarios for new ops).
 
 ## Phase 6 exit gate — the repo is maintainable

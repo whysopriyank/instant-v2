@@ -262,7 +262,9 @@ func (h *Handler) handleQuery(w http.ResponseWriter, r *http.Request, a *authedR
 		writeErr(w, http.StatusInternalServerError, "query failed")
 		return
 	}
-	writeJSON(w, http.StatusOK, res)
+	// v1 query-post responds (response/ok object-tree): the bare etype map,
+	// no envelope key — the Python/TS SDKs index result[<etype>] directly.
+	writeJSON(w, http.StatusOK, res.Data)
 }
 
 // ---- Transact --------------------------------------------------------------
@@ -365,7 +367,7 @@ func (h *Handler) handleQueryPermsCheck(w http.ResponseWriter, r *http.Request, 
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"check-results": checks,
-		"result":        res,
+		"result":        res.Data, // object-tree, matching v1's :result
 	})
 }
 
