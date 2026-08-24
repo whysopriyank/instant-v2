@@ -174,13 +174,84 @@ func runSession(ctx context.Context, _ *slog.Logger, rawURL, appID string, id in
 	defer conn.Close(websocket.StatusNormalClosure, "")
 	conn.SetReadLimit(64 << 20)
 	connects.Add(1)
+	readErr := make(chan error, 1) // buffered; only first writer wins
 	send := func(v any) error {
 		b, _ := json.Marshal(v)
 		return conn.Write(ctx, websocket.MessageText, b)
 	}
+
+	var (
+		pendingTxs    int32
+		gotSnapshot   bool
+		mu            sync.Mutex
+		lastRefreshAt = time.Now()
+		lastRefreshCt int64
+	)
+
+	initOK := make(chan struct{})
+	reader := func() {
+		for {
+			_, data, err := conn.Read(ctx)
+			if err != nil {
+				select {
+				case readErr <- err:
+				default:
+				}
+				return
+			}
+			var f struct {
+				Op     string          `json:"op"`
+				Result json.RawMessage `json:"result"`
+			}
+			if json.Unmarshal(data, &f) != nil {
+				select {
+				case readErr <- fmt.Errorf("bad frame"):
+				default:
+				}
+				return
+			}
+			switch f.Op {
+			case "init-ok":
+				close(initOK)
+			case "add-query-ok":
+				// v1 rides the initial answer on the ack (session.clj:264);
+				// v2 pre-fix sends refresh-ok — accept either.
+				if len(f.Result) > 0 {
+					mu.Lock()
+					gotSnapshot = true
+					lastRefreshAt = time.Now()
+					mu.Unlock()
+					refreshes.Add(1)
+				}
+			case "transact-ok":
+				atomic.AddInt32(&pendingTxs, -1)
+			case "refresh-ok":
+				mu.Lock()
+				gotSnapshot = true
+				lastRefreshAt = time.Now()
+				lastRefreshCt++
+				mu.Unlock()
+				refreshes.Add(1)
+			}
+		}
+	}
+
+	go reader()
 	if err := send(map[string]any{"op": "init", "app-id": appID}); err != nil {
 		return err
 	}
+	select {
+	case <-initOK:
+	case err := <-readErr:
+		return fmt.Errorf("pre-init read: %w", err)
+	case <-ctx.Done():
+		return nil
+	case <-time.After(15 * time.Second):
+		return fmt.Errorf("init-ok timeout")
+	}
+
+	// Subscribe AFTER init-ok: v1 validates ops against session state and
+	// processes frames asynchronously.
 	if err := send(map[string]any{
 		"op":              "add-query",
 		"q":               map[string]any{"todos": map[string]any{}},
@@ -189,45 +260,10 @@ func runSession(ctx context.Context, _ *slog.Logger, rawURL, appID string, id in
 		return err
 	}
 
-	var pendingTxs int32 // transacts sent without transact-ok yet
-	gotInitOK, gotSnapshot := false, false
-	var lastRefreshCount int64
-	lastRefreshAt := time.Now()
-
-	readErr := make(chan error, 1)
-	go func() {
-		for {
-			_, data, err := conn.Read(ctx)
-			if err != nil {
-				readErr <- err
-				return
-			}
-			var f struct {
-				Op            string          `json:"op"`
-				ClientEventID string          `json:"client-event-id"`
-				TxID          json.RawMessage `json:"tx-id"`
-			}
-			if json.Unmarshal(data, &f) != nil {
-				readErr <- fmt.Errorf("bad frame")
-				return
-			}
-			switch f.Op {
-			case "init-ok":
-				gotInitOK = true
-			case "add-query-ok":
-				// initial snapshot due
-			case "transact-ok":
-				atomic.AddInt32(&pendingTxs, -1)
-			case "refresh-ok":
-				refreshes.Add(1)
-				gotSnapshot = true
-			}
-		}
-	}()
-
 	tick := time.NewTicker(*txInterval)
 	defer tick.Stop()
 	counter := int64(0)
+	snapDeadline := time.Now().Add(20 * time.Second)
 	for {
 		select {
 		case <-ctx.Done():
@@ -235,13 +271,19 @@ func runSession(ctx context.Context, _ *slog.Logger, rawURL, appID string, id in
 		case err := <-readErr:
 			return err
 		case <-tick.C:
-			if !gotInitOK || !gotSnapshot {
-				return fmt.Errorf("handshake incomplete: init-ok=%v snapshot=%v", gotInitOK, gotSnapshot)
+			mu.Lock()
+			snap, lastAt, lastCt := gotSnapshot, lastRefreshAt, lastRefreshCt
+			mu.Unlock()
+			if !snap {
+				if time.Now().After(snapDeadline) {
+					return fmt.Errorf("no snapshot within deadline")
+				}
+				continue
 			}
 			if pending := atomic.LoadInt32(&pendingTxs); pending > 50 {
 				return fmt.Errorf("stalled: %d transacts without ok", pending)
 			}
-			if refreshStall(refreshes.Load(), &lastRefreshCount, &lastRefreshAt) {
+			if refreshStall(refreshes.Load(), &lastCt, &lastAt) && counter > 0 {
 				return fmt.Errorf("refresh stream stalled")
 			}
 			counter++

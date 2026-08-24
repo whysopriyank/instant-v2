@@ -144,13 +144,20 @@ func (x *Executor) runForm(ctx context.Context, f *Form, cat *platform.AttrCatal
 		}
 	}
 
+	// Batched fetch: one round-trip for ALL matched entities. The previous
+	// per-entity loop (N+1) made large match-all snapshots issue thousands
+	// of tiny queries and starve the pool (found by the v1-vs-v2 soak).
 	entities := make([]entity, 0, len(ids))
-	for _, id := range ids {
-		e, err := x.loadEntity(ctx, id, etypeAttrs)
+	if len(ids) > 0 {
+		byID, err := x.loadEntities(ctx, appID, ids, etypeAttrs)
 		if err != nil {
 			return err
 		}
-		entities = append(entities, e)
+		for _, id := range ids {
+			if e, ok := byID[id]; ok {
+				entities = append(entities, *e)
+			}
+		}
 	}
 
 	// Ordering (in-memory; corpus validates parity with v1's SQL ordering).
@@ -441,24 +448,33 @@ func encodeValueJSON(v any) (string, error) {
 	return string(b), nil
 }
 
-// loadEntity fetches all triples for one entity and folds them into fields.
-func (x *Executor) loadEntity(ctx context.Context, id string, attrs map[string]platform.Attr) (entity, error) {
-	e := entity{ID: id, Fields: map[string]any{"id": id}}
+// loadEntities fetches all triples for a batch of entities in ONE query and
+// folds each entity's triples into fields. Returns a map keyed by entity id.
+func (x *Executor) loadEntities(ctx context.Context, appID string, ids []string, attrs map[string]platform.Attr) (map[string]*entity, error) {
+	out := make(map[string]*entity, len(ids))
 	rows, err := x.DB.Query(ctx, `
-		SELECT t.attr_id, t.value, a.cardinality
+		SELECT t.entity_id, t.attr_id, t.value, a.cardinality
 		  FROM triples t JOIN attrs a ON a.id = t.attr_id
-		 WHERE t.app_id = (SELECT app_id FROM triples WHERE entity_id=$1 LIMIT 1)
-		   AND t.entity_id = $1`, id)
+		 WHERE t.app_id = $1::uuid
+		   AND t.entity_id = ANY($2::uuid[])`, appID, ids)
 	if err != nil {
-		return e, err
+		return out, err
 	}
 	defer rows.Close()
+	get := func(id string) *entity {
+		e, ok := out[id]
+		if !ok {
+			e = &entity{ID: id, Fields: map[string]any{"id": id}}
+			out[id] = e
+		}
+		return e
+	}
 	for rows.Next() {
-		var attrID string
+		var eid, attrID string
 		var raw []byte
 		var cardinality string
-		if err := rows.Scan(&attrID, &raw, &cardinality); err != nil {
-			return e, err
+		if err := rows.Scan(&eid, &attrID, &raw, &cardinality); err != nil {
+			return out, err
 		}
 		a, ok := attrs[attrID]
 		if !ok {
@@ -466,7 +482,7 @@ func (x *Executor) loadEntity(ctx context.Context, id string, attrs map[string]p
 		}
 		var v any
 		if err := json.Unmarshal(raw, &v); err != nil {
-			return e, err
+			return out, err
 		}
 		if s, ok := v.(string); ok && a.ValueType == "ref" {
 			v = s // refs stay uuid strings
@@ -475,19 +491,19 @@ func (x *Executor) loadEntity(ctx context.Context, id string, attrs map[string]p
 		if a.Label != nil {
 			label = *a.Label
 		}
+		e := get(eid)
 		if cardinality == "many" {
 			arr, _ := e.Fields[label].([]any)
 			e.Fields[label] = append(arr, v)
 		} else {
-			if mv, isNull := v.(map[string]any); !isNULLMap(mv) || !isNull {
-				e.Fields[label] = v
-			}
+			e.Fields[label] = v
 		}
 	}
-	return e, rows.Err()
+	if err := rows.Err(); err != nil {
+		return out, err
+	}
+	return out, nil
 }
-
-func isNULLMap(m map[string]any) bool { return false }
 
 func attrsOfEtype(cat *platform.AttrCatalog, etype string) map[string]platform.Attr {
 	out := map[string]platform.Attr{}

@@ -68,3 +68,45 @@ Items 1 and 2 are v2 workstreams; 3–6 are drops/simplifications. The frozen su
 `reactive/session.clj:73-107` gates by client semver:
 `skip-attrs ≥ 0.20.4`, `patch-presence ≥ 0.17.5`, `batch-messages ≥ 0.22.75`.
 The `init` op carries a `versions` map keyed by SDK name.
+
+
+## Capacity baseline: v1 vs v2 (2026-08-24)
+
+Identical workload via `tools/soak` against both servers on the same machine
+(Apple M4 Pro), same Postgres 17 instance, separate databases:
+
+    2000 concurrent WS sessions · 60 s ramp · 10 min hold · global write rate 8 tx/s
+    (single-entity add-triple into one etype; match-all live query per session)
+
+| metric                        | v1 (a4d2ef33, local boot)     | v2 (2fbdf88+fix)              |
+|-------------------------------|-------------------------------|-------------------------------|
+| sessions held                 | 2000 / 2000                   | 2000 / 2000                   |
+| writes committed (durable)    | 4079 / 4079                   | 4079 / 4079                   |
+| drops / protocol errors       | 0                             | 0                             |
+| initial snapshots delivered   | 2000                          | 2000                          |
+| LIVE refreshes delivered      | **0** (fanout inert locally)  | **65,313** (~124/s peak)      |
+| peak server RSS               | ~2.98 GB (JVM)                | ~2.50 GB                      |
+| avg server CPU during run     | ~7.5%                         | ~485% (≈5 cores)              |
+
+Notes, stated plainly:
+
+- v1's local boot never pushed a single live refresh to any subscriber
+  despite its invalidator/aggregator replication slots streaming WAL
+  normally (verified `pg_replication_slots.active`, sketches advancing).
+  Refresh machinery demonstrably works only for its internally-bootstrapped
+  config app traffic. Whether this is a sunset-era regression or a missing
+  local-config piece was not determined; the numbers above are labeled
+  accordingly rather than presented as v1's production fanout capability.
+- v2's CPU cost is the price of actually doing the fanout: every write
+  invalidates the match-all query held by all 2000 sessions, each getting a
+  full recompute + ~460 KB envelope. Coalescing bounds it to ~124 refreshes/s
+  aggregate here; per-session coalescing means larger fleets converge toward
+  `writes × sessions` only when results keep changing.
+- The comparison surfaced a real v2 defect: InstaQL fetched entities ONE
+  round-trip PER ENTITY (`loadEntity` N+1). A 4079-entity snapshot took
+  unbounded time under pool pressure; fixed with batched `= ANY(...)` loading
+  (single query, 64 ms for the full snapshot post-fix).
+
+Verdict: at equal connection-hold and durable-write capacity, memory is
+comparable; v2 delivers the reactive layer v1's boot could not, at the cost
+of proportional CPU. Full 5000×30-min v2-only soak numbers stand from Phase 4.
