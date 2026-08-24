@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -131,6 +132,45 @@ func TestEncodeTruncationFallback(t *testing.T) {
 	// Original must not be mutated
 	if len(inv.AttrIDs) != 600 {
 		t.Fatalf("Encode mutated input AttrIDs")
+	}
+}
+
+// Staged degradation (docs/09 §T2.5): an oversized payload drops the
+// entity-level Changes first and keeps the attr-id projection; only when
+// even that exceeds the cap do AttrIDs go null. Peers lose splice
+// granularity before they lose topic granularity.
+func TestEncodeStagedDegradation(t *testing.T) {
+	attr := strings.Repeat("x", 36)
+	// Changes alone push past 7400, attrs stay small.
+	changes := make([]EntityChange, 0, 200)
+	for i := range 200 {
+		changes = append(changes, EntityChange{
+			Etype:    "todos",
+			EntityID: fmt.Sprintf("%s-%04d", attr, i),
+			AttrIDs:  []string{attr},
+		})
+	}
+	smallAttrs := []string{"a1", "a2"}
+	inv := Invalidation{AppID: "app-stage", AttrIDs: smallAttrs, TxID: 5, Changes: changes}
+	b, err := Encode(inv)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	var got Invalidation
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Changes != nil {
+		t.Fatalf("expected Changes dropped first, got %d", len(got.Changes))
+	}
+	if got.AttrIDs == nil || len(got.AttrIDs) != 2 {
+		t.Fatalf("expected AttrIDs projection kept, got %v", got.AttrIDs)
+	}
+	if got.AppID != inv.AppID || got.TxID != inv.TxID {
+		t.Fatalf("lost AppID/TxID: %+v", got)
+	}
+	if len(inv.Changes) != 200 {
+		t.Fatalf("Encode mutated input Changes")
 	}
 }
 

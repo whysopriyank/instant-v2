@@ -36,6 +36,7 @@ import (
 	"github.com/instant-v2/instant-v2/internal/instaql"
 	"github.com/instant-v2/instant-v2/internal/perms"
 	"github.com/instant-v2/instant-v2/internal/platform"
+	"github.com/instant-v2/instant-v2/internal/reactive"
 	"github.com/instant-v2/instant-v2/internal/storage"
 	"github.com/instant-v2/instant-v2/internal/transact"
 	"github.com/instant-v2/instant-v2/internal/triple"
@@ -52,6 +53,11 @@ type Handler struct {
 	// the WS and /runtime/transact paths use). attrIDs are the triple-step
 	// targets; empty means no invalidatable writes.
 	OnCommit func(ctx context.Context, appID [16]byte, attrIDs []string, txID int64)
+	// OnCommitChanges, when set, is preferred over OnCommit when every
+	// step resolves to a plain triple write: entity-annotated events let
+	// the incremental engine splice instead of recompute
+	// (docs/09-tier2-architecture.md §T2.5).
+	OnCommitChanges func(ctx context.Context, appID [16]byte, changes []reactive.Change, txID int64)
 }
 
 // authedReq carries the authenticated request context through routing.
@@ -310,7 +316,19 @@ func (h *Handler) handleTransact(w http.ResponseWriter, r *http.Request, a *auth
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if h.OnCommit != nil {
+	if h.OnCommitChanges != nil {
+		if triples, ok := transact.ResolveTriples(steps, cat); ok && len(triples) > 0 {
+			changes := make([]reactive.Change, 0, len(triples))
+			for _, tt := range triples {
+				changes = append(changes, reactive.Change{
+					Etype: tt.Etype, EntityID: tt.EntityID, AttrIDs: []string{tt.AttrID},
+				})
+			}
+			h.OnCommitChanges(r.Context(), a.appID, changes, res.TxID)
+		} else if h.OnCommit != nil {
+			h.OnCommit(r.Context(), a.appID, touchedAttrs(steps), res.TxID)
+		}
+	} else if h.OnCommit != nil {
 		h.OnCommit(r.Context(), a.appID, touchedAttrs(steps), res.TxID)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"tx-id": res.TxID})

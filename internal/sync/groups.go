@@ -193,10 +193,10 @@ func (m *Manager) dispatchGroup(g *queryGroup, fr reactive.Frame) {
 			logger.Error("groups: unwrap tree", "err", terr)
 			return
 		}
-		payload, _ := json.Marshal([]map[string]any{{
-			"instaql-query":  json.RawMessage(fr.QueryJSON),
-			"instaql-result": tree,
-		}})
+		payload := computationEntry(
+			[2]json.RawMessage{keyInstaqlQuery, json.RawMessage(fr.QueryJSON)},
+			[2]json.RawMessage{keyInstaqlResult, tree},
+		)
 		fullRaw = encodeFrame(Frame{
 			"op":              json.RawMessage(`"refresh-ok"`),
 			"computations":    payload,
@@ -205,11 +205,11 @@ func (m *Manager) dispatchGroup(g *queryGroup, fr reactive.Frame) {
 		if meta := resultMetaOf(fr.ResultJSON); len(meta) > 0 {
 			// v1 admin SSE carries result-meta on refreshes too; rebuild the
 			// frame with it rather than short-circuit above.
-			payload2, _ := json.Marshal([]map[string]any{{
-				"instaql-query":  json.RawMessage(fr.QueryJSON),
-				"instaql-result": tree,
-				"result-meta":    json.RawMessage(meta),
-			}})
+			payload2 := computationEntry(
+				[2]json.RawMessage{keyInstaqlQuery, json.RawMessage(fr.QueryJSON)},
+				[2]json.RawMessage{keyInstaqlResult, tree},
+				[2]json.RawMessage{keyResultMeta, json.RawMessage(meta)},
+			)
 			fullRaw = encodeFrame(Frame{
 				"op":              json.RawMessage(`"refresh-ok"`),
 				"computations":    payload2,
@@ -223,10 +223,10 @@ func (m *Manager) dispatchGroup(g *queryGroup, fr reactive.Frame) {
 			logger.Error("groups: node-list render", "err", nerr)
 			return
 		}
-		payload, _ := json.Marshal([]map[string]any{{
-			"instaql-query":  json.RawMessage(fr.QueryJSON),
-			"instaql-result": nodes,
-		}})
+		payload := computationEntry(
+			[2]json.RawMessage{keyInstaqlQuery, json.RawMessage(fr.QueryJSON)},
+			[2]json.RawMessage{keyInstaqlResult, nodes},
+		)
 		fullRaw = encodeFrame(Frame{
 			"op":              json.RawMessage(`"refresh-ok"`),
 			"computations":    payload,
@@ -236,10 +236,10 @@ func (m *Manager) dispatchGroup(g *queryGroup, fr reactive.Frame) {
 
 	var deltaRaw []byte
 	if anyDelta && len(fr.PatchJSON) > 0 {
-		dpayload, _ := json.Marshal([]map[string]any{{
-			"instaql-query": json.RawMessage(fr.QueryJSON),
-			"delta":         json.RawMessage(fr.PatchJSON),
-		}})
+		dpayload := computationEntry(
+			[2]json.RawMessage{keyDelta, json.RawMessage(fr.PatchJSON)},
+			[2]json.RawMessage{keyInstaqlQuery, json.RawMessage(fr.QueryJSON)},
+		)
 		deltaRaw = encodeFrame(Frame{
 			"op":              json.RawMessage(`"refresh-ok-delta"`),
 			"computations":    dpayload,

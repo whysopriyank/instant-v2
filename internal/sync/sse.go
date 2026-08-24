@@ -262,10 +262,10 @@ func (h *SSEHandler) snapshot(ctx context.Context, sess *Session, f Frame) {
 	if terr != nil {
 		return
 	}
-	payload, _ := json.Marshal([]map[string]any{{
-		"instaql-query":  json.RawMessage(rawQ),
-		"instaql-result": tree,
-	}})
+	payload := computationEntry(
+		[2]json.RawMessage{keyInstaqlQuery, json.RawMessage(rawQ)},
+		[2]json.RawMessage{keyInstaqlResult, tree},
+	)
 	_ = sess.Send(Frame{
 		"op":              json.RawMessage(`"refresh-ok"`),
 		"computations":    payload,

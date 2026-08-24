@@ -41,6 +41,19 @@ type Invalidation struct {
 	AppID   string   `json:"app_id"`
 	AttrIDs []string `json:"attr_ids"`
 	TxID    int64    `json:"tx_id"`
+	// Changes carries entity-level change records so peers can run the
+	// incremental splice instead of a full recompute
+	// (docs/09-tier2-architecture.md §T2.5). Optional: older payloads and
+	// size-degraded ones omit it, which receivers treat as topic-granular.
+	Changes []EntityChange `json:"ch,omitempty"`
+}
+
+// EntityChange is one touched entity on the bus. Mirrors reactive.Change's
+// wire needs without importing it (bus stays a leaf package).
+type EntityChange struct {
+	Etype    string   `json:"e,omitempty"`
+	EntityID string   `json:"id,omitempty"`
+	AttrIDs  []string `json:"a,omitempty"`
 }
 
 // Publisher is the write side of the bus. PublishInvalidation must be
@@ -60,9 +73,10 @@ type Conn interface {
 }
 
 // Encode marshals inv to JSON for NOTIFY. Postgres caps NOTIFY payloads at
-// 8000 bytes (see package doc); if the JSON exceeds 7400 bytes we degrade
-// to AttrIDs=nil so the receiver does a full-app invalidation instead of
-// losing the event. The caller never needs to branch on size.
+// 8000 bytes (see package doc); degradation is staged — first drop the
+// entity-level Changes (peers fall back to the attr-id projection), then nil
+// AttrIDs for full-app invalidation. The event itself is never lost; only
+// its granularity degrades. The caller never needs to branch on size.
 //
 // Encoding is deterministic (json.Marshal) so the receiver can Unmarshal into
 // the same Invalidation shape byte-identically across nodes.
@@ -74,9 +88,12 @@ func Encode(inv Invalidation) ([]byte, error) {
 	if len(b) <= 7400 {
 		return b, nil
 	}
-	// Truncation fallback: nil AttrIDs marshals as JSON null, which the
-	// receiver interprets as "all subs of app". We copy to avoid mutating
-	// the caller's slide header.
+	if len(inv.Changes) > 0 {
+		// Copy: never mutate the caller's slice header.
+		noChanges := inv
+		noChanges.Changes = nil
+		return Encode(noChanges)
+	}
 	trunc := inv
 	trunc.AttrIDs = nil
 	//nolint:wrapcheck // json error is already descriptive

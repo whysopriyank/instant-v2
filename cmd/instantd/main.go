@@ -159,7 +159,8 @@ func run(logger *slog.Logger) error {
 				return fmt.Errorf("bus publisher conn: %w", perr)
 			}
 			defer pubConn.Release()
-			publisher = pgPublisher{pg: pubConn.Conn()}
+			publisher = &pgPublisher{pg: pubConn.Conn()}
+
 			listenConn, lerr := dedicatedConn(ctx, writePool)
 			if lerr != nil {
 				return fmt.Errorf("bus listener conn: %w", lerr)
@@ -167,12 +168,31 @@ func run(logger *slog.Logger) error {
 			defer listenConn.Release()
 			go func() {
 				err := bus.RunWithLogger(ctx, listenConn.Conn(), func(inv bus.Invalidation) {
+					// APPLY ONLY — never republish. Routing received
+					// events through the invalidate closures would echo
+					// every event back onto the bus from every node: an
+					// infinite amplify loop that starves the listeners
+					// (observed live as pgx "conn busy" storms).
+					// Entity-annotated events let peers splice too
+					// (docs/09 §T2.5); degraded payloads carry attr ids
+					// only and take the topic-wide path.
+					if len(inv.Changes) > 0 {
+						changes := make([]reactive.Change, 0, len(inv.Changes))
+						for _, c := range inv.Changes {
+							changes = append(changes, reactive.Change{
+								Etype: c.Etype, EntityID: c.EntityID, AttrIDs: c.AttrIDs,
+							})
+						}
+						notifier.NotifyChanges(ctx, inv.AppID, changes, inv.TxID)
+						return
+					}
 					notifier.Notify(ctx, inv.AppID, inv.AttrIDs, inv.TxID)
 				}, logger)
 				if err != nil && ctx.Err() == nil {
 					logger.Error("invalidation bus stopped", "err", err)
 				}
 			}()
+			logger.Info("invalidation bus enabled", "channel", bus.Channel, "node", cfg.NodeName())
 		}
 		invalidate = func(ctx context.Context, appID string, attrIDs []string, txID int64) {
 			notifier.Notify(ctx, appID, attrIDs, txID)
@@ -186,18 +206,23 @@ func run(logger *slog.Logger) error {
 			}
 		}
 
-		// Change-routed variant for the WS plane: entity-annotated events
-		// feed the incremental engine locally; peers receive the attr-id
-		// projection (entity ids stay local — the bus payload is
-		// topic-granular, which only costs peers a full recompute).
+		// Change-routed variant: entity-annotated events feed the
+		// incremental engine locally AND on peers (docs/09 §T2.5). The
+		// attr-id projection rides along so Encode's staged size
+		// degradation can drop Changes first and keep topic granularity.
 		invalidateChanges = func(ctx context.Context, appID string, changes []reactive.Change, txID int64) {
 			notifier.NotifyChanges(ctx, appID, changes, txID)
 			if publisher != nil {
 				attrSet := map[string]bool{}
+				entity := make([]bus.EntityChange, 0, len(changes))
 				for _, c := range changes {
 					for _, a := range c.AttrIDs {
 						attrSet[a] = true
 					}
+					attrs := append([]string(nil), c.AttrIDs...)
+					entity = append(entity, bus.EntityChange{
+						Etype: c.Etype, EntityID: c.EntityID, AttrIDs: attrs,
+					})
 				}
 				attrs := make([]string, 0, len(attrSet))
 				for a := range attrSet {
@@ -205,7 +230,7 @@ func run(logger *slog.Logger) error {
 				}
 				go func() {
 					if err := publisher.PublishInvalidation(context.WithoutCancel(ctx),
-						bus.Invalidation{AppID: appID, AttrIDs: attrs, TxID: txID}); err != nil {
+						bus.Invalidation{AppID: appID, AttrIDs: attrs, TxID: txID, Changes: entity}); err != nil {
 						logger.Warn("bus publish failed", "err", err)
 					}
 				}()
@@ -293,6 +318,9 @@ func run(logger *slog.Logger) error {
 				// every node. Detach: the request context dies when
 				// handleTransact returns, but refreshes must outlive it.
 				go invalidate(context.WithoutCancel(ctx), platform.UUIDToStr(appID), attrIDs, txID)
+			},
+			OnCommitChanges: func(ctx context.Context, appID [16]byte, changes []reactive.Change, txID int64) {
+				go invalidateChanges(context.WithoutCancel(ctx), platform.UUIDToStr(appID), changes, txID)
 			},
 		})
 
@@ -426,7 +454,24 @@ func touchedAttrs(steps []transact.Step, _ *platform.AttrCatalog) []string {
 			}
 		}
 	}
+
 	return out
+}
+
+// pgPublisher adapts a dedicated connection to bus.Publisher. The listener
+// gets its own conn: pgconn is not safe for concurrent Exec +
+// WaitForNotification. The mutex serializes publishes because pgx.Conn is
+// single-flight — concurrent goroutines publishing invalidations would trip
+// "conn busy".
+type pgPublisher struct {
+	mu sync.Mutex
+	pg bus.Conn
+}
+
+func (p *pgPublisher) PublishInvalidation(ctx context.Context, inv bus.Invalidation) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return bus.Publish(ctx, p.pg, inv)
 }
 
 func refreshFor(ex *instaql.Executor, cats *platform.CatalogCache) func(ctx context.Context, sub *reactive.Subscription) (json.RawMessage, error) {
@@ -502,14 +547,6 @@ func gateFor(n *reactive.Notifier, maxDepth int64) func(appID string) error {
 // state dies with the connection, so the bus must never share pooled conns.
 func dedicatedConn(ctx context.Context, pool *pgxpool.Pool) (*pgxpool.Conn, error) {
 	return pool.Acquire(ctx)
-}
-
-// pgPublisher adapts a dedicated connection to bus.Publisher. The listener
-// gets its own conn: pgconn is not safe for concurrent Exec + WaitForNotification.
-type pgPublisher struct{ pg bus.Conn }
-
-func (p pgPublisher) PublishInvalidation(ctx context.Context, inv bus.Invalidation) error {
-	return bus.Publish(ctx, p.pg, inv)
 }
 
 var _ = websocket.Accept
