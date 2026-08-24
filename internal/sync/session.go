@@ -86,6 +86,16 @@ type Deps struct {
 	Rooms    *RoomHub
 	OnCommit func(ctx context.Context, appID string, attrIDs []string, txID int64)
 	Logger   *slog.Logger
+	// TransactGate consults overload state (notifier queue depth,
+	// docs/09-tier2-architecture.md §T2.1) before executing a transact
+	// op. nil means always allow. A *reactive.ShedError denial becomes
+	// the 429-shaped error frame carrying RetryAfter as the hint.
+	TransactGate func(appID string) error
+	// OnCommitChanges is the change-annotated invalidation path
+	// (docs/09-tier2-architecture.md §T2.5): when set and every step of a
+	// transact resolves to a plain triple write, it is preferred over
+	// OnCommit so the incremental engine can splice instead of recompute.
+	OnCommitChanges func(ctx context.Context, appID string, changes []reactive.Change, txID int64)
 }
 
 // Session is one live WebSocket connection's state.
@@ -310,6 +320,19 @@ func (m *Manager) handleTransact(ctx context.Context, sess *Session, f Frame) ([
 	if !ok {
 		return []Frame{ErrFrame(400, "bad-request", "transact requires tx-steps")}, nil
 	}
+	// Shed before doing any work: an overloaded drain loop must shed
+	// publishers at the gate, not after they burned a Postgres txn
+	// (docs/09-tier2-architecture.md §T2.1).
+	if m.Deps.TransactGate != nil {
+		if gerr := m.Deps.TransactGate(sess.AppID); gerr != nil {
+			var shed *reactive.ShedError
+			hint := "server busy"
+			if errors.As(gerr, &shed) && shed.RetryAfter > 0 {
+				hint = fmt.Sprintf("server busy; retry after %s", shed.RetryAfter)
+			}
+			return []Frame{ErrFrame(429, "shed", hint)}, nil
+		}
+	}
 	var steps []json.RawMessage
 	if err := json.Unmarshal(rawSteps, &steps); err != nil {
 		return []Frame{ErrFrame(400, "bad-request", "tx-steps must be an array")}, nil
@@ -343,7 +366,26 @@ func (m *Manager) handleTransact(ctx context.Context, sess *Session, f Frame) ([
 				}
 			}
 		}
-		m.Deps.OnCommit(ctx, sess.AppID, attrIDs, res.TxID)
+		// Change-routed path (docs/09 §T2.5): fully-resolved plain triple
+		// writes carry entity identity so the incremental engine can splice;
+		// anything else keeps the topic-wide Notify semantics.
+		if m.Deps.OnCommitChanges != nil {
+			if triples, ok := transact.ResolveTriples(parsed, cat); ok && len(triples) > 0 {
+				changes := make([]reactive.Change, 0, len(triples))
+				for _, tt := range triples {
+					changes = append(changes, reactive.Change{
+						Etype:    tt.Etype,
+						EntityID: tt.EntityID,
+						AttrIDs:  []string{tt.AttrID},
+					})
+				}
+				m.Deps.OnCommitChanges(ctx, sess.AppID, changes, res.TxID)
+			} else {
+				m.Deps.OnCommit(ctx, sess.AppID, attrIDs, res.TxID)
+			}
+		} else {
+			m.Deps.OnCommit(ctx, sess.AppID, attrIDs, res.TxID)
+		}
 	}
 	txID, _ := f.String("client-event-id")
 	fr := Frame{

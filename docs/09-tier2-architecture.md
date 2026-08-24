@@ -1,0 +1,230 @@
+# Tier 2 Architecture Spec — scale-out, incremental results, plane split
+
+Goal: break v2's single-node ceiling and the remaining recompute-per-write
+cost, so capacity scales with node count instead of box size. Builds directly
+on Tier 1 (docs/08): query groups render once per generation; the drain loop,
+checkpoint coalescing, and group cap accounting are the substrate this spec
+modifies.
+
+Baseline for all claims: post-T1.1 rerun (docs/01-state.md) — 2000 sessions ×
+8 tx/s at ~31% CPU / ~156 MB RSS. Tier 2 targets: N-node session capacity with
+zero cross-node state beyond Postgres, and O(change) refresh cost for hot
+match-all queries.
+
+Non-goals: wire-format changes visible to frozen SDKs; Postgres physical
+layout changes (partitioning stays behind an ADR — see T2.5).
+
+---
+
+## T2.1 Backpressure enforcement
+
+### Problem
+
+`Notifier.QueueDepth()` exists but nothing consumes it. One pathological
+publisher (1000 tx/s into a 2000-member query) melts the drain loop before
+the per-class rate limiter notices — the limiter counts requests, not
+outstanding refresh work.
+
+### Design
+
+- `Notifier.Gate(maxDepth int64) func(appID string) error` — hysteresis gate:
+  opens (deny) at `>= maxDepth`, closes (allow) below `maxDepth/2`. Denial is
+  `*ShedError{RetryAfter}` (250 ms fixed). Atomic loads only; no locks on the
+  transact path.
+- `sync.Deps.TransactGate func(appID string) error` — nil means always allow.
+  `handleTransact` consults it first; denial produces the same 429-shaped
+  error frame the rate-limit gate already emits (`gates_test.go` shapes).
+- HTTP `POST /runtime/transact` consults the same gate → 429 + Retry-After.
+- `/health` gains `"queue-depth"` (and `"queue-max"` when gated) so overload
+  is observable from the load balancer.
+
+Config: `INSTANT_V2_MAX_QUEUE_DEPTH` (default `0` = unlimited = today's
+behavior).
+
+### Acceptance
+
+Test: flood N Notify into a stalled group until depth > max → gate denies;
+drain below low-water → gate reopens. Health JSON shows depth.
+
+---
+
+## T2.2 Wire compression
+
+### Problem
+
+Refresh envelopes are large repeated-structure JSON (460 KB match-all shape).
+Per-frame gzip would help; WebSocket permessage-deflate with context takeover
+beats it because the LZ77 window persists across frames of the same query.
+
+### Design
+
+`INSTANT_V2_WS_COMPRESSION` ∈ {`disabled`, `no-context-takeover`,
+`context-takeover`} (default `disabled` — byte-identical behavior for every
+existing client and proxy). Maps onto coder/websocket's `CompressionMode`.
+Applies to `/runtime/session` only; SSE bodies are short-lived admin frames.
+
+Ordering vs deltas: delta-refresh (already shipped behind the ≥0.23.0 gate)
+reduces bytes ~4000× where negotiated; deflate covers everyone else. They
+compose — deflate after delta still wins on highly-repetitive trees.
+
+### Acceptance
+
+Handshake test: client offering `permessage-deflate` against
+`context-takeover` mode gets the extension accepted; `disabled` mode never
+negotiates it.
+
+## T2.3 Read/write plane separation
+
+### Problem
+
+Instaql reads and the transactor share one pool (`main.go`, MaxConns≥32).
+Soak evidence: snapshot queries queue behind invalidation-driven refreshes;
+a slow read stalls the write path's connection acquisition.
+
+### Design
+
+Two pgx pools in assembly:
+
+- **Write pool** (`DATABASE_URL`): storage.DB, transact, authn writes,
+  checkpoint persistence, and the CatalogCache — attr-id identity must not
+  lag the transactor behind a replica, and catalogs change rarely (the cache
+  absorbs steady-state reads either way).
+- **Read pool** (`INSTANT_V2_READ_URL`, defaulting to `DATABASE_URL`):
+  instaql Executor refreshes — the hot read plane.
+
+Pool sizes: `INSTANT_V2_WRITE_POOL_MAXCONNS` / `INSTANT_V2_READ_POOL_MAXCONNS`
+(defaults 32/32; combined default matches today's 32-floor semantics when
+both point at one instance — operators raising both should size
+`max_connections` accordingly).
+
+With `INSTANT_V2_READ_URL` unset this changes nothing except pool accounting;
+with a replica DSN it routes reads off the writer immediately.
+
+Explicitly deferred: partitioning triples by app_id hash. It breaks the
+v1-parity layout that makes corpus replay and v1-dump import trivial, and no
+fleet exists yet that needs it. First parity-breaking change gets its own ADR.
+
+### Acceptance
+
+Assembly test/config unit tests; soak unchanged with knobs defaulted.
+
+---
+
+## T2.4 Horizontal scale-out via invalidation bus
+
+### Problem
+
+v2 is single-node by construction: post-commit notifier notifies *its own*
+store only. A second node serving the same app never hears about writes
+committed elsewhere.
+
+### Design decision — symmetric bus, not lease-sharded slots
+
+The audit sketched app_id-hash sharding with advisory-lock slot ownership.
+That design assumes WAL-slot-based invalidation; v2's production path is the
+direct post-commit notifier (the tailer is not wired into main), and sessions
+are self-contained by deliberate design (02 §5.3). Given those facts:
+
+- **Correctness does not require ownership.** Per-app write serialization
+  already lives in Postgres (invariant 02 §5.1); any node may accept a write.
+- **Fanout scales symmetrically**: each node refreshes only its local
+  subscriptions; cost per node is proportional to local members.
+- Lease fencing adds crash/fencing failure modes without removing Postgres as
+  the serializer.
+
+So v1 of scale-out is a **symmetric invalidation bus**: every node carries
+every app; stickiness is an LB optimization, not a correctness requirement.
+Lease-based shard ownership becomes interesting only if/when the WAL-tailer
+path replaces direct notify (it dedupes replay work across nodes); recorded
+as follow-up, not built now.
+
+### Mechanism
+
+Postgres LISTEN/NOTIFY (no new infra; NATS/Redis stay swappable later behind
+`internal/bus`'s interface):
+
+- New package `internal/bus`: `Publisher.PublishInvalidation(ctx, appID,
+  attrIDs, txID)` and `Run(ctx, conn, channel, onEvent)` (self-echo included;
+  delivery is idempotent because refreshes are watermark-deduped).
+- Payload `{app-id, attr-ids, tx-id}`; NOTIFY caps at 8000 bytes, so payloads
+  over ~7.4 KiB degrade to attr-ids `null` = "invalidate all local subs of
+  app" (boring, correct, rare).
+- Assembly (`main.go`) when `INSTANT_V2_INVALIDATION_BUS=postgres`:
+  - `OnCommit` bridges publish to the bus **and** notify locally (local path
+    stays zero-latency);
+  - a listener goroutine feeds received events into `notifier.Notify`;
+  - dedicated connection (LISTEN state dies with the connection — pgxpool
+    must NOT be used for LISTEN).
+- Rooms/presence remain node-local (documented limitation); sticky LB by
+  app-id keeps room participants colocated.
+
+Config: `INSTANT_V2_INVALIDATION_BUS=none|postgres` (default none),
+`INSTANT_V2_NODE_ID` (default hostname, appears in logs/health for ops).
+
+### Acceptance
+
+Integration test (skips without TEST_DATABASE_URL, same pattern as waltail):
+two Stores over one DB, commit on A → B's subscriber refreshes within bound;
+payload-truncation fallback covered by unit test.
+
+---
+
+## T2.5 Incremental result maintenance
+
+### Problem
+
+Every invalidation recomputes the full InstaQL result. For match-all queries
+under append-heavy workloads the result barely changes per write: cost is
+O(result) where O(change) would do. This is the ceiling-raiser that makes the
+485%-CPU class of workload collapse even without client negotiation.
+
+### Design
+
+Incremental engine **inside reactive, behind the existing Refresh seam**
+(instaql stays the oracle):
+
+- Change records flow with invalidations: `Change{Etype, EntityID string,
+  AttrIDs []string}`. Sources: WS `transact` (resolved steps know entity +
+  attr), HTTP transact handler, admin bridge (same info). New
+  `Notifier.NotifyChanges(ctx, appID, changes, txID)`; legacy `Notify`
+  delegates with unknown changes → full recompute (unchanged behavior).
+- `Subscription` gains optional materialized state per top-level form:
+  ordered entity-id list + cached field maps. Engine applies a ChangeSet:
+  - **update-in-place** (entity known member): batch-fetch changed entities'
+    rows (reuse instaql's batched loader), splice, re-render;
+  - **create/delete**: targeted membership check (run the form's WHERE for
+    that one entity) before insert/remove;
+  - **bail-outs to full refresh**: nested forms, pagination cursors,
+    aggregates, order ops, unknown changes, engine uncertainty of any kind.
+- Emission is identical either way: the rendered envelope feeds the same
+  group dispatch path, so clients cannot tell which path produced bytes.
+- Correctness invariant: full refresh remains the oracle. Property test runs
+  randomized workloads through incremental-only and full-refresh-only paths
+  and diffs envelopes byte-wise; any bail-out divergence is a bug.
+
+Scope guard: v1 targets the dominant economics case (top-level forms, no
+cursor/aggregate/order). Everything else silently takes today's path.
+
+### Acceptance
+
+Fuzz differential (incremental == full) plus benchmark: match-all group under
+8 tx/s append load — target ≥80% fewer instaql CTE executions vs post-T1.1.
+
+---
+
+## Sequencing
+
+T2.1 → T2.2 → T2.3 → T2.4 are independent of T2.5 and land first (days);
+T2.5 lands last (weeks-scale review surface). Every step lands green under
+`go test -race ./...`; final verification reruns the comparative soak and the
+groups fanout benchmark.
+
+## Summary table
+
+| # | Item | Effort | Payoff |
+|---|------|--------|--------|
+| T2.1 | Backpressure gate + health gauge | ~1 d | Overload survival |
+| T2.2 | permessage-deflate knob | ~½ d | ~10× wire on big envelopes |
+| T2.3 | Read/write pools (+replica URL) | ~1 d | Writes isolated from read storms |
+| T2.4 | Invalidation bus (LISTEN/NOTIFY) | ~2–3 d | Linear session scale-out |
+| T2.5 | Incremental maintenance | 2–3 wk | O(change) refresh cost |

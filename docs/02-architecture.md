@@ -141,3 +141,22 @@ type Subscription interface {
 Go `^1.24`, `jackc/pgx/v5`, `jackc/pglogrepl`, `github.com/cel-go/cel-go` (reference impl),
 `coder/websocket`, `aws-sdk-go-v2` (s3), `golang-jwt/jwt/v5` + `jwks-rsa`, `chi` or stdlib mux,
 `slog`, `otel-go`, `goose`.
+
+## 8. Multi-node operation (Tier 2)
+
+v2 scales out symmetrically (docs/09-tier2-architecture.md §T2.4). Sessions
+remain node-local; Postgres remains the only shared state and the per-app
+write serializer (§5 invariant 1).
+
+- **Invalidation bus**: with `INSTANT_V2_INVALIDATION_BUS=postgres`, every
+  committed write is published on the `instant_v2_invalidate` NOTIFY channel
+  and applied by each peer's local notifier (`internal/bus`). Delivery is
+  idempotent — refreshes dedupe on the subscription watermark.
+- **No ownership leases**: any node may accept writes for any app. The
+  audit's advisory-lock shard-ownership sketch buys replay dedup only if the
+  WAL-tailer path replaces direct notify; recorded as follow-up, not built.
+- **Stickiness**: LB app-id affinity is an optimization (connection reuse,
+  cache warmth), never a correctness requirement.
+- **Known limitation**: rooms/presence fan-out is in-process. Participants in
+  one room must land on one node — keep sticky routing for room-heavy apps
+  until ephemeral state gets a bus channel of its own.

@@ -29,6 +29,13 @@ lock — safe to run multiple replicas against one DB).
 | `DATABASE_URL` | — (required) | Postgres DSN |
 | `INSTANT_V2_HTTP_ADDR` | `:8080` | Listen address (`INSTANT_V2_HTTP_PORT` also accepted) |
 | `INSTANT_V2_STORAGE_SECRET` | derived from DSN (dev only) | HMAC key signing storage presigned URLs |
+| `INSTANT_V2_READ_URL` | `$DATABASE_URL` | Read-plane DSN (instaql refreshes); point at a replica to isolate reads (docs/09 §T2.3) |
+| `INSTANT_V2_WRITE_POOL_MAXCONNS` | 32 | Write-pool connection ceiling |
+| `INSTANT_V2_READ_POOL_MAXCONNS` | 32 | Read-pool connection ceiling |
+| `INSTANT_V2_MAX_QUEUE_DEPTH` | 0 (off) | Shed transacts (429 + Retry-After) when the refresh queue crosses this depth; reopens at half (docs/09 §T2.1) |
+| `INSTANT_V2_WS_COMPRESSION` | `disabled` | permessage-deflate: `no-context-takeover` or `context-takeover` (docs/09 §T2.2) |
+| `INSTANT_V2_INVALIDATION_BUS` | `none` | `postgres` enables LISTEN/NOTIFY invalidation across nodes — required when running >1 instantd against one DB (docs/09 §T2.4) |
+| `INSTANT_V2_NODE_ID` | hostname | Node identity in logs and `/health` |
 
 ## Creating an app
 

@@ -262,3 +262,13 @@ Post-exit: tag `v0.1.0-alpha`, publish self-host compose (derived from `self-hos
 - Phases 1 and 2 may overlap only at the interface boundary defined in 02 §4 — types first, logic second.
 - Phase 3 depends on transactor already validating lookups that `Plan` intersects.
 - Phase 4 is the only phase allowed to touch `sync/waltail/reactive/authn` together; keep it behind the prior gates so invalidator bugs have nowhere to hide.
+
+## Post-phase: Tier 2 architecture (docs/09-tier2-architecture.md)
+
+Shipped after the Tier 1 hot-path wins (docs/08): backpressure gate (T2.1),
+permessage-deflate knob (T2.2), read/write pool split with optional replica
+DSN (T2.3), Postgres LISTEN/NOTIFY invalidation bus for symmetric multi-node
+operation (T2.4), and incremental result maintenance behind the Refresh seam
+with full-refresh oracle fuzzing (T2.5). Partitioning stays behind an ADR;
+lease-based shard ownership is a follow-up only if the WAL-tailer path
+replaces direct notify.

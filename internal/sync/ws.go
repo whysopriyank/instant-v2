@@ -20,14 +20,31 @@ type WSHandler struct {
 	Store   *reactive.Store
 	// Refresh compiles+runs a subscription query; wired from instaql in assembly.
 	Refresh func(ctx context.Context, sub *reactive.Subscription) (json.RawMessage, error)
+	// Compression selects permessage-deflate handling
+	// (docs/09-tier2-architecture.md §T2.2): "" | "disabled" |
+	// "no-context-takeover" | "context-takeover". Empty/disabled keeps the
+	// historical byte-exact behavior; takeover mode persists the LZ77 window
+	// across frames, which is where large refresh envelopes win.
+	Compression string
 
 	live connRegistry // live conns for graceful drain
+}
+
+func compressionMode(cfg string) websocket.CompressionMode {
+	switch cfg {
+	case "no-context-takeover":
+		return websocket.CompressionNoContextTakeover
+	case "context-takeover":
+		return websocket.CompressionContextTakeover
+	default:
+		return websocket.CompressionDisabled
+	}
 }
 
 func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		OriginPatterns:  []string{"*"},
-		CompressionMode: websocket.CompressionDisabled,
+		CompressionMode: compressionMode(h.Compression),
 	})
 	if err != nil {
 		return

@@ -5,20 +5,24 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/coder/websocket"
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"syscall"
 
 	"github.com/instant-v2/instant-v2/internal/adminapi"
 	"github.com/instant-v2/instant-v2/internal/authn"
+	"github.com/instant-v2/instant-v2/internal/bus"
 	"github.com/instant-v2/instant-v2/internal/config"
 	"github.com/instant-v2/instant-v2/internal/instaql"
 	"github.com/instant-v2/instant-v2/internal/platform"
@@ -29,13 +33,6 @@ import (
 	syncpkg "github.com/instant-v2/instant-v2/internal/sync"
 	"github.com/instant-v2/instant-v2/internal/transact"
 )
-
-// notifierBridge connects storage writes to the reactive invalidator for the
-// single-instance deployment: after each committed transact, notify directly.
-type notifierBridge struct {
-	pool *pgxpool.Pool
-	n    *reactive.Notifier
-}
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -68,7 +65,9 @@ func run(logger *slog.Logger) error {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", health(db))
+	if db == nil {
+		mux.HandleFunc("GET /health", health(nil, nil, cfg))
+	}
 
 	var (
 		store    *reactive.Store
@@ -85,29 +84,133 @@ func run(logger *slog.Logger) error {
 		}
 		logger.Info("schema ready", "version", v)
 
-		poolCfg, err := pgxpool.ParseConfig(cfg.DatabaseURL)
+		// Read/write plane split (docs/09-tier2-architecture.md §T2.3):
+		// writes and identity-sensitive reads (catalog cache) stay on the
+		// writer; instaql refreshes route to the read pool so snapshot
+		// storms cannot starve transactors of connections. With
+		// INSTANT_V2_READ_URL unset this is the same instance — two pools,
+		// two budgets, one server.
+		writeCfg, err := pgxpool.ParseConfig(cfg.DatabaseURL)
 		if err != nil {
 			return err
 		}
-		if poolCfg.MaxConns < 32 {
-			poolCfg.MaxConns = 32 // reactive refreshes + transacts share the pool
+		if cfg.WritePoolMaxConns > 0 {
+			writeCfg.MaxConns = cfg.WritePoolMaxConns
+		} else if writeCfg.MaxConns < 32 {
+			writeCfg.MaxConns = 32 // reactive refreshes + transacts share the writer budget
 		}
-		pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
+		writePool, err := pgxpool.NewWithConfig(ctx, writeCfg)
 		if err != nil {
 			return err
 		}
-		defer pool.Close()
+		defer writePool.Close()
+
+		readDSN := cfg.ReadDatabaseURL
+		if readDSN == "" {
+			readDSN = cfg.DatabaseURL
+		}
+		readCfg, err := pgxpool.ParseConfig(readDSN)
+		if err != nil {
+			return err
+		}
+		if cfg.ReadPoolMaxConns > 0 {
+			readCfg.MaxConns = cfg.ReadPoolMaxConns
+		} else if readCfg.MaxConns < 32 {
+			readCfg.MaxConns = 32
+		}
+		readPool, err := pgxpool.NewWithConfig(ctx, readCfg)
+		if err != nil {
+			return err
+		}
+		defer readPool.Close()
+
+		pool := writePool // legacy alias for write-plane services below
 
 		st := storage.New(pool)
 		cats := platform.NewCatalogCache(pool, pool)
 		store = reactive.NewStore()
-		ex := &instaql.Executor{DB: pool}
+		ex := &instaql.Executor{DB: readPool} // hot read plane (docs/09 §T2.3)
 		notifier = &reactive.Notifier{
 			Store:   store,
 			Refresh: refreshFor(ex, cats),
 			Logger:  logger,
+			// Incremental result maintenance (docs/09 §T2.5): splices
+			// known entity changes into materialized results; bails to
+			// full refresh for anything it cannot prove. instaql stays
+			// the oracle — probes mirror its SQL and are pinned by the
+			// fuzz differential in internal/reactive.
+			Inc: &reactive.Incremental{
+				Source: &reactive.InstaqlSource{DB: readPool, Catalog: cats.For},
+			},
 		}
 		go notifier.Run(ctx)
+
+		// Shared invalidation entry point for every write plane (WS,
+		// HTTP, admin): local notify first (zero added latency), then bus
+		// publish so peers refresh their own subscribers
+		// (docs/09-tier2-architecture.md §T2.4). Self-echo is harmless —
+		// Notify dedupes via the subscription watermark.
+		var publisher bus.Publisher // nil unless the postgres bus is on
+		var invalidate func(ctx context.Context, appID string, attrIDs []string, txID int64)
+		var invalidateChanges func(ctx context.Context, appID string, changes []reactive.Change, txID int64)
+		if cfg.InvalidationBus == "postgres" {
+			pubConn, perr := dedicatedConn(ctx, writePool)
+			if perr != nil {
+				return fmt.Errorf("bus publisher conn: %w", perr)
+			}
+			defer pubConn.Release()
+			publisher = pgPublisher{pg: pubConn.Conn()}
+			listenConn, lerr := dedicatedConn(ctx, writePool)
+			if lerr != nil {
+				return fmt.Errorf("bus listener conn: %w", lerr)
+			}
+			defer listenConn.Release()
+			go func() {
+				err := bus.RunWithLogger(ctx, listenConn.Conn(), func(inv bus.Invalidation) {
+					notifier.Notify(ctx, inv.AppID, inv.AttrIDs, inv.TxID)
+				}, logger)
+				if err != nil && ctx.Err() == nil {
+					logger.Error("invalidation bus stopped", "err", err)
+				}
+			}()
+		}
+		invalidate = func(ctx context.Context, appID string, attrIDs []string, txID int64) {
+			notifier.Notify(ctx, appID, attrIDs, txID)
+			if publisher != nil {
+				go func() {
+					if err := publisher.PublishInvalidation(context.WithoutCancel(ctx),
+						bus.Invalidation{AppID: appID, AttrIDs: attrIDs, TxID: txID}); err != nil {
+						logger.Warn("bus publish failed", "err", err)
+					}
+				}()
+			}
+		}
+
+		// Change-routed variant for the WS plane: entity-annotated events
+		// feed the incremental engine locally; peers receive the attr-id
+		// projection (entity ids stay local — the bus payload is
+		// topic-granular, which only costs peers a full recompute).
+		invalidateChanges = func(ctx context.Context, appID string, changes []reactive.Change, txID int64) {
+			notifier.NotifyChanges(ctx, appID, changes, txID)
+			if publisher != nil {
+				attrSet := map[string]bool{}
+				for _, c := range changes {
+					for _, a := range c.AttrIDs {
+						attrSet[a] = true
+					}
+				}
+				attrs := make([]string, 0, len(attrSet))
+				for a := range attrSet {
+					attrs = append(attrs, a)
+				}
+				go func() {
+					if err := publisher.PublishInvalidation(context.WithoutCancel(ctx),
+						bus.Invalidation{AppID: appID, AttrIDs: attrs, TxID: txID}); err != nil {
+						logger.Warn("bus publish failed", "err", err)
+					}
+				}()
+			}
+		}
 
 		authSvc := &authn.Service{
 			DB:       st,
@@ -116,20 +219,22 @@ func run(logger *slog.Logger) error {
 			Logger:   logger,
 		}
 		mgr := syncpkg.NewManager(syncpkg.Deps{
-			DB:       st,
-			Catalogs: cats,
-			Store:    store,
-			Rooms:    syncpkg.NewRoomHub(),
-			Auth:     authSvc,
-			OnCommit: func(ctx context.Context, appID string, attrIDs []string, txID int64) {
-				// Single-node direct post-commit invalidation.
-				notifier.Notify(ctx, appID, attrIDs, txID)
-			},
-			Logger: logger,
+			DB:              st,
+			Catalogs:        cats,
+			Store:           store,
+			Rooms:           syncpkg.NewRoomHub(),
+			Auth:            authSvc,
+			OnCommit:        invalidate, // set below once notifier + bus exist
+			OnCommitChanges: invalidateChanges,
+			// Overload gate (docs/09 §T2.1): shed transacts when the
+			// refresh queue crosses MaxQueueDepth; off by default.
+			TransactGate: gateFor(notifier, cfg.MaxQueueDepth),
+			Logger:       logger,
 		})
 		ws = &syncpkg.WSHandler{
-			Manager: mgr,
-			Store:   store,
+			Manager:     mgr,
+			Store:       store,
+			Compression: cfg.WSCompression,
 			Refresh: func(ctx context.Context, sub *reactive.Subscription) (json.RawMessage, error) {
 				q, err := instaql.Coerce(rawToMap(sub.Query))
 				if err != nil {
@@ -184,10 +289,10 @@ func run(logger *slog.Logger) error {
 			Catalogs: cats,
 			Logger:   logger,
 			OnCommit: func(ctx context.Context, appID [16]byte, attrIDs []string, txID int64) {
-				// Admin-plane writes must invalidate live subscribers too.
-				// Detach: the request context dies when handleTransact
-				// returns, but refreshes must outlive it.
-				go notifier.Notify(context.WithoutCancel(ctx), platform.UUIDToStr(appID), attrIDs, txID)
+				// Admin-plane writes must invalidate live subscribers on
+				// every node. Detach: the request context dies when
+				// handleTransact returns, but refreshes must outlive it.
+				go invalidate(context.WithoutCancel(ctx), platform.UUIDToStr(appID), attrIDs, txID)
 			},
 		})
 
@@ -202,9 +307,9 @@ func run(logger *slog.Logger) error {
 			Catalogs: cats,
 		})
 
-		// Post-commit invalidation bridge: wraps transact via HTTP-level hook.
-		bridge := &notifierBridge{pool: pool, n: notifier}
-		mux.Handle("POST /runtime/transact", transactHandler(st, cats, bridge))
+		gate := gateFor(notifier, cfg.MaxQueueDepth)
+		mux.Handle("POST /runtime/transact", transactHandler(st, cats, invalidate, invalidateChanges, gate))
+		mux.HandleFunc("GET /health", health(db, notifier, cfg))
 	}
 
 	srv := &http.Server{
@@ -237,7 +342,10 @@ func run(logger *slog.Logger) error {
 	}
 }
 
-func transactHandler(st *storage.DB, cats *platform.CatalogCache, b *notifierBridge) http.HandlerFunc {
+func transactHandler(st *storage.DB, cats *platform.CatalogCache,
+	invalidate func(ctx context.Context, appID string, attrIDs []string, txID int64),
+	invalidateChanges func(ctx context.Context, appID string, changes []reactive.Change, txID int64),
+	gate func(appID string) error) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			AppID string            `json:"app-id"`
@@ -247,6 +355,20 @@ func transactHandler(st *storage.DB, cats *platform.CatalogCache, b *notifierBri
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, `{"error":"bad json"}`, 400)
 			return
+		}
+		// Overload gate (docs/09 §T2.1): 429 + Retry-After before any
+		// Postgres work, mirroring the WS shed frame.
+		if gate != nil {
+			if gerr := gate(req.AppID); gerr != nil {
+				var shed *reactive.ShedError
+				retry := time.Second
+				if errors.As(gerr, &shed) && shed.RetryAfter > 0 {
+					retry = shed.RetryAfter
+				}
+				w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(retry.Seconds()))))
+				http.Error(w, `{"error":"server busy"}`, http.StatusTooManyRequests)
+				return
+			}
 		}
 		parsed, err := transact.ParseSteps(req.Steps)
 		if err != nil {
@@ -268,9 +390,24 @@ func transactHandler(st *storage.DB, cats *platform.CatalogCache, b *notifierBri
 			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusForbidden)
 			return
 		}
-		// Direct post-commit notification (single-instance path).
+		// Post-commit invalidation on every node (docs/09 §T2.4); the
+		// change-routed variant feeds the incremental engine (§T2.5).
+		if invalidateChanges != nil {
+			if triples, ok := transact.ResolveTriples(parsed, cat); ok && len(triples) > 0 {
+				changes := make([]reactive.Change, 0, len(triples))
+				for _, tt := range triples {
+					changes = append(changes, reactive.Change{
+						Etype: tt.Etype, EntityID: tt.EntityID, AttrIDs: []string{tt.AttrID},
+					})
+				}
+				go invalidateChanges(context.WithoutCancel(r.Context()), req.AppID, changes, res.TxID)
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{"tx-id": res.TxID})
+				return
+			}
+		}
 		attrsTouched := touchedAttrs(parsed, cat)
-		go b.n.Notify(r.Context(), req.AppID, attrsTouched, res.TxID)
+		go invalidate(context.WithoutCancel(r.Context()), req.AppID, attrsTouched, res.TxID)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"tx-id": res.TxID})
 	}
@@ -320,7 +457,10 @@ func rawToMap(raw json.RawMessage) map[string]any {
 	return m
 }
 
-func health(db *sql.DB) http.HandlerFunc {
+// health reports liveness plus the overload gauges operators (and LBs) need:
+// notifier queue depth and, when shedding is enabled, its configured ceiling
+// (docs/09-tier2-architecture.md §T2.1).
+func health(db *sql.DB, n *reactive.Notifier, cfg config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if db == nil {
@@ -334,8 +474,42 @@ func health(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"ok":true,"db":true}`))
+		body := map[string]any{
+			"ok":          true,
+			"db":          true,
+			"node":        cfg.NodeName(),
+			"queue-depth": 0,
+			"queue-max":   cfg.MaxQueueDepth,
+			"bus":         cfg.InvalidationBus,
+		}
+		if n != nil {
+			body["queue-depth"] = n.QueueDepth()
+		}
+		_ = json.NewEncoder(w).Encode(body)
 	}
+}
+
+// gateFor returns the transact shed gate, or nil when shedding is disabled
+// (MaxQueueDepth <= 0 preserves pre-T2 unbounded-queue behavior).
+func gateFor(n *reactive.Notifier, maxDepth int64) func(appID string) error {
+	if n == nil || maxDepth <= 0 {
+		return nil
+	}
+	return n.Gate(maxDepth)
+}
+
+// dedicatedConn pins one pool connection for the process lifetime. LISTEN
+// state dies with the connection, so the bus must never share pooled conns.
+func dedicatedConn(ctx context.Context, pool *pgxpool.Pool) (*pgxpool.Conn, error) {
+	return pool.Acquire(ctx)
+}
+
+// pgPublisher adapts a dedicated connection to bus.Publisher. The listener
+// gets its own conn: pgconn is not safe for concurrent Exec + WaitForNotification.
+type pgPublisher struct{ pg bus.Conn }
+
+func (p pgPublisher) PublishInvalidation(ctx context.Context, inv bus.Invalidation) error {
+	return bus.Publish(ctx, p.pg, inv)
 }
 
 var _ = websocket.Accept

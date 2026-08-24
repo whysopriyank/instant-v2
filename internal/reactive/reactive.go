@@ -15,6 +15,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Frame is one outbound refresh payload for a subscription.
@@ -46,7 +47,11 @@ type Subscription struct {
 	Emit      func(Frame)
 	Cancelled bool
 
-	mu   sync.Mutex
+	mu sync.Mutex
+	// mat is the optional incremental-engine state (docs/09-tier2-architecture.md
+	// §T2.5): materialized member lists per top-level form, seeded only by full
+	// refresh results. Guarded by mu alongside last. Zero value = disabled.
+	mat  matState
 	last json.RawMessage // last full snapshot; diff baseline for delta-refresh
 }
 
@@ -175,6 +180,22 @@ func (s *Store) SubsForTopics(attrIDs []string) []string {
 	return out
 }
 
+// SubsForApp returns every active subscription id for an app — the routing
+// set when an invalidation carries no topic information at all
+// (NotifyChanges with unknown changes, docs/09-tier2-architecture.md §T2.5).
+func (s *Store) SubsForApp(appID string) []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []string
+	for id, sub := range s.byID {
+		if sub.AppID == appID {
+			out = append(out, id)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // Len reports active subscriptions (test hook).
 func (s *Store) Len() int {
 	s.mu.RLock()
@@ -189,13 +210,21 @@ type Notifier struct {
 	// Refresh re-runs one subscription's query and returns the result JSON.
 	// Wired to instaql by cmd/instantd; kept as a function so tests can fake it.
 	Refresh func(ctx context.Context, sub *Subscription) (json.RawMessage, error)
+	Logger  *slog.Logger
 
-	Logger *slog.Logger
+	// Inc, when non-nil, enables incremental result maintenance behind the
+	// Refresh seam (docs/09-tier2-architecture.md §T2.5). nil — the default —
+	// keeps today's byte-for-byte full-recompute path.
+	Inc *Incremental
 
-	mu      sync.Mutex
 	pending map[string]int64 // subID → latest tx-id awaiting refresh
-	wake    chan struct{}
-	once    sync.Once
+	// pendingCh holds coalesced known change sets alongside pending; absent
+	// entry = unknown changes = full recompute. Guarded by mu.
+	pendingCh map[string][]Change
+
+	mu   sync.Mutex
+	wake chan struct{}
+	once sync.Once
 
 	gauge atomic.Int64 // pending refreshes; lock-free backpressure signal
 }
@@ -205,29 +234,60 @@ type Notifier struct {
 // checkpoint frequency when it climbs); it never blocks.
 func (n *Notifier) QueueDepth() int { return int(n.gauge.Load()) }
 
+// shedRetryAfter is the fixed denial hint (docs/09-tier2-architecture.md
+// §T2.1: "Denial is *ShedError{RetryAfter} (250 ms fixed)").
+const shedRetryAfter = 250 * time.Millisecond
+
+// ShedError is the backpressure denial produced by a Notifier gate when the
+// refresh queue for an app is over capacity. The sync layer maps it onto the
+// same 429-shaped error frame its rate-limit gate emits; HTTP surfaces it as
+// 429 + Retry-After.
+type ShedError struct {
+	RetryAfter time.Duration
+}
+
+func (e *ShedError) Error() string {
+	return fmt.Sprintf("reactive: transact shed under queue backpressure; retry after %s", e.RetryAfter)
+}
+
+// Gate returns the transact-path admission check wired into
+// sync.Deps.TransactGate (docs/09 §T2.1). It reads Notifier.QueueDepth's
+// underlying gauge with atomic loads/stores only — no locks on the transact
+// path — and latches hysteresis-style: deny once depth reaches maxDepth,
+// stay denying until depth falls below maxDepth/2, so a queue hovering in
+// the middle band flaps neither way.
+//
+// maxDepth <= 0 yields an always-allow gate (INSTANT_V2_MAX_QUEUE_DEPTH=0,
+// today's behavior). Degenerate corner: maxDepth == 1 has low-water 0, so
+// once latched it never reopens — operators should set maxDepth >= 2.
+func (n *Notifier) Gate(maxDepth int64) func(appID string) error {
+	if maxDepth <= 0 {
+		return func(string) error { return nil }
+	}
+	low := maxDepth / 2
+	var shedding atomic.Bool
+	return func(string) error {
+		depth := n.gauge.Load()
+		switch {
+		case !shedding.Load() && depth >= maxDepth:
+			shedding.Store(true)
+		case shedding.Load() && depth < low:
+			shedding.Store(false)
+		}
+		if !shedding.Load() {
+			return nil
+		}
+		return &ShedError{RetryAfter: shedRetryAfter}
+	}
+}
+
 // Notify enqueues invalidation for the given attrs after txID committed.
 // Coalescing: multiple notifications collapse into one refresh per sub.
+// Legacy path: no change records are attached, so drains take the full
+// recompute exactly as before (docs/09 §T2.5).
 func (n *Notifier) Notify(ctx context.Context, appID string, attrIDs []string, txID int64) {
-	n.mu.Lock()
-	if n.pending == nil {
-		n.pending = map[string]int64{}
-	}
-	added := 0
-	for _, id := range n.Store.SubsForTopics(attrIDs) {
-		if sub, ok := n.Store.Get(id); ok && sub.AppID == appID && txID > sub.TxID.Load() {
-			n.pending[id] = txID
-			added++
-		}
-	}
-	if added > 0 {
-		n.gauge.Add(int64(added))
-	}
-	n.mu.Unlock()
-	n.once.Do(func() { n.wake = make(chan struct{}, 1) })
-	select {
-	case n.wake <- struct{}{}:
-	default:
-	}
+	_ = ctx
+	n.enqueue(appID, n.Store.SubsForTopics(attrIDs), txID, nil)
 }
 
 // Workers is the refresh concurrency. Queries hit Postgres independently, so
@@ -251,51 +311,59 @@ func (n *Notifier) Run(ctx context.Context) {
 			return
 		case <-n.wake:
 		}
-
-		for {
-			// Snapshot one drain batch.
-			n.mu.Lock()
-			if len(n.pending) == 0 {
-				n.mu.Unlock()
-				break
-			}
-			batch := n.pending
-			n.pending = map[string]int64{}
-			n.gauge.Add(-int64(len(batch)))
-			n.mu.Unlock()
-
-			// Nothing subscribed anywhere: record decode/dispatch upstream
-			// is wasted motion — drop the batch without touching workers.
-			if n.Store.Len() == 0 {
-				continue
-			}
-
-			var wg sync.WaitGroup
-			sem := make(chan struct{}, Workers)
-			for id, txID := range batch {
-				wg.Add(1)
-				select {
-				case sem <- struct{}{}:
-				case <-ctx.Done():
-					wg.Done()
-					continue
-				}
-				go func(id string, txID int64) {
-					defer func() { <-sem; wg.Done() }()
-					n.refreshOne(ctx, log, id, txID)
-				}(id, txID)
-			}
-			wg.Wait()
+		for n.drainPass(ctx, log) {
 		}
 	}
+}
+
+// drainPass processes one snapshot of the pending set through a bounded
+// worker pool, reporting whether any work existed. Extracted from Run so
+// tests can drive drains synchronously — the incremental differential needs
+// deterministic interleaving (docs/09 §T2.5 acceptance).
+func (n *Notifier) drainPass(ctx context.Context, log *slog.Logger) bool {
+	// Snapshot one drain batch.
+	n.mu.Lock()
+	if len(n.pending) == 0 {
+		n.mu.Unlock()
+		return false
+	}
+	batch := n.pending
+	n.pending = map[string]int64{}
+	n.gauge.Add(-int64(len(batch)))
+	n.mu.Unlock()
+
+	// Nothing subscribed anywhere: record decode/dispatch upstream
+	// is wasted motion — drop the batch without touching workers.
+	if n.Store.Len() == 0 {
+		return true
+	}
+
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, Workers)
+	for id, txID := range batch {
+		wg.Add(1)
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			wg.Done()
+			continue
+		}
+		go func(id string, txID int64) {
+			defer func() { <-sem; wg.Done() }()
+			n.refreshOne(ctx, log, id, txID)
+		}(id, txID)
+	}
+	wg.Wait()
+	return true
 }
 
 func (n *Notifier) refreshOne(ctx context.Context, log *slog.Logger, id string, txID int64) {
 	sub, ok := n.Store.Get(id)
 	if !ok || sub.Cancelled || txID <= sub.TxID.Load() {
+		n.dropChanges(id) // don't leak change bookkeeping for a skipped drain
 		return
 	}
-	result, err := n.Refresh(ctx, sub)
+	result, err := n.refreshResult(ctx, id, sub)
 	if err != nil {
 		log.Error("reactive: refresh failed", "sub", id, "err", err)
 		return
@@ -326,4 +394,22 @@ func (n *Notifier) refreshOne(ctx context.Context, log *slog.Logger, id string, 
 			ProcessedTxID: txID,
 		})
 	}
+}
+
+// refreshResult produces one drain's envelope. When the invalidation carried
+// a known change set and the engine is wired, incremental maintenance gets
+// first crack (docs/09-tier2-architecture.md §T2.5); any bail-out falls back
+// to Refresh, which remains the oracle and re-seeds materialized state.
+func (n *Notifier) refreshResult(ctx context.Context, id string, sub *Subscription) (json.RawMessage, error) {
+	changes, known := n.takeChanges(id)
+	if known && n.Inc != nil {
+		if out, ok := n.Inc.apply(ctx, sub, changes); ok {
+			return out, nil
+		}
+	}
+	result, err := n.Refresh(ctx, sub)
+	if err == nil && n.Inc != nil {
+		n.Inc.materialize(sub, result)
+	}
+	return result, err
 }
