@@ -107,6 +107,28 @@ Notes, stated plainly:
   unbounded time under pool pressure; fixed with batched `= ANY(...)` loading
   (single query, 64 ms for the full snapshot post-fix).
 
-Verdict: at equal connection-hold and durable-write capacity, memory is
-comparable; v2 delivers the reactive layer v1's boot could not, at the cost
-of proportional CPU. Full 5000×30-min v2-only soak numbers stand from Phase 4.
+Verdict (pre-T1.1): at equal connection-hold and durable-write capacity,
+memory is comparable; v2 delivers the reactive layer v1's boot could not, at
+the cost of proportional CPU. Full 5000×30-min v2-only soak numbers stand
+from Phase 4.
+
+### Post Tier-1 rerun (same workload, commit da65259+)
+
+Query-group dedupe changed the picture materially:
+
+| metric                  | v2 baseline | v2 post-T1.1   | delta            |
+|-------------------------|-------------|----------------|------------------|
+| sessions                | 2000        | 2000           | —                |
+| writes committed        | 4079        | 3619           | —                |
+| drops                   | 0           | 0              | —                |
+| LIVE refreshes delivered| 65,313      | **3,101,127**  | **47× more**     |
+| peak server RSS         | ~2.50 GB    | **~156 MB**    | **−94%**         |
+| avg server CPU          | ~485%       | **~31%**       | **−94%**         |
+
+The refresh explosion is the story: pre-dedupe, every write demanded 2000
+full recomputes (~16k instaql queries/s); the notifier drowned, coalesced
+away ~97% of deliveries, and burned ~5 cores doing it. Post-dedupe, a write
+costs ONE recompute shared by all subscribers — the drain keeps up, and
+clients finally receive the live updates they subscribed for (~857 per
+client over the run vs ~32 before). Lower CPU, lower memory, and strictly
+more correct delivery.
