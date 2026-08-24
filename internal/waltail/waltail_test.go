@@ -82,6 +82,14 @@ func TestTailerDeliversTriplesChanges(t *testing.T) {
 	if err := tailer.CheckWalLevel(ctx); err != nil {
 		t.Skip(err.Error())
 	}
+	// Fresh slot too: a slot left over from earlier runs (or other suites
+	// sharing the cluster) can lag gigabytes of WAL behind; the tailer would
+	// spend its whole timeout streaming backlog before current records.
+	if _, err := sqlDB.Exec(
+		`SELECT pg_drop_replication_slot('instant_v2_tail')
+		 WHERE EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name='instant_v2_tail')`); err != nil {
+		t.Fatal(err)
+	}
 	if err := tailer.EnsurePublication(ctx); err != nil {
 		t.Fatalf("EnsurePublication: %v", err)
 	}
