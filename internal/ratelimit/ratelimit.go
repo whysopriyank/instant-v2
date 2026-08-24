@@ -27,6 +27,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/instant-v2/instant-v2/internal/metrics"
 )
 
 // Class enumerates the frozen traffic classes.
@@ -125,6 +127,7 @@ func (l *Limiter) Allow(appID string, class Class) (ok bool, retryAfter time.Dur
 	}
 	if cc.Burst <= 0 || cc.Rate <= 0 {
 		// Degenerate config: deny hard rather than divide by zero.
+		metrics.RateLimitRejections.WithLabelValues(string(class)).Inc()
 		return false, time.Minute
 	}
 
@@ -148,6 +151,7 @@ func (l *Limiter) Allow(appID string, class Class) (ok bool, retryAfter time.Dur
 		return true, 0
 	}
 	deficit := 1 - b.tokens
+	metrics.RateLimitRejections.WithLabelValues(string(class)).Inc()
 	return false, time.Duration(deficit / cc.Rate * float64(time.Second))
 }
 

@@ -57,6 +57,13 @@ func (h *SSEHandler) conn(tokenHash string) (*sseConn, bool) {
 	return c, ok
 }
 
+// ConnCount reports live SSE connections (scrape-time gauge source).
+func (h *SSEHandler) ConnCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.conns)
+}
+
 func tokenHashOf(token string) string {
 	h := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(h[:])

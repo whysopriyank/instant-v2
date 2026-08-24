@@ -59,7 +59,7 @@ func TestHandlerS3ObjectRoundTrip(t *testing.T) {
 		t.Fatalf("put object: got %d body=%s", rec.Code, rec.Body.String())
 	}
 	f.mu.Lock()
-	dump, ok := f.objects["dumps/app.ndjson"]
+	dump, ok := f.objects[appStr+"/dumps/app.ndjson"] // keys are app-scoped (security fix)
 	f.mu.Unlock()
 	if !ok || len(dump) == 0 {
 		t.Fatal("object missing after put")

@@ -27,6 +27,10 @@ type Options struct {
 type Result struct {
 	TxID int64
 	EIDs [][]byte
+	// AttrsChanged reports whether the batch mutated attribute metadata
+	// (add/update/delete/restore-attr). Callers must drop their cached
+	// catalogs when set — the in-tx overlay dies with the transaction.
+	AttrsChanged bool
 }
 
 // Transact is the Phase 2 entrypoint. It mirrors db/transaction.clj's
@@ -51,6 +55,12 @@ func Transact(
 ) (Result, error) {
 	ordered := orderSteps(steps)
 	var res Result
+	for _, st := range steps {
+		switch st.Op {
+		case "add-attr", "update-attr", "delete-attr", "restore-attr":
+			res.AttrsChanged = true
+		}
+	}
 	err := db.WithTx(ctx, func(tx pgx.Tx) error {
 		txID, err := storage.RecordTransaction(ctx, tx, appID)
 		if err != nil {
@@ -58,11 +68,59 @@ func Transact(
 		}
 		res.TxID = txID
 
+		// add-attr first: the frozen protocol lets clients mint attr ids and
+		// reference them in later steps of the SAME batch, so creation must
+		// precede lookup/value resolution. Created attrs register into a
+		// per-tx catalog clone — the shared cache updates via invalidation.
+		txCat := catalog
+		if hasOp(steps, "add-attr") {
+			txCat = catalog.Clone()
+			// clientAttrID → serverAttrID for attrs the server already
+			// stores under another id (replayed or implicit-attr replays,
+			// e.g. <etype>/id). Mirrors the TS client's _rewriteMutations.
+			attrAlias := map[[16]byte][16]byte{}
+			for _, st := range steps {
+				if st.Op != "add-attr" {
+					continue
+				}
+				a, err := parseWireAttr(st.Args[0])
+				if err != nil {
+					return fmt.Errorf("transact: add-attr: %w", err)
+				}
+				existing, found, err := platform.FindAttrByIdent(ctx, tx, appID, deref(a.Etype), deref(a.Label))
+				if err != nil {
+					return fmt.Errorf("transact: add-attr: %w", err)
+				}
+				if found {
+					// Adopt the stored definition; alias the client's id so
+					// same-batch triples resolve and are rewritten below.
+					attrAlias[a.ID] = existing.ID
+					txCat.Add(existing)
+					aliased := existing
+					aliased.ID = a.ID
+					txCat.Add(aliased)
+					continue
+				}
+				if !opts.Admin && ruleDoc != nil {
+					if expr := ruleDoc.ResolveExpr("attrs", "create"); expr == "false" {
+						return fmt.Errorf("transact: attrs.create denied")
+					}
+				}
+				if err := platform.CreateAttrWithID(ctx, tx, appID, a); err != nil {
+					return fmt.Errorf("transact: add-attr: %w", err)
+				}
+				txCat.Add(a)
+			}
+			if len(attrAlias) > 0 {
+				rewriteAttrRefs(steps, attrAlias)
+			}
+		}
+
 		// Resolve any lookup-ref eids/values against committed state so far.
-		if err := resolveEntityIDs(ctx, tx, appID, steps, catalog); err != nil {
+		if err := resolveEntityIDs(ctx, tx, appID, steps, txCat); err != nil {
 			return err
 		}
-		if err := resolveValues(ctx, tx, appID, steps, catalog); err != nil {
+		if err := resolveValues(ctx, tx, appID, steps, txCat); err != nil {
 			return err
 		}
 
@@ -85,26 +143,8 @@ func Transact(
 				}
 
 			case "add-attr":
-				// Phase 2 catalog is live; creation applies immediately via catalog.
-				// The attr will next be readable on a re-load; current catalog is
-				// reused for this tx's triples.
-				// (Full validation of add-attr payload is handled transitively by
-				// the DB constraints; permissive for Phase 2 self-host.)
-				for _, st := range batch {
-					var payload map[string]any
-					if err := json.Unmarshal(st.Args[0], &payload); err != nil {
-						return err
-					}
-					_ = payload
-					// attr creation writes happen via platform.GetOrCreateAttr
-					// helpers elsewhere; here the tx-steps' add-attr is permissive.
-					// Fail open on admin, closed otherwise (lawful self-host fallback).
-					if !opts.Admin && ruleDoc != nil {
-						if expr := ruleDoc.ResolveExpr("attrs", "create"); expr == "false" {
-							return fmt.Errorf("transact: attrs.create denied")
-						}
-					}
-				}
+				// Handled in the pre-pass above (attrs must exist before
+				// same-batch triples resolve); nothing left to do here.
 
 			case "delete-attr":
 				if !opts.Admin {
@@ -115,11 +155,11 @@ func Transact(
 				// Optional per-step permission checks when a doc is supplied.
 				if ruleDoc != nil && !opts.Admin {
 					for _, st := range batch {
-						ta, err := parseTripleArgs(st, catalog)
+						ta, err := parseTripleArgs(st, txCat)
 						if err != nil {
 							return err
 						}
-						etype := etypeFor(catalog, ta.AttrID)
+						etype := etypeFor(txCat, ta.AttrID)
 						allow, err := perms.Check(etype, "create", ruleDoc, perms.Bindings{
 							Data: map[string]any{},
 							Auth: opts.AuthUser,
@@ -133,22 +173,22 @@ func Transact(
 						_ = ta
 					}
 				}
-				if err := applyAddTriples(ctx, tx, db, appID, catalog, batch, opts.OverwriteT); err != nil {
+				if err := applyAddTriples(ctx, tx, db, appID, txCat, batch, opts.OverwriteT); err != nil {
 					return err
 				}
 
 			case "retract-triple":
-				if err := applyRetract(ctx, db, appID, catalog, batch); err != nil {
+				if err := applyRetract(ctx, db, appID, txCat, batch); err != nil {
 					return err
 				}
 
 			case "deep-merge-triple":
-				if err := applyDeepMerge(ctx, tx, db, appID, catalog, batch, opts); err != nil {
+				if err := applyDeepMerge(ctx, tx, db, appID, txCat, batch, opts); err != nil {
 					return err
 				}
 
 			case "delete-entity":
-				if err := applyDeleteEntity(ctx, tx, db, appID, catalog, batch); err != nil {
+				if err := applyDeleteEntity(ctx, tx, db, appID, txCat, batch); err != nil {
 					return err
 				}
 
@@ -159,8 +199,8 @@ func Transact(
 		}
 
 		touched, _ := collectTouchedEntities(steps)
-		if catalog != nil && len(touched) > 0 {
-			if err := validateRequired(ctx, db.Pool, appID, catalog, touched); err != nil {
+		if txCat != nil && len(touched) > 0 {
+			if err := validateRequired(ctx, db.Pool, appID, txCat, touched); err != nil {
 				return err
 			}
 		}

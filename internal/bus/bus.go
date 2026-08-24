@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"log/slog"
 
+	"github.com/instant-v2/instant-v2/internal/metrics"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -106,10 +107,14 @@ func Encode(inv Invalidation) ([]byte, error) {
 func Publish(ctx context.Context, c Conn, inv Invalidation) error {
 	payload, err := Encode(inv)
 	if err != nil {
+		metrics.BusPublishErrors.Inc()
 		return err
 	}
 	// pg_notify(channel, payload) — channel is Channel, payload is JSON text.
 	_, err = c.Exec(ctx, "SELECT pg_notify($1,$2)", Channel, string(payload))
+	if err != nil {
+		metrics.BusPublishErrors.Inc()
+	}
 	return err
 }
 
@@ -154,9 +159,11 @@ func RunWithLogger(ctx context.Context, c Conn, onEvent func(Invalidation), logg
 		}
 		var inv Invalidation
 		if err := json.Unmarshal([]byte(n.Payload), &inv); err != nil {
+			metrics.BusMalformed.Inc()
 			logger.Warn("bus: skipping malformed invalidation payload", "error", err, "payload", n.Payload, "channel", n.Channel)
 			continue
 		}
+		metrics.BusEventsReceived.Inc()
 		onEvent(inv)
 	}
 }

@@ -10,6 +10,7 @@
 package transact
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -160,4 +161,136 @@ func hexVal(c byte) (int, bool) {
 		return int(c - 'A' + 10), true
 	}
 	return 0, false
+}
+
+// hasOp reports whether any step carries the given op.
+func hasOp(steps []Step, op string) bool {
+	for _, st := range steps {
+		if st.Op == op {
+			return true
+		}
+	}
+	return false
+}
+
+// wireAttr is the client-supplied add-attr payload (frozen shape, docs/03 §4):
+//
+//	{"id": uuid, "forward-identity": [identId, etype, label],
+//	 "value-type": "blob"|"number"|"ref", cardinality: "one"|"many",
+//	 "reverse-identity"?: [revIdentId, etype, label],
+//	 "unique?": bool?, "index?": bool?}
+type wireAttr struct {
+	ID              string         `json:"id"`
+	ForwardIdentity []string       `json:"forward-identity"`
+	ValueType       string         `json:"value-type"`
+	Cardinality     string         `json:"cardinality"`
+	ReverseIdentity []string       `json:"reverse-identity"`
+	Unique          bool           `json:"unique?"`
+	Indexed         bool           `json:"index?"`
+	Rest            map[string]any `json:"-"`
+}
+
+// parseWireAttr converts an add-attr payload into a platform.Attr the server
+// can adopt verbatim. Clients mint attr + ident uuids and reference them in
+// later same-batch steps (docs/03 §4; Reactor.js instaml), so id preservation
+// is load-bearing.
+func parseWireAttr(raw json.RawMessage) (platform.Attr, error) {
+	var wa wireAttr
+	d := json.NewDecoder(bytes.NewReader(raw))
+	d.DisallowUnknownFields()
+	if err := d.Decode(&wa); err != nil {
+		// Unknown fields are forward-compat: re-decode permissively.
+		wa = wireAttr{}
+		if err := json.Unmarshal(raw, &wa); err != nil {
+			return platform.Attr{}, fmt.Errorf("payload not an object: %w", err)
+		}
+	}
+	var attrID [16]byte
+	if wa.ID == "" || parseUUID(wa.ID, &attrID) != nil {
+		return platform.Attr{}, fmt.Errorf("id must be a uuid")
+	}
+	if len(wa.ForwardIdentity) < 3 {
+		return platform.Attr{}, fmt.Errorf("forward-identity must be [identId, etype, label]")
+	}
+	etype := wa.ForwardIdentity[1]
+	label := wa.ForwardIdentity[2]
+	if etype == "" || label == "" {
+		return platform.Attr{}, fmt.Errorf("forward-identity etype/label must be non-empty")
+	}
+	var fwdIdent [16]byte
+	if parseUUID(wa.ForwardIdentity[0], &fwdIdent) != nil {
+		// Tolerant fallback: some clients reuse the attr id here.
+		fwdIdent = attrID
+	}
+	vt := wa.ValueType
+	if vt == "" {
+		vt = "blob"
+	}
+	card := wa.Cardinality
+	switch card {
+	case "", "one":
+		card = "one"
+	case "many":
+	default:
+		return platform.Attr{}, fmt.Errorf("cardinality must be one|many, got %q", card)
+	}
+
+	a := platform.Attr{
+		ID:           attrID,
+		Etype:        &etype,
+		Label:        &label,
+		ValueType:    vt,
+		Cardinality:  card,
+		IsUnique:     wa.Unique,
+		IsIndexed:    wa.Indexed || wa.Unique, // unique implies index (v1 semantics)
+		ForwardIdent: fwdIdent,
+	}
+	if len(wa.ReverseIdentity) >= 3 {
+		revEtype, revLabel := wa.ReverseIdentity[1], wa.ReverseIdentity[2]
+		var revIdent [16]byte
+		if parseUUID(wa.ReverseIdentity[0], &revIdent) == nil {
+			a.ReverseIdent = &revIdent
+		}
+		a.ReverseEtype = &revEtype
+		a.ReverseLabel = &revLabel
+	}
+	return a, nil
+}
+
+// rewriteAttrRefs replaces client-minted attr ids in triple steps with the
+// server-side ids adopted during add-attr processing. Only Args[1] of
+// triple-shaped ops participates — the position parseTripleArgs reads.
+func rewriteAttrRefs(steps []Step, alias map[[16]byte][16]byte) {
+	if len(alias) == 0 {
+		return
+	}
+	remap := func(raw json.RawMessage) (json.RawMessage, bool) {
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return raw, false
+		}
+		var id [16]byte
+		if parseUUID(s, &id) != nil {
+			return raw, false
+		}
+		serverID, ok := alias[id]
+		if !ok {
+			return raw, false
+		}
+		out, err := json.Marshal(uuidToStr(serverID))
+		if err != nil {
+			return raw, false
+		}
+		return out, true
+	}
+	for i := range steps {
+		switch steps[i].Op {
+		case "add-triple", "deep-merge-triple", "retract-triple":
+			if len(steps[i].Args) >= 3 {
+				if repl, ok := remap(steps[i].Args[1]); ok {
+					steps[i].Args[1] = repl
+				}
+			}
+		}
+	}
 }

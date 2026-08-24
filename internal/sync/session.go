@@ -20,11 +20,14 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
+	"github.com/instant-v2/instant-v2/internal/metrics"
 	"github.com/instant-v2/instant-v2/internal/perms"
 	"github.com/instant-v2/instant-v2/internal/platform"
 	"github.com/instant-v2/instant-v2/internal/reactive"
 	"github.com/instant-v2/instant-v2/internal/storage"
+	"github.com/instant-v2/instant-v2/internal/tracing"
 	"github.com/instant-v2/instant-v2/internal/transact"
 )
 
@@ -316,6 +319,10 @@ func (m *Manager) handleAddQuery(ctx context.Context, sess *Session, f Frame) ([
 }
 
 func (m *Manager) handleTransact(ctx context.Context, sess *Session, f Frame) ([]Frame, error) {
+	// WS frames carry no trace context; each op is a fresh root span. The
+	// span covers parse→commit→notify so a waterfall shows the full chain.
+	ctx, span := tracing.Tracer.Start(ctx, "transact.ws")
+	defer span.End()
 	rawSteps, ok := f["tx-steps"]
 	if !ok {
 		return []Frame{ErrFrame(400, "bad-request", "transact requires tx-steps")}, nil
@@ -350,9 +357,14 @@ func (m *Manager) handleTransact(ctx context.Context, sess *Session, f Frame) ([
 		Admin:    sess.Admin,
 		AuthUser: sess.AuthUser,
 	}
+	started := time.Now()
 	res, err := transact.Transact(ctx, m.Deps.DB, cat, appID, parsed, opts, nil)
+	metrics.TransactDuration.WithLabelValues("ws").Observe(time.Since(started).Seconds())
 	if err != nil {
 		return []Frame{ErrFrame(403, "transact-error", err.Error())}, nil
+	}
+	if res.AttrsChanged && m.Deps.Catalogs != nil {
+		m.Deps.Catalogs.Invalidate(sess.AppID)
 	}
 	if m.Deps.OnCommit != nil {
 		var attrIDs []string

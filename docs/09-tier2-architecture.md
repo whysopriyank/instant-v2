@@ -228,3 +228,79 @@ groups fanout benchmark.
 | T2.3 | Read/write pools (+replica URL) | ~1 d | Writes isolated from read storms |
 | T2.4 | Invalidation bus (LISTEN/NOTIFY) | ~2–3 d | Linear session scale-out |
 | T2.5 | Incremental maintenance | 2–3 wk | O(change) refresh cost |
+
+## T3 — Production readiness (landed this phase)
+
+### T3.1 Observability
+
+`internal/metrics` owns a dedicated Prometheus registry served on
+`INSTANT_V2_METRICS_ADDR` (default `127.0.0.1:9465`; empty disables). Series:
+`ws_sessions_active`, `ws_refresh_frames_total{kind=full|delta}`,
+`fanout_bytes_total`, `refreshes_total{outcome=spliced|full|error}`,
+`notifier_queue_depth`, `notifier_sheds_total`, `transact_duration_seconds{plane=ws|runtime|admin}`,
+`ratelimit_rejections_total{class}`, `bus_publish_errors_total`,
+`bus_events_received_total`, `bus_malformed_total`, `db_pool_conns{pool,state}`.
+Gauges over live state (queue depth, pools, session count) are scrape-time
+callbacks — no polling goroutines. OpenTelemetry spans cover the
+transact→commit→fanout chain (`transact.{ws,runtime,admin}` →
+`notifier.refresh`, which spans the synchronous group fanout); export is
+opt-in via `OTEL_EXPORTER_OTLP_ENDPOINT`, otherwise the no-op provider costs
+nothing.
+
+### T3.2 Security pass
+
+- `CheckAdminToken` now fetches the app's tokens and compares constant-time
+  in Go (`subtle.ConstantTimeCompare` over normalized hex); the SQL-side
+  `WHERE token=$1` compare leaked match timing through B-tree descent.
+- `/backup/*` is mounted (was unreachable dead code) behind the same admin
+  token check; object keys are force-namespaced `<app-id>/<key>` — the old
+  raw-key form let app A read/overwrite app B's dumps; zip entries are capped
+  (1 GiB uncompressed) against decompression bombs.
+- Known gap (documented, not fixed): v2 has no rules persistence, so the WS
+  transact plane passes a nil rule doc and perms are enforced only by the
+  `perms-check` dry-run endpoints. Wiring the `rules` table is a follow-up.
+
+### T3.3 Conformance + differential
+
+- `corpusctl --mode differential` runs v2 and v1 side-by-side and diffs the
+  canonicalized frame sequences. Environment-volatile fields (trace-id,
+  server-hostname/port, isn) are dropped; tx watermarks masked; attrs masked
+  (v1 always sends them, v2 skips for skip-attrs clients). The driver spaces
+  c2s frames 120 ms apart — v1's grouped-queue races back-to-back frames
+  against session init.
+- Result against a healthy local v1 (sunset commit `a4d2ef33`, booted via its
+  self-host compose; the historical "v1 delivers 0 live refreshes" baseline
+  was environmental misconfiguration — v1's push works when
+  `wal_level=logical` + `WAL_HISTORY_STORAGE=pg` are set):
+  `EQUAL` on smoke and transact→refresh scenarios, including the pushed
+  refresh carrying the new triple.
+- Server fixes the differential/visual pass forced: real `add-attr` handling
+  (create + adopt-by-ident with step rewriting — the TS SDK mints attr ids
+  client-side and references them in-batch), `<etype>/id` triples emitted in
+  join-rows (clients assemble entities from the primary-key triple),
+  `primary?` flag on id attrs, deterministic `WireAttrs` ordering, node data
+  without v1-absent `etype`/`k` keys.
+
+### T3.4 Soak + comparative performance
+
+300-session / 3-minute soak against a single instantd: 390 000 refreshes
+delivered (3 000/s), 1 299 WS transacts (10/s), 54.8 GB fanned out,
+99.9% of drains served by incremental splices, 0 sheds / 0 drops / 0 bus
+errors. Head-to-head (200 admin writes each, same box, both pushes verified):
+
+| server | tx p50 | tx p95 | push p50 | push p95 |
+|--------|--------|--------|----------|----------|
+| v1     | 5.05ms | 6.42ms | 3.88ms   | 5.47ms   |
+| v2     | 0.82ms | 1.13ms | 0.04ms   | 0.06ms   |
+
+v2's push is the direct post-commit notify; v1 routes through its WAL
+replication slot (~4 ms — respectable for a WAL roundtrip).
+
+### Follow-ups
+
+- Corpus driver: multi-connection/phase grammar + value capture for
+  reconnect-resume and cross-session presence scenarios (links / perms-check
+  / presence / resume scenarios are sketched in this phase's notes but not
+  landed).
+- Rules persistence (`rules` table) wired into the WS + runtime transact
+  planes.

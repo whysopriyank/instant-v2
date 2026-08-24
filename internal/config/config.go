@@ -37,6 +37,11 @@ type Config struct {
 	// sessions stay node-local, writes are accepted on any node.
 	InvalidationBus string // INSTANT_V2_INVALIDATION_BUS: "none"|"postgres", default "none"
 	NodeID          string // INSTANT_V2_NODE_ID, default hostname
+
+	// Observability (docs/09 §T3). Prometheus scrape address; empty
+	// disables the listener entirely. Loopback default so a bare
+	// `instantd` is observable without widening the network surface.
+	MetricsAddr string // INSTANT_V2_METRICS_ADDR, default "127.0.0.1:9465"
 }
 
 func (c Config) String() string {
@@ -63,6 +68,7 @@ func Load() (Config, error) {
 		WSCompression:   envOr("INSTANT_V2_WS_COMPRESSION", "disabled"),
 		InvalidationBus: envOr("INSTANT_V2_INVALIDATION_BUS", "none"),
 		NodeID:          os.Getenv("INSTANT_V2_NODE_ID"),
+		MetricsAddr:     envOr("INSTANT_V2_METRICS_ADDR", "127.0.0.1:9465"),
 	}
 	n, err := envInt32("INSTANT_V2_WRITE_POOL_MAXCONNS")
 	if err != nil {

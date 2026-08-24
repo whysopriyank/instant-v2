@@ -16,6 +16,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/instant-v2/instant-v2/internal/metrics"
+	"github.com/instant-v2/instant-v2/internal/tracing"
 )
 
 // Frame is one outbound refresh payload for a subscription.
@@ -277,6 +280,7 @@ func (n *Notifier) Gate(maxDepth int64) func(appID string) error {
 		if !shedding.Load() {
 			return nil
 		}
+		metrics.NotifierSheds.Inc()
 		return &ShedError{RetryAfter: shedRetryAfter}
 	}
 }
@@ -358,6 +362,10 @@ func (n *Notifier) drainPass(ctx context.Context, log *slog.Logger) bool {
 }
 
 func (n *Notifier) refreshOne(ctx context.Context, log *slog.Logger, id string, txID int64) {
+	// Covers requery/splice + the synchronous Emit → group fanout, so one
+	// waterfall span shows query cost and per-member dispatch together.
+	ctx, span := tracing.Tracer.Start(ctx, "notifier.refresh")
+	defer span.End()
 	sub, ok := n.Store.Get(id)
 	if !ok || sub.Cancelled || txID <= sub.TxID.Load() {
 		n.dropChanges(id) // don't leak change bookkeeping for a skipped drain
@@ -399,17 +407,22 @@ func (n *Notifier) refreshOne(ctx context.Context, log *slog.Logger, id string, 
 // refreshResult produces one drain's envelope. When the invalidation carried
 // a known change set and the engine is wired, incremental maintenance gets
 // first crack (docs/09-tier2-architecture.md §T2.5); any bail-out falls back
-// to Refresh, which remains the oracle and re-seeds materialized state.
 func (n *Notifier) refreshResult(ctx context.Context, id string, sub *Subscription) (json.RawMessage, error) {
 	changes, known := n.takeChanges(id)
 	if known && n.Inc != nil {
 		if out, ok := n.Inc.apply(ctx, sub, changes); ok {
+			metrics.Refreshes.WithLabelValues("spliced").Inc()
 			return out, nil
 		}
 	}
 	result, err := n.Refresh(ctx, sub)
-	if err == nil && n.Inc != nil {
+	if err != nil {
+		metrics.Refreshes.WithLabelValues("error").Inc()
+		return result, err
+	}
+	metrics.Refreshes.WithLabelValues("full").Inc()
+	if n.Inc != nil {
 		n.Inc.materialize(sub, result)
 	}
-	return result, err
+	return result, nil
 }

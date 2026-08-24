@@ -41,6 +41,9 @@ func compressionMode(cfg string) websocket.CompressionMode {
 	}
 }
 
+// ConnCount reports live websocket connections (scrape-time gauge source).
+func (h *WSHandler) ConnCount() int { return h.live.len() }
+
 func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		OriginPatterns:  []string{"*"},

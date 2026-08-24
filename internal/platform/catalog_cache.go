@@ -2,7 +2,9 @@ package platform
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
+	"sort"
 	"sync"
 
 	"github.com/jackc/pgx/v5"
@@ -19,9 +21,10 @@ type CatalogCache struct {
 	cache map[string]*AttrCatalog
 }
 
-// RowQueryer is the single-row query surface.
+// RowQueryer is the query surface the catalog cache needs.
 type RowQueryer interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
 // NewCatalogCache builds a cache over the pool.
@@ -56,18 +59,48 @@ func (c *CatalogCache) Invalidate(appID string) {
 }
 
 // CheckAdminToken verifies an admin token belongs to the app.
+//
+// Timing: the candidate tokens for the app are fetched and compared in Go
+// with subtle.ConstantTimeCompare over the normalized 32-hex encoding. The
+// previous SQL-side `WHERE token=$1` leaked match/no-match through Postgres
+// index/B-tree comparison timing; row count for an app is small and stable,
+// so the residual per-row work difference is negligible while the token
+// comparison itself no longer short-circuits on first differing byte.
 func (c *CatalogCache) CheckAdminToken(ctx context.Context, appID, token string) (bool, error) {
-	var one int
-	err := c.RowQ.QueryRow(ctx,
-		`SELECT 1 FROM app_admin_tokens t JOIN apps a ON a.id = t.app_id
-		  WHERE t.token=$1::uuid AND a.id=$2::uuid LIMIT 1`, token, appID).Scan(&one)
+	var supplied [16]byte
+	if err := ScanUUID(token, &supplied); err != nil {
+		return false, nil // non-uuid tokens can never match uuid-typed tokens
+	}
+	rows, err := c.RowQ.Query(ctx,
+		`SELECT t.token FROM app_admin_tokens t WHERE t.app_id=$1::uuid`, appID)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return false, nil
-		}
 		return false, err
 	}
-	return true, nil
+	defer rows.Close()
+
+	suppliedHex := uuidHex(supplied)
+	match := 0
+	for rows.Next() {
+		var tok [16]byte
+		if err := rows.Scan(&tok); err != nil {
+			return false, err
+		}
+		match |= subtle.ConstantTimeCompare(uuidHex(tok), suppliedHex)
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	return match == 1, nil
+}
+
+func uuidHex(u [16]byte) []byte {
+	const h = "0123456789abcdef"
+	out := make([]byte, 32)
+	for i, b := range u {
+		out[2*i] = h[b>>4]
+		out[2*i+1] = h[b&0x0f]
+	}
+	return out
 }
 
 // ScanUUID parses canonical uuid text into [16]byte.
@@ -108,7 +141,25 @@ func hexNibble(c byte) (byte, bool) {
 // WireAttrs renders catalog attrs in the frozen wire shape (docs/03 §7).
 func (cat *AttrCatalog) WireAttrs() []map[string]any {
 	out := make([]map[string]any, 0, len(cat.byID))
+	// Deterministic order: map iteration over byID is randomized, and the
+	// attrs array rides the wire verbatim — corpus diffs and client caches
+	// both want stable bytes. Sort by (etype, label, id).
+	ordered := make([]Attr, 0, len(cat.byID))
 	for _, a := range cat.byID {
+		ordered = append(ordered, a)
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		ei, ej := attrIdent(ordered[i].Etype), attrIdent(ordered[j].Etype)
+		if ei != ej {
+			return ei < ej
+		}
+		li, lj := attrIdent(ordered[i].Label), attrIdent(ordered[j].Label)
+		if li != lj {
+			return li < lj
+		}
+		return UUIDToStr(ordered[i].ID) < UUIDToStr(ordered[j].ID)
+	})
+	for _, a := range ordered {
 		m := map[string]any{
 			"id":                UUIDToStr(a.ID),
 			"value-type":        a.ValueType,
@@ -117,6 +168,11 @@ func (cat *AttrCatalog) WireAttrs() []map[string]any {
 			"index?":            a.IsIndexed,
 			"required?":         false,
 			"checked-data-type": checkedPtr(a.CheckedDataType),
+		}
+		// v1 marks the implicit <etype>/id attr as the entity primary key;
+		// TS clients key entity assembly off this flag (store.js primaryKeys).
+		if a.Label != nil && *a.Label == "id" {
+			m["primary?"] = true
 		}
 		if a.Etype != nil && a.Label != nil {
 			m["forward-identity"] = []string{UUIDToStr(a.AppID), *a.Etype, *a.Label}
@@ -179,4 +235,11 @@ func ScanUUIDErr(s string) ([16]byte, error) {
 		return [16]byte{}, err
 	}
 	return u, nil
+}
+
+func attrIdent(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
 }

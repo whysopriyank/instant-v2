@@ -314,15 +314,23 @@ func v1CheckedDataType(valueType string) *string {
 	}
 }
 
+// maxEntryBytes bounds one zip entry's uncompressed size. A hostile archive
+// can declare tiny compressed bytes and expand to gigabytes (decompression
+// bomb); imports stream into memory per entry, so the bound is load-bearing.
+const maxEntryBytes = 1 << 30 // 1 GiB
+
 func readEntry(f *zip.File) ([]byte, error) {
 	rc, err := f.Open()
 	if err != nil {
 		return nil, fmt.Errorf("backup: open zip entry %s: %v", f.Name, err)
 	}
 	defer func() { _ = rc.Close() }() //nolint:errcheck // read already completed
-	body, err := io.ReadAll(rc)
+	body, err := io.ReadAll(io.LimitReader(rc, maxEntryBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("backup: read zip entry %s: %v", f.Name, err)
+	}
+	if len(body) > maxEntryBytes {
+		return nil, fmt.Errorf("backup: zip entry %s exceeds %d bytes", f.Name, maxEntryBytes)
 	}
 	return body, nil
 }

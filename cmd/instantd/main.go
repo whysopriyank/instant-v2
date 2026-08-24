@@ -16,22 +16,26 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/jackc/pgx/v5/pgxpool"
-	_ "github.com/jackc/pgx/v5/stdlib"
-	"syscall"
-
 	"github.com/instant-v2/instant-v2/internal/adminapi"
 	"github.com/instant-v2/instant-v2/internal/authn"
+	"github.com/instant-v2/instant-v2/internal/backup"
 	"github.com/instant-v2/instant-v2/internal/bus"
 	"github.com/instant-v2/instant-v2/internal/config"
 	"github.com/instant-v2/instant-v2/internal/instaql"
+	"github.com/instant-v2/instant-v2/internal/metrics"
 	"github.com/instant-v2/instant-v2/internal/platform"
 	"github.com/instant-v2/instant-v2/internal/reactive"
 	"github.com/instant-v2/instant-v2/internal/runtimeapi"
 	"github.com/instant-v2/instant-v2/internal/storage"
 	"github.com/instant-v2/instant-v2/internal/storageapi"
 	syncpkg "github.com/instant-v2/instant-v2/internal/sync"
+	"github.com/instant-v2/instant-v2/internal/tracing"
 	"github.com/instant-v2/instant-v2/internal/transact"
+	"github.com/jackc/pgx/v5/pgxpool"
+	_ "github.com/jackc/pgx/v5/stdlib"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	"syscall"
 )
 
 func main() {
@@ -51,6 +55,14 @@ func run(logger *slog.Logger) error {
 	logger.Info("starting instantd", "config", cfg.String())
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// OTel export is opt-in via OTEL_EXPORTER_OTLP_ENDPOINT; without it the
+	// global provider stays a no-op and spans cost nothing.
+	if shutdownTracing, terr := tracing.Init(ctx, tracing.Endpoint(), "instantd", cfg.NodeName()); terr != nil {
+		logger.Warn("tracing init failed; continuing untraced", "err", terr)
+	} else if shutdownTracing != nil {
+		defer func() { _ = shutdownTracing(context.Background()) }()
+	}
 
 	var db *sql.DB
 	if cfg.DatabaseURL == "" {
@@ -335,9 +347,39 @@ func run(logger *slog.Logger) error {
 			Catalogs: cats,
 		})
 
+		// Backup/restore surface (docs/07 §backup). Every route re-checks
+		// the app's admin token; object routes scope keys under the app id
+		// and stay 503 until an S3-compatible store is wired.
+		mux.Handle("/backup/", &backup.Handler{
+			Pool:            pool,
+			AdminTokenCheck: cats.CheckAdminToken,
+			Logger:          logger,
+		})
+
 		gate := gateFor(notifier, cfg.MaxQueueDepth)
 		mux.Handle("POST /runtime/transact", transactHandler(st, cats, invalidate, invalidateChanges, gate))
 		mux.HandleFunc("GET /health", health(db, notifier, cfg))
+
+		// Scrape-time gauges over live state (no polling goroutines).
+		metrics.RegisterGauge("instant_notifier_queue_depth",
+			"Pending refreshes awaiting a notifier drain.", nil, nil,
+			func() float64 { return float64(notifier.QueueDepth()) })
+		metrics.RegisterGauge("instant_ws_sessions_active",
+			"Live websocket/SSE sessions.", nil, nil,
+			func() float64 { return float64(ws.ConnCount()) + float64(sseH.ConnCount()) })
+		for name, p := range map[string]*pgxpool.Pool{"write": writePool, "read": readPool} {
+			p := p
+			for state, fn := range map[string]func() int32{
+				"acquired": func() int32 { return p.Stat().AcquiredConns() },
+				"idle":     func() int32 { return p.Stat().IdleConns() },
+				"max":      func() int32 { return p.Stat().MaxConns() },
+			} {
+				state := state
+				metrics.RegisterGauge("instant_db_pool_conns",
+					"pgxpool connections by state.", []string{"pool", "state"},
+					[]string{name, state}, func() float64 { return float64(fn()) })
+			}
+		}
 	}
 
 	srv := &http.Server{
@@ -347,6 +389,23 @@ func run(logger *slog.Logger) error {
 	}
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()
+
+	// Prometheus scrape endpoint (docs/09 §T3). Separate listener so the
+	// public mux never serves operational internals; loopback default,
+	// INSTANT_V2_METRICS_ADDR="" disables.
+	if cfg.MetricsAddr != "" {
+		metricsSrv := &http.Server{
+			Addr:              cfg.MetricsAddr,
+			Handler:           metrics.Handler(),
+			ReadHeaderTimeout: 5 * time.Second,
+		}
+		go func() {
+			if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Error("metrics server failed", "err", err)
+			}
+		}()
+		defer func() { _ = metricsSrv.Close() }()
+	}
 
 	select {
 	case <-ctx.Done():
@@ -375,6 +434,9 @@ func transactHandler(st *storage.DB, cats *platform.CatalogCache,
 	invalidateChanges func(ctx context.Context, appID string, changes []reactive.Change, txID int64),
 	gate func(appID string) error) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := otel.GetTextMapPropagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header))
+		ctx, span := tracing.Tracer.Start(ctx, "transact.runtime")
+		defer span.End()
 		var req struct {
 			AppID string            `json:"app-id"`
 			Steps []json.RawMessage `json:"tx-steps"`
@@ -413,10 +475,15 @@ func transactHandler(st *storage.DB, cats *platform.CatalogCache,
 			http.Error(w, `{"error":"bad app id"}`, 400)
 			return
 		}
-		res, err := transact.Transact(r.Context(), st, cat, appID, parsed, transact.Options{}, nil)
+		started := time.Now()
+		res, err := transact.Transact(ctx, st, cat, appID, parsed, transact.Options{}, nil)
+		metrics.TransactDuration.WithLabelValues("runtime").Observe(time.Since(started).Seconds())
 		if err != nil {
 			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusForbidden)
 			return
+		}
+		if res.AttrsChanged {
+			cats.Invalidate(req.AppID)
 		}
 		// Post-commit invalidation on every node (docs/09 §T2.4); the
 		// change-routed variant feeds the incremental engine (§T2.5).

@@ -114,8 +114,26 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// scopeObjectKey namespaces every object under the authenticated app id.
+// Without this, a token for app A could read/overwrite app B's dumps by
+// constructing the key — the token check authorizes the app, not the bucket.
+func scopeObjectKey(appID [16]byte, key string) (string, error) {
+	if key == "" {
+		return "", errors.New("backup: query param key is required")
+	}
+	if strings.Contains(key, "..") || strings.HasPrefix(key, "/") {
+		return "", errors.New("backup: invalid object key")
+	}
+	return platform.UUIDToStr(appID) + "/" + key, nil
+}
+
 // handleGetObject streams a stored dump back to the caller.
-func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request, key string) {
+func (h *Handler) handleGetObject(w http.ResponseWriter, r *http.Request, appID [16]byte, key string) {
+	key, kerr := scopeObjectKey(appID, key)
+	if kerr != nil {
+		writeErr(w, http.StatusBadRequest, kerr.Error())
+		return
+	}
 	rc, err := h.S3.Get(r.Context(), key)
 	if err != nil {
 		if errors.Is(err, ErrObjectNotFound) {
@@ -138,13 +156,13 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request, appID 
 		writeErr(w, http.StatusServiceUnavailable, "no object store wired")
 		return
 	}
-	key := r.URL.Query().Get("key")
-	if key == "" {
-		writeErr(w, http.StatusBadRequest, "query param key is required")
+	key, kerr := scopeObjectKey(appID, r.URL.Query().Get("key"))
+	if kerr != nil {
+		writeErr(w, http.StatusBadRequest, kerr.Error())
 		return
 	}
 	if r.Method == http.MethodGet {
-		h.handleGetObject(w, r, key)
+		h.handleGetObject(w, r, appID, r.URL.Query().Get("key"))
 		return
 	}
 	pr, pw := io.Pipe()
@@ -165,13 +183,9 @@ func (h *Handler) handlePutObject(w http.ResponseWriter, r *http.Request, appID 
 }
 
 func (h *Handler) handleRestoreObject(w http.ResponseWriter, r *http.Request, appID [16]byte) {
-	if h.S3 == nil {
-		writeErr(w, http.StatusServiceUnavailable, "no object store wired")
-		return
-	}
-	key := r.URL.Query().Get("key")
-	if key == "" {
-		writeErr(w, http.StatusBadRequest, "query param key is required")
+	key, kerr := scopeObjectKey(appID, r.URL.Query().Get("key"))
+	if kerr != nil {
+		writeErr(w, http.StatusBadRequest, kerr.Error())
 		return
 	}
 	rc, err := h.S3.Get(r.Context(), key)

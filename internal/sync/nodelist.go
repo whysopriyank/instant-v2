@@ -63,12 +63,18 @@ func BuildNodeList(cat *platform.AttrCatalog, result json.RawMessage) (json.RawM
 
 		// v1 collect-instaql-results-for-client (query.clj:91) wraps ALL
 		// deduped triples as ONE flat row: join-rows = [triples…], where
-		// each triple is [entity-id, attr-id, value].
+		// each triple is [entity-id, attr-id, value]. The implicit
+		// <etype>/id attr participates: TS clients assemble entities from
+		// the primary-key triple, so omitting it renders empty lists.
+		idAttr := cat.FindByEtypeLabel(etype, "id")
 		triples := make([]any, 0, len(ents))
 		for _, e := range ents {
 			id, _ := e["id"].(string)
 			if id == "" {
 				return nil, fmt.Errorf("nodelist: %s entity missing id", etype)
+			}
+			if idAttr != nil {
+				triples = append(triples, []any{id, platform.UUIDToStr(idAttr.ID), id})
 			}
 			labels := make([]string, 0, len(e))
 			for label := range e {
@@ -97,9 +103,10 @@ func BuildNodeList(cat *platform.AttrCatalog, result json.RawMessage) (json.RawM
 			}
 		}
 
+		// Node shape mirrors v1 (query.clj): data carries ONLY the
+		// datalog-result — v1 clients never read etype/k keys, and the
+		// differential treats extra keys as divergence.
 		data := map[string]any{
-			"k":     etype,
-			"etype": etype,
 			"datalog-result": map[string]any{
 				"join-rows": []any{triples}, // one flat row of all triples
 			},

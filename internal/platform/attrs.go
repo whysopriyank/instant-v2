@@ -62,6 +62,87 @@ type AttrCatalog struct {
 	byID  map[[16]byte]Attr
 }
 
+// Clone returns a mutable copy for one transaction's add-attr overlay.
+// Mutating the clone never leaks into the shared cache; post-commit cache
+// refresh still flows through CatalogCache invalidation.
+func (c *AttrCatalog) Clone() *AttrCatalog {
+	by := make(map[[16]byte]Attr, len(c.byID)+1)
+	for k, v := range c.byID {
+		by[k] = v
+	}
+	return &AttrCatalog{AppID: c.AppID, byID: by}
+}
+
+// Add registers an attr in this catalog view (in-tx add-attr support).
+// Safe on a zero-value catalog.
+func (c *AttrCatalog) Add(a Attr) {
+	if c.byID == nil {
+		c.byID = make(map[[16]byte]Attr)
+	}
+	c.byID[a.ID] = a
+}
+
+// CreateAttrWithID inserts an attr with caller-supplied ids. The frozen wire
+// protocol lets clients mint attr and ident uuids and reference them in the
+// same batch, so the server adopts them verbatim (v1 semantics). Replay of a
+// known attr id is a no-op.
+func CreateAttrWithID(ctx context.Context, tx pgx.Tx, appID [16]byte, a Attr) error {
+	tag, err := tx.Exec(ctx, `
+		INSERT INTO attrs (id, app_id, etype, label, reverse_etype, reverse_label,
+		                   value_type, cardinality, is_unique, is_indexed,
+		                   forward_ident, reverse_ident)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+		ON CONFLICT (id) DO NOTHING`,
+		a.ID, appID, a.Etype, a.Label, a.ReverseEtype, a.ReverseLabel,
+		a.ValueType, a.Cardinality, a.IsUnique, a.IsIndexed,
+		a.ForwardIdent, a.ReverseIdent)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return nil // replayed step; keep the stored definition
+	}
+	if a.Etype != nil && a.Label != nil {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO idents (id, app_id, attr_id, etype, label)
+			VALUES ($1,$2,$3,$4,$5)
+			ON CONFLICT (app_id, etype, label) DO NOTHING`,
+			a.ForwardIdent, appID, a.ID, *a.Etype, *a.Label); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// FindAttrByIdent returns the non-deleted attr for (appID, etype, label).
+func FindAttrByIdent(ctx context.Context, q Queryer, appID [16]byte, etype, label string) (Attr, bool, error) {
+	var id [16]byte
+	rows, err := q.Query(ctx,
+		`SELECT id FROM attrs WHERE app_id=$1 AND etype=$2 AND label=$3 AND deletion_marked_at IS NULL`,
+		appID, etype, label)
+	if err != nil {
+		return Attr{}, false, err
+	}
+	if !rows.Next() {
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return Attr{}, false, err
+		}
+		return Attr{}, false, nil
+	}
+	if err := rows.Scan(&id); err != nil {
+		rows.Close()
+		return Attr{}, false, err
+	}
+	// Close BEFORE the follow-up loadAttrByID: both run on the same tx
+	// connection, and pgx rejects a second query while rows are open
+	// ("conn busy").
+	rows.Close()
+	a, err := loadAttrByID(ctx, q, id)
+	return a, true, err
+}
+
 // LoadAttrCatalog reads all non-deleted attrs for appID.
 func LoadAttrCatalog(ctx context.Context, q Queryer, appID [16]byte) (*AttrCatalog, error) {
 	rows, err := q.Query(ctx, `

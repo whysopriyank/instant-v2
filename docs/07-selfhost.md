@@ -36,6 +36,8 @@ lock — safe to run multiple replicas against one DB).
 | `INSTANT_V2_WS_COMPRESSION` | `disabled` | permessage-deflate: `no-context-takeover` or `context-takeover` (docs/09 §T2.2) |
 | `INSTANT_V2_INVALIDATION_BUS` | `none` | `postgres` enables LISTEN/NOTIFY invalidation across nodes — required when running >1 instantd against one DB (docs/09 §T2.4) |
 | `INSTANT_V2_NODE_ID` | hostname | Node identity in logs and `/health` |
+| `INSTANT_V2_METRICS_ADDR` | `127.0.0.1:9465` | Prometheus scrape endpoint (`/metrics`); set empty to disable |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | _(unset)_ | Enables OTLP/HTTP trace export for the transact→commit→fanout chain |
 
 ## Creating an app
 
@@ -78,4 +80,7 @@ Export is a plain NDJSON stream with trailing checksum:
 curl -H "Authorization: Bearer <admin-token>" http://localhost:8080/backup/<app-id> > app.ndjson
 ```
 
-Restore posts it back. See `internal/backup` package doc for the wire format.
+Restore posts it back. Object storage routes (`PUT /backup/<app-id>/object?key=…`,
+`POST /backup/<app-id>/restore-object?key=…`) activate when an S3-compatible
+store is wired; keys are namespaced under the app id server-side. All backup
+routes require the app's admin token. See `internal/backup` package doc.

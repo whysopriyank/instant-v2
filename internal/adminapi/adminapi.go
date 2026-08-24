@@ -29,15 +29,20 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/instant-v2/instant-v2/internal/authn"
 	"github.com/instant-v2/instant-v2/internal/instaql"
+	"github.com/instant-v2/instant-v2/internal/metrics"
 	"github.com/instant-v2/instant-v2/internal/perms"
 	"github.com/instant-v2/instant-v2/internal/platform"
 	"github.com/instant-v2/instant-v2/internal/reactive"
 	"github.com/instant-v2/instant-v2/internal/storage"
+	"github.com/instant-v2/instant-v2/internal/tracing"
 	"github.com/instant-v2/instant-v2/internal/transact"
 	"github.com/instant-v2/instant-v2/internal/triple"
 )
@@ -284,8 +289,10 @@ func (h *Handler) handleQuery(w http.ResponseWriter, r *http.Request, a *authedR
 // transact.Options{Admin: true}. DEVIATION: v1 loads persisted rules
 // (rule-model/get-by-app-id) into the permissioned transaction; rules
 // persistence does not exist yet in v2, so the admin path runs without a
-// RuleDoc (equivalent outcome while admin bypasses every check).
 func (h *Handler) handleTransact(w http.ResponseWriter, r *http.Request, a *authedReq) {
+	ctx := otel.GetTextMapPropagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header))
+	ctx, span := tracing.Tracer.Start(ctx, "transact.admin")
+	defer span.End()
 	stepsRaw, err := stepsFromBody(a.body)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -298,7 +305,7 @@ func (h *Handler) handleTransact(w http.ResponseWriter, r *http.Request, a *auth
 	cat := a.cat
 	if transact.HasHighLevelOps(stepsRaw) {
 		var lerr error
-		stepsRaw, cat, lerr = h.lowerAdminSteps(r.Context(), a, stepsRaw, throwOnMissing)
+		stepsRaw, cat, lerr = h.lowerAdminSteps(ctx, a, stepsRaw, throwOnMissing)
 		if lerr != nil {
 			writeErr(w, http.StatusBadRequest, lerr.Error())
 			return
@@ -309,12 +316,17 @@ func (h *Handler) handleTransact(w http.ResponseWriter, r *http.Request, a *auth
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	res, err := transact.Transact(r.Context(), h.DB, cat, a.appID, steps,
+	started := time.Now()
+	res, err := transact.Transact(ctx, h.DB, cat, a.appID, steps,
 		transact.Options{Admin: true}, nil)
+	metrics.TransactDuration.WithLabelValues("admin").Observe(time.Since(started).Seconds())
 	if err != nil {
 		h.logger().Error("adminapi: transact", "err", err)
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	if res.AttrsChanged {
+		h.Catalogs.Invalidate(a.appStr)
 	}
 	if h.OnCommitChanges != nil {
 		if triples, ok := transact.ResolveTriples(steps, cat); ok && len(triples) > 0 {
@@ -324,7 +336,7 @@ func (h *Handler) handleTransact(w http.ResponseWriter, r *http.Request, a *auth
 					Etype: tt.Etype, EntityID: tt.EntityID, AttrIDs: []string{tt.AttrID},
 				})
 			}
-			h.OnCommitChanges(r.Context(), a.appID, changes, res.TxID)
+			h.OnCommitChanges(ctx, a.appID, changes, res.TxID)
 		} else if h.OnCommit != nil {
 			h.OnCommit(r.Context(), a.appID, touchedAttrs(steps), res.TxID)
 		}

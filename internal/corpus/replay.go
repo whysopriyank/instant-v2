@@ -25,6 +25,13 @@ type ReplayResult struct {
 // canonicalizes both sides, and returns the delta.
 // A live server is required; use FakeServer in unit tests (replay_test.go).
 func Replay(ctx context.Context, wsURL string, sc *Scenario, timeout time.Duration) ReplayResult {
+	return replay(ctx, wsURL, sc, timeout, CanonicalOptions{}, 0)
+}
+
+// replay is the tunable core: canonicalization mode and inter-frame send gap
+// (differential mode spaces frames because v1's grouped-queue races
+// back-to-back messages against session init).
+func replay(ctx context.Context, wsURL string, sc *Scenario, timeout time.Duration, opts CanonicalOptions, sendGap time.Duration) ReplayResult {
 	start := time.Now()
 	res := ReplayResult{Scenario: sc}
 
@@ -45,8 +52,15 @@ func Replay(ctx context.Context, wsURL string, sc *Scenario, timeout time.Durati
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "")
 
-	// Send all c2s frames one after another so that the server sees client order.
+	// Send all c2s frames in client order; sendGap spaces them when the
+	// peer's message queue processes frames concurrently with session setup.
 	for _, raw := range c2s {
+		if sendGap > 0 {
+			select {
+			case <-dctx.Done():
+			case <-time.After(sendGap):
+			}
+		}
 		if err := conn.Write(dctx, websocket.MessageText, raw); err != nil {
 			res.Err = fmt.Errorf("write: %w", err)
 			return res
@@ -77,7 +91,7 @@ func Replay(ctx context.Context, wsURL string, sc *Scenario, timeout time.Durati
 		if msgType != websocket.MessageText {
 			continue
 		}
-		c, err := CanonicalBytes(data)
+		c, err := CanonicalBytesOpts(data, opts)
 		if err != nil {
 			c = data
 		}
@@ -120,8 +134,10 @@ func Differential(ctx context.Context, sc *Scenario, aURL, bURL string, timeout 
 	if timeout == 0 {
 		timeout = 12 * time.Second
 	}
-	aRes = Replay(ctx, aURL, sc, timeout)
-	bRes = Replay(ctx, bURL, sc, timeout)
+	opts := CanonicalOptions{Differential: true}
+	const sendGap = 120 * time.Millisecond
+	aRes = replay(ctx, aURL, sc, timeout, opts, sendGap)
+	bRes = replay(ctx, bURL, sc, timeout, opts, sendGap)
 	// Compare collected sides even if golden mismatches — the point is side-by-side fidelity.
 	d := Diff(aRes.Collected, bRes.Collected)
 	return aRes, bRes, d

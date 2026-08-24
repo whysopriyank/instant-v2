@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/instant-v2/instant-v2/internal/metrics"
 	"github.com/instant-v2/instant-v2/internal/platform"
 	"github.com/instant-v2/instant-v2/internal/reactive"
 )
@@ -254,11 +255,15 @@ func (m *Manager) dispatchGroup(g *queryGroup, fr reactive.Frame) {
 		var b []byte
 		if mem.delta && deltaRaw != nil {
 			b = deltaRaw
+			metrics.RefreshFrames.WithLabelValues("delta").Inc()
 		} else {
 			b = fullRaw
+			metrics.RefreshFrames.WithLabelValues("full").Inc()
 		}
 		if err := mem.sess.SendRaw(b); err != nil && logger != nil {
 			logger.Debug("groups: send", "err", err)
+		} else if err == nil {
+			metrics.FanoutBytes.Add(float64(len(b)))
 		}
 	}
 }
