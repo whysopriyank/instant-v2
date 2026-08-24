@@ -263,13 +263,13 @@ func TestNotifierEmitsDeltaPatches(t *testing.T) {
 	got := map[string]Frame{}
 	sub := &Subscription{
 		ID: "sub-1", AppID: "app1", Topics: map[string]bool{"attr-a": true},
-		Delta: true,
 		Emit: func(fr Frame) {
 			mu.Lock()
 			got[fr.SubID] = fr
 			mu.Unlock()
 		},
 	}
+	sub.Delta.Store(true)
 	if _, err := s.Add(sub); err != nil {
 		t.Fatal(err)
 	}

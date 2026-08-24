@@ -47,6 +47,8 @@ func TestCheckpointRestartProvesMonotonicity(t *testing.T) {
 		t.Fatalf("stale confirm moved watermark: %d, want %d", got, lsnA)
 	}
 	cp1.Confirm(lsnB)
+	// Graceful-stop contract: coalesced persistence becomes durable on Flush.
+	cp1.Flush()
 
 	// "Crash": brand-new process state over the same table.
 	cp2, err := waltail.OpenCheckpoint(db)

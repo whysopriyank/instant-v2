@@ -310,6 +310,10 @@ type Checkpoint struct {
 	db   *sql.DB
 	mu   chan struct{} // serializes writers without a full mutex import dance
 	last uint64
+
+	dirty       int       // unpersisted advances
+	sinceFlush  int       // confirms since last disk write
+	lastPersist time.Time // zero until first flush
 }
 
 // OpenCheckpoint loads (or creates) the persisted LSN.
@@ -318,7 +322,7 @@ func OpenCheckpoint(db *sql.DB) (*Checkpoint, error) {
 		k text PRIMARY KEY, v text NOT NULL)`); err != nil {
 		return nil, err
 	}
-	cp := &Checkpoint{db: db, mu: make(chan struct{}, 1)}
+	cp := &Checkpoint{db: db, mu: make(chan struct{}, 1), lastPersist: time.Now()}
 	cp.mu <- struct{}{}
 	var v string
 	err := db.QueryRow(`SELECT v FROM tail_state WHERE k='lsn'`).Scan(&v)
@@ -343,7 +347,11 @@ func (c *Checkpoint) Last() uint64 {
 	return c.last
 }
 
-// Confirm advances and persists the LSN.
+// Confirm advances the in-memory LSN. Disk persistence is coalesced: at
+// most one UPDATE per checkpointInterval (2 s) or 500 records, whichever
+// first — a per-record UPDATE made every WAL record pay a round-trip and let
+// ungraceful restarts replay unbounded windows. Flush() forces persistence
+// (graceful shutdown).
 func (c *Checkpoint) Confirm(lsn uint64) {
 	<-c.mu
 	defer func() { c.mu <- struct{}{} }()
@@ -351,7 +359,34 @@ func (c *Checkpoint) Confirm(lsn uint64) {
 		return
 	}
 	c.last = lsn
-	_, _ = c.db.Exec(`UPDATE tail_state SET v=$1 WHERE k='lsn'`, json.Number(fmt.Sprint(lsn)).String())
+	c.dirty++
+	c.sinceFlush++
+	now := time.Now()
+	if c.sinceFlush >= 500 || now.Sub(c.lastPersist) >= checkpointInterval {
+		persistLSN(c.db, lsn)
+		c.dirty = 0
+		c.sinceFlush = 0
+		c.lastPersist = now
+	}
+}
+
+const checkpointInterval = 2 * time.Second
+
+// Flush persists the in-memory LSN if dirty. Safe to call multiple times.
+func (c *Checkpoint) Flush() {
+	<-c.mu
+	defer func() { c.mu <- struct{}{} }()
+	if c.dirty == 0 {
+		return
+	}
+	persistLSN(c.db, c.last)
+	c.dirty = 0
+	c.sinceFlush = 0
+	c.lastPersist = time.Now()
+}
+
+func persistLSN(db *sql.DB, lsn uint64) {
+	_, _ = db.Exec(`UPDATE tail_state SET v=$1 WHERE k='lsn'`, json.Number(fmt.Sprint(lsn)).String())
 }
 
 func isDuplicateObject(err error) bool {

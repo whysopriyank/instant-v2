@@ -60,11 +60,9 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	for {
 		_, data, err := conn.Read(ctx)
 		if err != nil {
-			// Tear down this session's subscriptions and rooms.
+			// Tear down this session's group memberships and rooms.
 			if sess != nil {
-				for id := range sess.Subs {
-					h.Store.Remove(id)
-				}
+				h.Manager.DetachAll(sess)
 				h.Manager.Deps.Rooms.LeaveAll(sess)
 			}
 			return
@@ -84,6 +82,11 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			sess = s
 
 			sess.Send = send
+			sess.SendRaw = func(b []byte) error {
+				writeMu.Lock()
+				defer writeMu.Unlock()
+				return conn.Write(ctx, websocket.MessageText, b)
+			}
 			if err := send(reply); err != nil {
 				return
 			}
@@ -106,7 +109,11 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if op == "add-query" && len(replies) > 0 {
 			if rop, _ := replies[0].GetOp(); rop == "add-query-ok" {
 				rawQ, _ := f["q"]
-				key := subKey(sess.ID, string(rawQ))
+				class := wireNodelist
+				if sess.TreeResults {
+					class = wireTree
+				}
+				key := groupKey(sess.AppID, class, rawQ)
 				sub, ok := h.Store.Get(key)
 				if !ok || h.Refresh == nil {
 					sendErr(500, "internal", "subscription missing after add-query")

@@ -106,9 +106,7 @@ func (h *SSEHandler) getSSE(w http.ResponseWriter, r *http.Request) {
 		delete(h.conns, hash)
 		h.mu.Unlock()
 		if conn.sess != nil {
-			for id := range conn.sess.Subs {
-				h.Store.Remove(id)
-			}
+			h.Manager.DetachAll(conn.sess)
 			h.Manager.Deps.Rooms.LeaveAll(conn.sess)
 		}
 	}()
@@ -144,6 +142,13 @@ func (h *SSEHandler) getSSE(w http.ResponseWriter, r *http.Request) {
 		case <-ctx.Done():
 			return
 		case f := <-conn.events:
+			if raw, isRaw := f["__raw"]; isRaw {
+				if _, err := fmt.Fprintf(w, "data: %s\n\n", raw); err != nil {
+					return
+				}
+				fl.Flush()
+				continue
+			}
 			if !writeEvent(f) {
 				return
 			}
@@ -180,6 +185,14 @@ func (h *SSEHandler) postSSE(w http.ResponseWriter, r *http.Request) {
 			Send: func(f Frame) error {
 				select {
 				case conn.events <- f:
+					return nil
+				default:
+					return errSSEBackpressure
+				}
+			},
+			SendRaw: func(b []byte) error {
+				select {
+				case conn.events <- Frame{"__raw": json.RawMessage(b)}:
 					return nil
 				default:
 					return errSSEBackpressure
@@ -228,7 +241,11 @@ func (h *SSEHandler) snapshot(ctx context.Context, sess *Session, f Frame) {
 	if !ok {
 		return
 	}
-	key := subKey(sess.ID, string(rawQ))
+	class := wireNodelist
+	if sess.TreeResults {
+		class = wireTree
+	}
+	key := groupKey(sess.AppID, class, rawQ)
 	sub, ok := h.Store.Get(key)
 	if !ok {
 		return
@@ -263,9 +280,7 @@ func (h *SSEHandler) closeTearDown(tokenHash string, c *sseConn) {
 	delete(h.conns, tokenHash)
 	h.mu.Unlock()
 	if c.sess != nil {
-		for id := range c.sess.Subs {
-			h.Store.Remove(id)
-		}
+		h.Manager.DetachAll(c.sess)
 		h.Manager.Deps.Rooms.LeaveAll(c.sess)
 	}
 }

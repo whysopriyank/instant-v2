@@ -38,8 +38,11 @@ type Subscription struct {
 	Topics map[string]bool // attr-id set from the compiled plan
 	// TxID is the last processed transaction watermark. Atomic: Notify
 	// reads it on caller goroutines while drain workers write it.
-	TxID      atomic.Int64
-	Delta     bool // session negotiated `delta-refresh`; eligible refreshes ship patches
+	TxID atomic.Int64
+	// Delta marks groups with at least one delta-refresh member; eligible
+	// refreshes ship patches. Atomic: upgraded from session goroutines at
+	// member attach while drain workers read it.
+	Delta     atomic.Bool
 	Emit      func(Frame)
 	Cancelled bool
 
@@ -261,6 +264,12 @@ func (n *Notifier) Run(ctx context.Context) {
 			n.gauge.Add(-int64(len(batch)))
 			n.mu.Unlock()
 
+			// Nothing subscribed anywhere: record decode/dispatch upstream
+			// is wasted motion — drop the batch without touching workers.
+			if n.Store.Len() == 0 {
+				continue
+			}
+
 			var wg sync.WaitGroup
 			sem := make(chan struct{}, Workers)
 			for id, txID := range batch {
@@ -296,7 +305,7 @@ func (n *Notifier) refreshOne(ctx context.Context, log *slog.Logger, id string, 
 	// (aggregates, reordering, >MaxTouchedRatio churn, malformed shapes)
 	// leaves patchJSON empty and the client gets the full envelope.
 	var patchJSON json.RawMessage
-	if sub.Delta {
+	if sub.Delta.Load() {
 		if prev := sub.Snapshot(); prev != nil {
 			if p, ok := DiffResults(prev, result); ok {
 				if b, merr := json.Marshal(p); merr == nil {

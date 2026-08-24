@@ -54,9 +54,7 @@ func writeJSONErr(w http.ResponseWriter, code int, msg string) {
 }
 
 func (h *SSEHandler) teardownSubs(sess *Session) {
-	for id := range sess.Subs {
-		h.Store.Remove(id)
-	}
+	h.Manager.DetachAll(sess)
 	h.Manager.Deps.Rooms.LeaveAll(sess)
 }
 
@@ -114,21 +112,33 @@ func (h *SSEHandler) AdminSubscribe(w http.ResponseWriter, r *http.Request) {
 			return errSSEBackpressure
 		}
 	}
+	sess.SendRaw = func(b []byte) error {
+		select {
+		case events <- Frame{"__raw": json.RawMessage(b)}:
+			return nil
+		default:
+			return errSSEBackpressure
+		}
+	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
 
-	writeEvent := func(f Frame) bool {
-		b, err := f.Encode()
-		if err != nil {
-			return true // skip malformed; keep stream alive
-		}
+	// writeRaw emits pre-encoded group fan-out bytes verbatim.
+	writeRaw := func(b []byte) bool {
 		if _, err := fmt.Fprintf(w, "data: %s\n\n", b); err != nil {
 			return false
 		}
 		fl.Flush()
 		return true
+	}
+	writeEvent := func(f Frame) bool {
+		b, err := f.Encode()
+		if err != nil {
+			return true // skip malformed; keep stream alive
+		}
+		return writeRaw(b)
 	}
 
 	_ = writeEvent(Frame{
@@ -157,7 +167,11 @@ func (h *SSEHandler) AdminSubscribe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	key := subKey(sessionID, string(qraw))
+	class := wireNodelist
+	if sess.TreeResults {
+		class = wireTree
+	}
+	key := groupKey(sess.AppID, class, qraw)
 	sub, _ := h.Store.Get(key)
 	result, meta := json.RawMessage("null"), json.RawMessage("{}")
 	if sub != (*reactive.Subscription)(nil) && h.Refresh != nil {
@@ -195,7 +209,13 @@ func (h *SSEHandler) AdminSubscribe(w http.ResponseWriter, r *http.Request) {
 			h.teardownSubs(sess)
 			return
 		case f := <-events:
-			if !writeEvent(f) {
+			var ok bool
+			if raw, isRaw := f["__raw"]; isRaw {
+				ok = writeRaw(raw)
+			} else {
+				ok = writeEvent(f)
+			}
+			if !ok {
 				h.teardownSubs(sess)
 				return
 			}

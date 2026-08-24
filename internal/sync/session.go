@@ -19,7 +19,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 
 	"github.com/instant-v2/instant-v2/internal/perms"
@@ -99,6 +98,9 @@ type Session struct {
 	Subs     map[string]bool // subscription ids owned by this session
 	Rooms    map[string]bool
 	Send     func(Frame) error // transport-bound writer
+	// SendRaw writes pre-encoded frame bytes (shared fan-out payloads);
+	// nil falls back to nothing — group dispatch skips such sessions.
+	SendRaw func([]byte) error
 	// TreeResults selects v1's return-type :tree (admin subscribe-query,
 	// session.clj:1395): refresh envelopes carry the bare object tree instead
 	// of the join-rows node-list used on the WS path.
@@ -111,10 +113,19 @@ type Manager struct {
 	Deps Deps
 	log  *slog.Logger
 	nm   sync.Mutex
+
+	// Query-group registry (docs/08-tier1-hotpath.md §T1.1).
+	groupsMu   sync.Mutex
+	groups     map[string]*queryGroup
+	appMembers map[string]int // appID -> total attached members (cap accounting)
 }
 
 func NewManager(d Deps) *Manager {
-	return &Manager{Deps: d}
+	return &Manager{
+		Deps:       d,
+		groups:     map[string]*queryGroup{},
+		appMembers: map[string]int{},
+	}
 }
 
 func (m *Manager) logger() *slog.Logger {
@@ -199,15 +210,18 @@ func (m *Manager) Handle(ctx context.Context, sess *Session, f Frame) ([]Frame, 
 		_ = subID
 		qid, _ := f.String("q")
 		_ = qid
-		// v2 keys subscriptions by id echoed in add-query-ok; removal by that id.
+		// Removal resolves the same group key add-query registered.
 		id, _ := f.String("subscription-id")
 		if id == "" {
 			if raw, ok := f["q"]; ok {
-				id = subKey(sess.ID, string(raw))
+				class := wireNodelist
+				if sess.TreeResults {
+					class = wireTree
+				}
+				id = groupKey(sess.AppID, class, raw)
 			}
 		}
-		m.Deps.Store.Remove(id)
-		delete(sess.Subs, id)
+		m.detachMember(sess, id)
 		return []Frame{{"op": json.RawMessage(`"remove-query-ok"`)}}, nil
 	case "transact":
 		return m.handleTransact(ctx, sess, f)
@@ -241,14 +255,19 @@ func (m *Manager) handleAddQuery(ctx context.Context, sess *Session, f Frame) ([
 	if !ok {
 		return []Frame{ErrFrame(400, "bad-request", "add-query requires q")}, nil
 	}
-	key := subKey(sess.ID, string(rawQ))
 	eventID, _ := f.String("client-event-id")
 
-	exists := false
-	if _, ok := m.Deps.Store.Get(key); ok {
-		exists = true
+	class := wireNodelist
+	if sess.TreeResults {
+		class = wireTree
 	}
-	if exists {
+	key := groupKey(sess.AppID, class, rawQ)
+
+	// Same session re-adding its own query → v1 add-query-exists.
+	sess.mu.Lock()
+	dup := sess.Subs[key]
+	sess.mu.Unlock()
+	if dup {
 		fr := Frame{"op": json.RawMessage(`"add-query-exists"`)}
 		if eventID != "" {
 			fr["client-event-id"] = json.RawMessage(mustJSON(eventID))
@@ -256,7 +275,8 @@ func (m *Manager) handleAddQuery(ctx context.Context, sess *Session, f Frame) ([
 		return []Frame{fr}, nil
 	}
 
-	// Register the subscription; topics come from compiling the query.
+	// Compile topics + catalog BEFORE touching the registry (same order as
+	// the pre-group code; failures never create groups).
 	topics, err := m.topicsFor(ctx, sess.AppID, rawQ)
 	if err != nil {
 		return []Frame{ErrFrame(400, "invalid-query", err.Error())}, nil
@@ -265,60 +285,18 @@ func (m *Manager) handleAddQuery(ctx context.Context, sess *Session, f Frame) ([
 	if err != nil {
 		return []Frame{ErrFrame(404, "unknown-app", "no such app")}, nil
 	}
-	sub := &reactive.Subscription{
-		ID: key, AppID: sess.AppID, Query: rawQ, Topics: topics,
-		Delta: sess.Features["delta-refresh"],
-		Emit: func(fr reactive.Frame) {
-			if sess.Send == nil {
-				return
-			}
-			entry := map[string]any{"instaql-query": json.RawMessage(fr.QueryJSON)}
-			opName := "refresh-ok"
-			if len(fr.PatchJSON) > 0 && !sess.TreeResults {
-				// delta-refresh fast path: structural patch referencing
-				// node identities (etype + entity id); the patch's entity
-				// bodies are flat {id,label:value} objects.
-				opName = "refresh-ok-delta"
-				entry["delta"] = json.RawMessage(fr.PatchJSON)
-			} else if sess.TreeResults {
-				tree, terr := UnwrapTree(fr.ResultJSON)
-				if terr != nil {
-					return
-				}
-				entry["instaql-result"] = tree
-			} else {
-				// Full envelope: v1-conformant join-rows node-list so the
-				// frozen SDK can extractTriples it (docs/03 §5).
-				nodes, nerr := BuildNodeList(cat, fr.ResultJSON)
-				if nerr != nil {
-					return
-				}
-				entry["instaql-result"] = nodes
-			}
-			if sess.TreeResults {
-				entry["result-meta"] = resultMetaOf(fr.ResultJSON)
-			}
-			payload, _ := json.Marshal([]map[string]any{entry})
-			_ = sess.Send(Frame{
-				"op":              json.RawMessage(mustRaw(fmt.Sprintf("%q", opName))),
-				"computations":    payload,
-				"processed-tx-id": json.RawMessage(mustJSON(fr.ProcessedTxID)),
-			})
-		},
-	}
-	if _, aerr := m.Deps.Store.Add(sub); aerr != nil {
+
+	// Attach (creates the shared subscription on first use). Cap breaches
+	// reject with the exact 429 protocol frames and close the connection.
+	if _, aerr := m.attachGroup(sess, rawQ, topics, cat, class); aerr != nil {
 		var capErr *reactive.SubLimitError
 		if errors.As(aerr, &capErr) {
-			// Per-app subscription cap: reject, then drop the connection.
 			return []Frame{ErrFrame(429, "subscription-limit",
 					fmt.Sprintf("per-app subscription cap (%d) exceeded", capErr.Max))},
 				fmt.Errorf("%w: %v", ErrCloseSession, aerr)
 		}
 		return []Frame{ErrFrame(500, "internal", aerr.Error())}, aerr
 	}
-	sess.mu.Lock()
-	sess.Subs[key] = true
-	sess.mu.Unlock()
 
 	reply := Frame{"op": json.RawMessage(`"add-query-ok"`)}
 	if eventID != "" {
@@ -436,24 +414,6 @@ func (m *Manager) topicsFor(ctx context.Context, appID string, rawQ json.RawMess
 		}
 	}
 	return topics, nil
-}
-
-func subKey(sessionID, queryJSON string) string {
-	h := fnv32a(sessionID + "\x00" + strings.TrimSpace(queryJSON))
-	return fmt.Sprintf("sub-%08x", h)
-}
-
-func fnv32a(s string) uint32 {
-	const (
-		offset32 = 2166136261
-		prime32  = 16777619
-	)
-	h := uint32(offset32)
-	for i := 0; i < len(s); i++ {
-		h ^= uint32(s[i])
-		h *= prime32
-	}
-	return h
 }
 
 var _ = perms.Bindings{}
