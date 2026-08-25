@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -294,11 +295,12 @@ func run(logger *slog.Logger) error {
 			Logger:       logger,
 		})
 		ws = &syncpkg.WSHandler{
-			Manager:     mgr,
-			Store:       store,
-			Compression: cfg.WSCompression,
-			MaxConns:    cfg.MaxWSConns,
-			ReadLimit:   int64(cfg.MaxFrameBytes),
+			Manager:        mgr,
+			Store:          store,
+			Compression:    cfg.WSCompression,
+			MaxConns:       cfg.MaxWSConns,
+			AllowedOrigins: strings.Split(cfg.WSAllowedOrigins, ","),
+			ReadLimit:      int64(cfg.MaxFrameBytes),
 			Refresh: func(ctx context.Context, sub *reactive.Subscription) (json.RawMessage, error) {
 				q, err := instaql.Coerce(rawToMap(sub.Query))
 				if err != nil {
@@ -374,6 +376,15 @@ func run(logger *slog.Logger) error {
 
 		storeSecret := []byte(cfg.StorageSecret)
 		if len(storeSecret) == 0 && cfg.InsecureDevMode {
+			// Audit M2: the deterministic dev fallback signs with the DSN
+			// itself — which usually contains the DB password. Refuse it
+			// on any non-loopback listener so prod can't slide into it.
+			if !loopbackAddr(cfg.HTTPAddr) {
+				logger.Error("refusing to start: INSTANT_V2_STORAGE_SECRET is required when " +
+					"listening on a non-loopback address (insecure dev-secret fallback is loopback-only)")
+				os.Exit(1)
+			}
+			logger.Warn("INSECURE dev mode: storage signatures derive from DATABASE_URL; never expose beyond loopback")
 			storeSecret = []byte(cfg.DatabaseURL) // deterministic dev fallback (insecure; dev only)
 		}
 		mux.Handle("/storage/", &storageapi.Handler{
@@ -629,7 +640,7 @@ func transactHandler(st *storage.DB, cats *platform.CatalogCache,
 		res, err := transact.Transact(ctx, st, cat, appID, parsed, transact.Options{}, doc)
 		metrics.TransactDuration.WithLabelValues("runtime").Observe(time.Since(started).Seconds())
 		if err != nil {
-			writeJSONError(w, http.StatusForbidden, err.Error())
+			writeJSONError(w, http.StatusForbidden, platform.ClientMessage(err))
 			return
 		}
 		if res.AttrsChanged {
@@ -773,3 +784,20 @@ func dedicatedConn(ctx context.Context, pool *pgxpool.Pool) (*pgxpool.Conn, erro
 
 var _ = websocket.Accept
 var _ = sync.Mutex{}
+
+// loopbackAddr reports whether the configured listen address binds only to
+// a loopback host (or is empty, which defaults to all interfaces → false).
+func loopbackAddr(addr string) bool {
+	host := addr
+	if h, _, err := net.SplitHostPort(addr); err == nil {
+		host = h
+	}
+	if host == "" {
+		return false
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return host == "localhost"
+	}
+	return ip.IsLoopback()
+}

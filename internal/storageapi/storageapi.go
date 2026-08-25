@@ -363,17 +363,44 @@ func (h *Handler) fileGet(w http.ResponseWriter, r *http.Request, id string) {
 	if obj.Size > 0 {
 		w.Header().Set("Content-Length", strconv.FormatInt(obj.Size, 10))
 	}
-	// Tika-subset deviation: v1 detects type with Apache Tika; we sniff the
-	// leading bytes via net/http (stdlib only).
+	// Stored-content hardening (audit M3): files share the API origin, so
+	// attacker-uploaded HTML/JS/SVG must never execute in a browser here.
+	// Sniff the type, then force safe types to download; never trust or
+	// reflect client-supplied names.
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	buf := make([]byte, 512)
 	n, _ := io.ReadFull(obj.Body, buf)
+	ct := "application/octet-stream"
 	if n > 0 {
-		w.Header().Set("Content-Type", http.DetectContentType(buf[:n]))
+		ct = http.DetectContentType(buf[:n])
+	}
+	if !inlineSafeType(ct) {
+		ct = "application/octet-stream"
+		w.Header().Set("Content-Disposition", "attachment")
+	} else if ct == "text/plain" {
+		w.Header().Set("Content-Disposition", "inline")
+	}
+	w.Header().Set("Content-Type", ct)
+	if n > 0 {
 		_, _ = w.Write(buf[:n])
-	} else {
-		w.Header().Set("Content-Type", "application/octet-stream")
 	}
 	_, _ = io.Copy(w, obj.Body)
+}
+
+// inlineSafeType reports whether ct may render in-browser. Images/audio/
+// video/pdf/plain text are inert enough; anything script-capable (HTML,
+// XML, SVG, unknown binaries) downloads instead of executing.
+func inlineSafeType(ct string) bool {
+	switch {
+	case strings.HasPrefix(ct, "image/"):
+		return ct != "image/svg+xml"
+	case strings.HasPrefix(ct, "audio/"), strings.HasPrefix(ct, "video/"):
+		return true
+	case strings.HasPrefix(ct, "text/plain"), ct == "application/pdf":
+		return true
+	default:
+		return false
+	}
 }
 
 // signedDownloadURL ports signed-download-url-get for id-addressed files:
@@ -563,7 +590,14 @@ func absoluteURL(r *http.Request, pathAndQuery string) string {
 	if r.TLS != nil {
 		scheme = "https"
 	}
-	return scheme + "://" + r.Host + pathAndQuery
+	// Audit L3: reflect the Host only when it's structurally sane (same
+	// sanitization the discovery endpoint applies) — behind naive proxies a
+	// hostile Host header otherwise poisons returned download URLs.
+	host := r.Host
+	if _, ok := platform.OriginOf("http://" + host); !ok {
+		host = ""
+	}
+	return scheme + "://" + host + pathAndQuery
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

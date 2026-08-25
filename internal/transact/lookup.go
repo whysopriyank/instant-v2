@@ -109,6 +109,17 @@ func resolveValues(ctx context.Context, tx pgx.Tx, appID [16]byte, steps []Step,
 				return err
 			}
 			enc, _ := normalizeValue(arr[1])
+			la, ok := cat.ByID(attrID)
+			if !ok {
+				return fmt.Errorf("value lookup: unknown attr %s", attrIDStr)
+			}
+			if !la.IsUnique {
+				// Audit M3: value-position lookups on non-unique attrs
+				// previously scanned an arbitrary matching row, silently
+				// linking to a nondeterministic entity.
+				return fmt.Errorf(
+					"value lookup: attr %s is not unique", attrIDStr)
+			}
 			var eid [16]byte
 			err := tx.QueryRow(ctx, `
 				SELECT entity_id FROM triples

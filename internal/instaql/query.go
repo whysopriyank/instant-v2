@@ -446,6 +446,11 @@ func coerceOpMap(m map[string]any) (datalog.PredOp, []any, error) {
 		case "$gt", "$gte", "$lt", "$lte", "$like", "$ilike":
 			var b []byte
 			if sv, isStr := v.(string); isStr && (k == "$like" || k == "$ilike") {
+				// Audit L2: patterns are parameterized but wildcard-rich;
+				// cap their length so "%"-style scans stay cheap to express.
+				if len(sv) > 512 {
+					return 0, nil, fmt.Errorf("%s pattern too long", k)
+				}
 				b = []byte(sv) // LIKE patterns compare raw text, not JSON
 			} else {
 				enc, err := json.Marshal(v)

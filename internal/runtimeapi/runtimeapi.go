@@ -172,7 +172,7 @@ func (h *Handler) signout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.Auth.SignOut(r.Context(), appID, token); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"message": err.Error()})
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"message": platform.ClientMessage(err)})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{})
@@ -229,7 +229,7 @@ func (h *Handler) frameworkQuery(w http.ResponseWriter, r *http.Request) {
 	}
 	cat, err := h.Catalogs.For(r.Context(), platform.UUIDToStr(appID))
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"message": err.Error()})
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"message": platform.ClientMessage(err)})
 		return
 	}
 	q, err := instaql.Coerce(query)
@@ -245,7 +245,7 @@ func (h *Handler) frameworkQuery(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusForbidden, map[string]any{"message": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"message": err.Error()})
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"message": platform.ClientMessage(err)})
 		return
 	}
 	writeJSON(w, http.StatusOK, res)

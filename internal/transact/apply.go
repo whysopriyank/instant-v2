@@ -44,6 +44,12 @@ type Result struct {
 //     rule-params → captured; add-attr → not yet in Phase 2 catalog but
 //     written; deep-merge → fetch+merge+insert; retract → delete; the rest.
 //  4. Required-field validation for touched entities.
+//
+// maxTxSteps bounds one transaction's step count. Permission probes cost
+// O(steps) point queries inside the write tx, so an unbounded batch pinned
+// a pooled writer connection for the full statement timeout (audit L1).
+const maxTxSteps = 10000
+
 func Transact(
 	ctx context.Context,
 	db *storage.DB,
@@ -53,6 +59,9 @@ func Transact(
 	opts Options,
 	ruleDoc *perms.RuleDoc,
 ) (Result, error) {
+	if len(steps) > maxTxSteps {
+		return Result{}, fmt.Errorf("transact: too many steps (%d > %d)", len(steps), maxTxSteps)
+	}
 	ordered := orderSteps(steps)
 	var res Result
 	for _, st := range steps {

@@ -557,3 +557,32 @@ func TestFilesTriples(t *testing.T) {
 		}
 	}
 }
+
+// Audit M3: uploaded HTML must never render on the API origin — forced to
+// octet-stream + attachment with nosniff, so stored XSS can't execute.
+func TestDownloadNeutralizesActiveContent(t *testing.T) {
+	h, srv, appID := newHandlerSrvApp(t)
+	_ = h
+
+	uploadURL, id, _ := presignUpload(t, srv, appID, "page.html")
+	status, _ := putBody(t, uploadURL, []byte("<html><script>alert(1)</script></html>"))
+	if status != 200 {
+		t.Fatalf("upload: %d", status)
+	}
+
+	dl := downloadURLFor(t, srv, appID, id)
+	resp := doReq(t, http.MethodGet, dl, nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("download: %d", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/octet-stream" {
+		t.Fatalf("html payload must be neutralized, got %q", ct)
+	}
+	if disp := resp.Header.Get("Content-Disposition"); disp != "attachment" {
+		t.Fatalf("want attachment disposition, got %q", disp)
+	}
+	if resp.Header.Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatal("missing X-Content-Type-Options: nosniff")
+	}
+}

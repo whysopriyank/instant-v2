@@ -57,9 +57,13 @@ type Config struct {
 	// bodies. Default 4 MiB — refresh-ok envelopes ride the write direction
 	// and are unaffected; the historical 64 MiB let unauthenticated clients
 	// drive ~6 GiB/s of parse churn per app-id (audit H3).
-	MaxFrameBytes    int   // INSTANT_V2_MAX_FRAME_BYTES
-	MaxSSEConns      int   // INSTANT_V2_MAX_SSE_CONNS, default 10000
-	MaxSSEConnsPerIP int   // INSTANT_V2_MAX_SSE_CONNS_PER_IP, default 100 (audit H5)
+	MaxFrameBytes    int // INSTANT_V2_MAX_FRAME_BYTES
+	MaxSSEConns      int // INSTANT_V2_MAX_SSE_CONNS, default 10000
+	MaxSSEConnsPerIP int // INSTANT_V2_MAX_SSE_CONNS_PER_IP, default 100 (audit H5)
+	// WSAllowedOrigins: comma-separated websocket Accept OriginPatterns
+	// (INSTANT_V2_WS_ALLOWED_ORIGINS). Default "*" keeps v1 parity; set
+	// explicit origins to harden against cross-site WebSocket hijacking.
+	WSAllowedOrigins string
 	MaxUploadBytes   int64 // INSTANT_V2_MAX_UPLOAD_BYTES, default 512MiB
 	MaxBackupBytes   int64 // INSTANT_V2_MAX_BACKUP_BYTES, default 32GiB
 
@@ -131,10 +135,16 @@ func Load() (Config, error) {
 	}
 
 	cfg.StorageSecret = os.Getenv("INSTANT_V2_STORAGE_SECRET")
-	switch os.Getenv("INSTANT_V2_INSECURE_DEV_SECRETS") {
-	case "", "0", "false":
-	default:
-		cfg.InsecureDevMode = true
+	// Audit M2: strict boolean parsing — "no"/"off"/"False" previously fell
+	// through to insecure mode via the default branch of an exact-match
+	// switch, silently disabling secret requirements in production.
+	insecureRaw := os.Getenv("INSTANT_V2_INSECURE_DEV_SECRETS")
+	if insecureRaw != "" {
+		v, perr := strconv.ParseBool(insecureRaw)
+		if perr != nil {
+			return cfg, fmt.Errorf("INSTANT_V2_INSECURE_DEV_SECRETS: %q is not a boolean (use 1/true/0/false)", insecureRaw)
+		}
+		cfg.InsecureDevMode = v
 	}
 	if cfg.StorageSecret == "" && !cfg.InsecureDevMode {
 		return cfg, errors.New("INSTANT_V2_STORAGE_SECRET is required (set INSTANT_V2_INSECURE_DEV_SECRETS=1 only for local development)")
@@ -154,6 +164,7 @@ func Load() (Config, error) {
 	if cfg.MaxSSEConnsPerIP, err = envInt("INSTANT_V2_MAX_SSE_CONNS_PER_IP", 100); err != nil {
 		return cfg, err
 	}
+	cfg.WSAllowedOrigins = os.Getenv("INSTANT_V2_WS_ALLOWED_ORIGINS")
 	if cfg.MaxUploadBytes, err = envInt64Default("INSTANT_V2_MAX_UPLOAD_BYTES", 512<<20); err != nil {
 		return cfg, err
 	}

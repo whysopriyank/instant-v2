@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/instant-v2/instant-v2/internal/platform"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -41,8 +43,26 @@ type WSHandler struct {
 	// not cleverness. Refresh envelopes ride the WRITE direction and are
 	// unaffected by this bound.
 	ReadLimit int64
+	// AllowedOrigins are websocket Accept OriginPatterns; nil/empty or a
+	// lone "*" accepts every origin (v1 parity). Set explicit origins via
+	// INSTANT_V2_WS_ALLOWED_ORIGINS to harden against cross-site WebSocket
+	// hijacking, especially once cookie auth exists.
+	AllowedOrigins []string
 
 	live connRegistry // live conns for graceful drain
+}
+
+func (h *WSHandler) originPatterns() []string {
+	pats := make([]string, 0, len(h.AllowedOrigins))
+	for _, p := range h.AllowedOrigins {
+		if p = strings.TrimSpace(p); p != "" {
+			pats = append(pats, p)
+		}
+	}
+	if len(pats) == 0 {
+		return []string{"*"} // v1 parity default
+	}
+	return pats
 }
 
 func (h *WSHandler) maxConns() int {
@@ -99,14 +119,14 @@ func (h *WSHandler) ConnCount() int { return h.live.len() }
 
 func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.live.len() >= h.maxConns() {
-		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{OriginPatterns: []string{"*"}})
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{OriginPatterns: h.originPatterns()})
 		if err == nil {
 			_ = conn.Close(websocket.StatusTryAgainLater, "connection limit reached")
 		}
 		return
 	}
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		OriginPatterns:  []string{"*"},
+		OriginPatterns:  h.originPatterns(),
 		CompressionMode: compressionMode(h.Compression),
 	})
 	if err != nil {
@@ -224,7 +244,7 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		replies, err := h.Manager.Handle(ctx, sess, f)
 		closing := errors.Is(err, ErrCloseSession)
 		if err != nil && !closing && len(replies) == 0 {
-			sendErr(500, "internal", err.Error())
+			sendErr(500, "internal", platform.ClientMessage(err))
 			continue
 		}
 		// add-query: v1 rides the INITIAL ANSWER on the add-query-ok ack itself
@@ -245,7 +265,7 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 				result, rerr := h.Refresh(ctx, sub)
 				if rerr != nil {
-					sendErr(400, "invalid-query", rerr.Error())
+					sendErr(400, "invalid-query", platform.ClientMessage(rerr))
 					return
 				}
 				// Baseline for delta-refresh diffs is always the flat envelope;

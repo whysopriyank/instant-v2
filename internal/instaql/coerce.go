@@ -86,6 +86,9 @@ func coerceForm(etype string, v any, level int) (*Form, error) {
 			}
 			f.Options = opts
 		default:
+			if level >= maxFormDepth {
+				return nil, fmt.Errorf("query nesting exceeds depth %d", maxFormDepth)
+			}
 			child, err := coerceForm(k, sub, level+1)
 			if err != nil {
 				return nil, err
@@ -96,6 +99,10 @@ func coerceForm(etype string, v any, level int) (*Form, error) {
 	}
 	return f, nil
 }
+
+// maxFormDepth bounds InstaQL tree recursion; each level costs at least two
+// sequential queries at execution time (audit L1).
+const maxFormDepth = 10
 
 var validOps = map[string]bool{
 	"$in": true, "in": true, "$not": true, "$ne": true, "$isNull": true,

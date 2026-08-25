@@ -530,7 +530,7 @@ func exchangeUserInfo(ctx context.Context, p *ResolvedProvider, code, redirectUR
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json") // github needs this
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := boundedHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -554,7 +554,7 @@ func exchangeUserInfo(ctx context.Context, p *ResolvedProvider, code, redirectUR
 		return nil, err
 	}
 	ureq.Header.Set("Authorization", "Bearer "+tok.AccessToken)
-	uresp, err := http.DefaultClient.Do(ureq)
+	uresp, err := boundedHTTPClient.Do(ureq)
 	if err != nil {
 		return nil, err
 	}
@@ -602,3 +602,7 @@ func envOr(k, def string) string {
 	}
 	return def
 }
+
+// boundedHTTPClient caps IdP exchanges so a hung provider can't pin
+// callback goroutines indefinitely (audit F10). Mirrors the JWKS client.
+var boundedHTTPClient = &http.Client{Timeout: 10 * time.Second}
