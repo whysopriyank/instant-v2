@@ -219,6 +219,14 @@ func applyAddTriples(ctx context.Context, tx pgx.Tx, db *storage.DB, appID [16]b
 		if err != nil {
 			return err
 		}
+		// Enforce the attr's declared value type before insert: the DB CHECK
+		// is authoritative but only speaks in opaque constraint errors, and
+		// attrs created without a checked-data-type never reach it.
+		if a, ok := cat.ByID(ta.AttrID); ok && a.CheckedDataType != nil {
+			if err := tripleValueMatches(*a.CheckedDataType, v); err != nil {
+				return fmt.Errorf("add-triple: %w", err)
+			}
+		}
 		ts = append(ts, triple.Triple{E: eid, A: ta.AttrID, V: v})
 	}
 	return applyInsertInto(ctx, tx, appID, cat, ts, overwriteT)
@@ -375,6 +383,42 @@ func collectTouchedEntities(steps []Step) ([][16]byte, error) {
 		}
 	}
 	return out, nil
+}
+
+// tripleValueMatches mirrors triples_valid_value (migration 001) so clients
+// get a clean 4xx-class error instead of an opaque CHECK-constraint failure.
+// JSON null is always allowed (v1 semantics); dates accept numbers (epoch ms)
+// or strings — the DB CHECK stays authoritative for string date formats.
+func tripleValueMatches(cdt string, v any) error {
+	if v == nil {
+		return nil
+	}
+	bad := func() error {
+		return fmt.Errorf("value does not match attr checked-data-type %q", cdt)
+	}
+	switch cdt {
+	case "string":
+		if _, ok := v.(string); !ok {
+			return bad()
+		}
+	case "number":
+		switch v.(type) {
+		case float64, int64, json.Number:
+		default:
+			return bad()
+		}
+	case "boolean":
+		if _, ok := v.(bool); !ok {
+			return bad()
+		}
+	case "date":
+		switch v.(type) {
+		case float64, int64, json.Number, string:
+		default:
+			return bad()
+		}
+	}
+	return nil
 }
 
 func parseValueJSON(raw json.RawMessage) (any, error) {

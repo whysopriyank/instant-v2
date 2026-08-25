@@ -90,12 +90,12 @@ func CreateAttrWithID(ctx context.Context, tx pgx.Tx, appID [16]byte, a Attr) er
 	tag, err := tx.Exec(ctx, `
 		INSERT INTO attrs (id, app_id, etype, label, reverse_etype, reverse_label,
 		                   value_type, cardinality, is_unique, is_indexed,
-		                   forward_ident, reverse_ident)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+		                   forward_ident, reverse_ident, checked_data_type)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 		ON CONFLICT (id) DO NOTHING`,
 		a.ID, appID, a.Etype, a.Label, a.ReverseEtype, a.ReverseLabel,
 		a.ValueType, a.Cardinality, a.IsUnique, a.IsIndexed,
-		a.ForwardIdent, a.ReverseIdent)
+		a.ForwardIdent, a.ReverseIdent, a.CheckedDataType)
 	if err != nil {
 		return err
 	}

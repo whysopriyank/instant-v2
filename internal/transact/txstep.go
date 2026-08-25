@@ -188,7 +188,36 @@ type wireAttr struct {
 	ReverseIdentity []string       `json:"reverse-identity"`
 	Unique          bool           `json:"unique?"`
 	Indexed         bool           `json:"index?"`
+	CheckedDataType string         `json:"checked-data-type"`
 	Rest            map[string]any `json:"-"`
+}
+
+// validIdentName enforces the v1 ident grammar on client-minted attr names:
+// ASCII letters, digits, `_`, `-`, `$`, `.`; 1..256 bytes. Names surface as
+// JSON keys in query results and ride every init-ok handshake, so unbounded
+// or control-bearing strings would become persistent amplification payload.
+func validIdentName(s string) bool {
+	if s == "" || len(s) > 256 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '_' || c == '-' || c == '$' || c == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+var validValueTypes = map[string]bool{"blob": true, "ref": true, "number": true}
+
+// checkedDataTypes mirrors the DB enum plus the wire's "json" spelling,
+// which maps to NULL (unconstrained) since jsonb accepts any value.
+var checkedDataTypes = map[string]bool{
+	"string": true, "number": true, "boolean": true, "date": true,
 }
 
 // parseWireAttr converts an add-attr payload into a platform.Attr the server
@@ -215,8 +244,9 @@ func parseWireAttr(raw json.RawMessage) (platform.Attr, error) {
 	}
 	etype := wa.ForwardIdentity[1]
 	label := wa.ForwardIdentity[2]
-	if etype == "" || label == "" {
-		return platform.Attr{}, fmt.Errorf("forward-identity etype/label must be non-empty")
+	if !validIdentName(etype) || !validIdentName(label) {
+		return platform.Attr{}, fmt.Errorf(
+			"forward-identity etype/label must be 1..256 chars of [A-Za-z0-9_$.-], got %q/%q", etype, label)
 	}
 	if perms.ReservedNamespaces[etype] {
 		// System namespaces ($users, $files, $default, …) are provisioned by
@@ -233,6 +263,9 @@ func parseWireAttr(raw json.RawMessage) (platform.Attr, error) {
 	vt := wa.ValueType
 	if vt == "" {
 		vt = "blob"
+	}
+	if !validValueTypes[vt] {
+		return platform.Attr{}, fmt.Errorf("value-type must be blob|ref|number, got %q", vt)
 	}
 	card := wa.Cardinality
 	switch card {
@@ -255,12 +288,32 @@ func parseWireAttr(raw json.RawMessage) (platform.Attr, error) {
 	}
 	if len(wa.ReverseIdentity) >= 3 {
 		revEtype, revLabel := wa.ReverseIdentity[1], wa.ReverseIdentity[2]
+		// Mirror the forward-side guards: reserved namespaces and malformed
+		// names are equally dangerous on the reverse edge (instaql resolves
+		// nested links through reverse metadata).
+		if !validIdentName(revEtype) || !validIdentName(revLabel) {
+			return platform.Attr{}, fmt.Errorf(
+				"reverse-identity etype/label must be 1..256 chars of [A-Za-z0-9_$.-], got %q/%q", revEtype, revLabel)
+		}
+		if perms.ReservedNamespaces[revEtype] {
+			return platform.Attr{}, fmt.Errorf(
+				"transact: add-attr: reverse namespace %q is reserved", revEtype)
+		}
 		var revIdent [16]byte
 		if parseUUID(wa.ReverseIdentity[0], &revIdent) == nil {
 			a.ReverseIdent = &revIdent
 		}
 		a.ReverseEtype = &revEtype
 		a.ReverseLabel = &revLabel
+	}
+	if cdt := wa.CheckedDataType; cdt != "" {
+		if !checkedDataTypes[cdt] {
+			return platform.Attr{}, fmt.Errorf(
+				"checked-data-type must be string|number|boolean|date|json, got %q", cdt)
+		}
+		if cdt != "json" { // "json" is wire spelling for unconstrained (NULL)
+			a.CheckedDataType = &cdt
+		}
 	}
 	return a, nil
 }
