@@ -187,6 +187,13 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				_ = send(reply)
 				continue
 			}
+			// Audit F6: a re-init replaces the live session. Detach the old
+			// one NOW so its subscriptions/rooms don't linger until socket
+			// close — the deferred teardown only sees the latest pointer.
+			if sess != nil && s != sess {
+				h.Manager.DetachAll(sess)
+				h.Manager.Deps.Rooms.LeaveAll(sess)
+			}
 			sess = s
 
 			sess.Send = send

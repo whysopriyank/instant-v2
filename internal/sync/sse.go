@@ -320,6 +320,11 @@ func (h *SSEHandler) postSSE(w http.ResponseWriter, r *http.Request) {
 				pushReply(conn.events, reply)
 				continue
 			}
+			// Audit F6 parity with the WS loop: detach the replaced session.
+			if conn.sess != nil && sess != conn.sess {
+				h.Manager.DetachAll(conn.sess)
+				h.Manager.Deps.Rooms.LeaveAll(conn.sess)
+			}
 			sess.Send = conn.sess.Send
 			conn.sess = sess
 			conn.initialized = true

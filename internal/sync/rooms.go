@@ -1,8 +1,18 @@
 package sync
 
+import (
+	"context"
+	"encoding/json"
+	"sync"
+)
+
 // In-process rooms/presence hub. Ports the observable semantics of v1's
 // reactive/ephemeral.clj for a single node (v1's Hazelcast IMap collapses to
 // one map; cross-node fan-out is a Phase 6 concern behind this interface).
+//
+// Resource caps (audit M4): every join/leave/set-presence fans a FULL room
+// snapshot to all members, so both the presence payload and rooms-per-session
+// count are bounded — otherwise one session could drive quadratic fan-out.
 //
 // Wire facts pinned from v1 @ a4d2ef33:
 //   - join-room {room-id, data?, peer-id?} → join-room-ok {room-id}
@@ -17,10 +27,11 @@ package sync
 //     server-broadcast {op, room-id, topic, session-id, data:{peer,user,data}}
 //     to every OTHER member; sender gets client-broadcast-ok.
 
-import (
-	"context"
-	"encoding/json"
-	"sync"
+const (
+	// maxPresenceBytes bounds the per-member `data` blob.
+	maxPresenceBytes = 4 << 10
+	// maxRoomsPerSession bounds how many rooms one socket may occupy.
+	maxRoomsPerSession = 64
 )
 
 type roomKey struct {
@@ -76,19 +87,34 @@ func (h *RoomHub) Join(ctx context.Context, sess *Session, f Frame) ([]Frame, er
 	if roomID == "" {
 		return []Frame{ErrFrame(400, "bad-request", "join-room requires room-id")}, nil
 	}
+	rawData, hasData := f["data"]
+	if hasData && len(rawData) > maxPresenceBytes {
+		return []Frame{ErrFrame(400, "presence-too-large",
+			"room data exceeds the presence size cap")}, nil
+	}
 	m := &roomMember{
 		sessionID: sess.ID,
 		peer:      strOr(f, "peer-id", sess.ID),
 		sess:      sess,
 	}
-	if raw, ok := f["data"]; ok {
-		_ = json.Unmarshal(raw, &m.data)
+	if hasData {
+		_ = json.Unmarshal(rawData, &m.data)
 	}
 	if sess.AuthUser != nil {
 		if id, ok := sess.AuthUser["id"].(string); ok {
 			m.userID = id
 		}
 	}
+	// Rooms-per-session cap: reject BEFORE any hub state mutates.
+	sess.mu.Lock()
+	_, alreadyIn := sess.Rooms[roomID]
+	if !alreadyIn && len(sess.Rooms) >= maxRoomsPerSession {
+		sess.mu.Unlock()
+		return []Frame{ErrFrame(429, "too-many-rooms", "rooms-per-session cap exceeded")}, nil
+	}
+	sess.Rooms[roomID] = true
+	sess.mu.Unlock()
+
 	k := key(sess.AppID, roomID)
 	h.mu.Lock()
 	if h.rooms[k] == nil {
@@ -96,10 +122,6 @@ func (h *RoomHub) Join(ctx context.Context, sess *Session, f Frame) ([]Frame, er
 	}
 	h.rooms[k][sess.ID] = m
 	h.mu.Unlock()
-
-	sess.mu.Lock()
-	sess.Rooms[roomID] = true
-	sess.mu.Unlock()
 
 	reply := roomField(f, "join-room-ok", "room-id", roomID)
 	go h.broadcastPresence(k) // async like v1's ephemeral event queue
@@ -143,6 +165,11 @@ func (h *RoomHub) SetPresence(ctx context.Context, sess *Session, f Frame) ([]Fr
 	}
 	nm := *latest // preserve sessionID/userID/sess
 	if raw, ok := f["data"]; ok {
+		if len(raw) > maxPresenceBytes {
+			h.mu.Unlock()
+			return []Frame{ErrFrame(400, "presence-too-large",
+				"room data exceeds the presence size cap")}, nil
+		}
 		var d map[string]any
 		_ = json.Unmarshal(raw, &d)
 		nm.data = d
