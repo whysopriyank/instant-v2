@@ -244,7 +244,6 @@ func newDiffHarness(t testing.TB, inc bool) *diffHarness {
 	}
 	allTopics := map[string]bool{diffTitle: true, diffPub: true, diffText: true}
 	for _, dq := range diffQueries {
-		dq := dq
 		sub := &Subscription{
 			ID: "sub-" + dq.name, AppID: diffApp,
 			Query:  json.RawMessage(dq.raw),
@@ -286,7 +285,6 @@ func (h *diffHarness) seed(ctx context.Context) {
 func TestIncrementalMatchesFullRefresh(t *testing.T) {
 	ctx := context.Background()
 	for seed := int64(1); seed <= 8; seed++ {
-		seed := seed
 		t.Run(fmt.Sprintf("seed%d", seed), func(t *testing.T) {
 			rng := rand.New(rand.NewPCG(uint64(seed), uint64(seed*7919)))
 			h := newDiffHarness(t, true)

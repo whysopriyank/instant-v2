@@ -2,9 +2,10 @@
 // See docs/05-conformance.md for the design.
 //
 // Modes:
-//   --mode replay --target ws://host/runtime/session [--corpus dir] [--suite filter]
-//   --mode differential --target ws://v2 --other ws://v1
-//   --mode record (future — requires live v1 + browser proxy)
+//
+//	--mode replay --target ws://host/runtime/session [--corpus dir] [--suite filter]
+//	--mode differential --target ws://v2 --other ws://v1
+//	--mode record (future — requires live v1 + browser proxy)
 package main
 
 import (

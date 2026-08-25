@@ -14,33 +14,33 @@ import (
 // The set is the enum in definitions/wsOp of the JSON Schema; tools/schemagen derives
 // the corresponding d.ts string union.
 const (
-	OpInit                = "init"
-	OpAddQuery            = "add-query"
-	OpRemoveQuery         = "remove-query"
-	OpTransact            = "transact"
-	OpError               = "error"
-	OpJoinRoom            = "join-room"
-	OpLeaveRoom           = "leave-room"
-	OpSetPresence         = "set-presence"
-	OpRefreshPresence     = "refresh-presence"
-	OpClientBroadcast     = "client-broadcast"
-	OpServerBroadcast     = "server-broadcast"
-	OpStartSync           = "start-sync"
-	OpRemoveSync          = "remove-sync"
-	OpRefreshSyncTable    = "refresh-sync-table"
-	OpResyncTable         = "resync-table"
-	OpStartStream         = "start-stream"
-	OpAppendStream        = "append-stream"
-	OpSubscribeStream     = "subscribe-stream"
-	OpUnsubscribeStream   = "unsubscribe-stream"
-	OpInitOk              = "init-ok"
-	OpAddQueryOk          = "add-query-ok"
-	OpAddQueryExists      = "add-query-exists"
-	OpRemoveQueryOk       = "remove-query-ok"
-	OpRefreshOk           = "refresh-ok"
-	OpTransactOk          = "transact-ok"
-	OpPresence            = "presence"
-	OpAppStatusChanged    = "app-status-changed"
+	OpInit              = "init"
+	OpAddQuery          = "add-query"
+	OpRemoveQuery       = "remove-query"
+	OpTransact          = "transact"
+	OpError             = "error"
+	OpJoinRoom          = "join-room"
+	OpLeaveRoom         = "leave-room"
+	OpSetPresence       = "set-presence"
+	OpRefreshPresence   = "refresh-presence"
+	OpClientBroadcast   = "client-broadcast"
+	OpServerBroadcast   = "server-broadcast"
+	OpStartSync         = "start-sync"
+	OpRemoveSync        = "remove-sync"
+	OpRefreshSyncTable  = "refresh-sync-table"
+	OpResyncTable       = "resync-table"
+	OpStartStream       = "start-stream"
+	OpAppendStream      = "append-stream"
+	OpSubscribeStream   = "subscribe-stream"
+	OpUnsubscribeStream = "unsubscribe-stream"
+	OpInitOk            = "init-ok"
+	OpAddQueryOk        = "add-query-ok"
+	OpAddQueryExists    = "add-query-exists"
+	OpRemoveQueryOk     = "remove-query-ok"
+	OpRefreshOk         = "refresh-ok"
+	OpTransactOk        = "transact-ok"
+	OpPresence          = "presence"
+	OpAppStatusChanged  = "app-status-changed"
 )
 
 // Frame is a single JSON-over-WebSocket envelope with a required "op".
@@ -90,18 +90,18 @@ type ErrorEnvelope struct {
 // Hyphen/question-mark spellings are preserved via struct tags because the on-wire
 // exactness is part of the frozen surface (docs/03 §7).
 type Attr struct {
-	ID               string   `json:"id"`
-	ValueType        string   `json:"value-type"`                 // "blob" | "ref"
-	Cardinality      string   `json:"cardinality"`                // "one" | "many"
-	ForwardIdentity  [3]string `json:"forward-identity"`           // [uuid,etype,label]
-	ReverseIdentity  *[3]string `json:"reverse-identity,omitempty"`
-	Unique           *bool    `json:"unique,omitempty"`
-	Index            *bool    `json:"index,omitempty"`             // "index?"
-	Required         *bool    `json:"required,omitempty"`
-	Primary          *bool    `json:"primary,omitempty"`
-	OnDelete         *string  `json:"on-delete,omitempty"`
-	OnDeleteReverse  *string  `json:"on-delete-reverse,omitempty"`
-	CheckedDataType  *string  `json:"checked-data-type,omitempty"`
+	ID              string     `json:"id"`
+	ValueType       string     `json:"value-type"`       // "blob" | "ref"
+	Cardinality     string     `json:"cardinality"`      // "one" | "many"
+	ForwardIdentity [3]string  `json:"forward-identity"` // [uuid,etype,label]
+	ReverseIdentity *[3]string `json:"reverse-identity,omitempty"`
+	Unique          *bool      `json:"unique,omitempty"`
+	Index           *bool      `json:"index,omitempty"` // "index?"
+	Required        *bool      `json:"required,omitempty"`
+	Primary         *bool      `json:"primary,omitempty"`
+	OnDelete        *string    `json:"on-delete,omitempty"`
+	OnDeleteReverse *string    `json:"on-delete-reverse,omitempty"`
+	CheckedDataType *string    `json:"checked-data-type,omitempty"`
 }
 
 // TxStep is one element of the frozen tx-steps array (docs/03 §4).
@@ -138,18 +138,18 @@ var KnownTxStepOps = map[string]struct{}{
 
 // InstaQLOptions carries the "$" query modifiers from definitions/instaQLOptions.
 type InstaQLOptions struct {
-	Where            map[string]any `json:"where,omitempty"`
-	Order            map[string]any `json:"order,omitempty"`
-	Limit            *int           `json:"limit,omitempty"`
-	First            *int           `json:"first,omitempty"`
-	Last             *int           `json:"last,omitempty"`
-	Offset           *int           `json:"offset,omitempty"`
-	Before           *string        `json:"before,omitempty"`
-	After            *string        `json:"after,omitempty"`
-	BeforeInclusive  *bool          `json:"beforeInclusive,omitempty"`
-	AfterInclusive   *bool          `json:"afterInclusive,omitempty"`
-	Aggregate        *string        `json:"aggregate,omitempty"` // "count" only per instaql.clj:1190
-	Fields           []string       `json:"fields,omitempty"`
+	Where           map[string]any `json:"where,omitempty"`
+	Order           map[string]any `json:"order,omitempty"`
+	Limit           *int           `json:"limit,omitempty"`
+	First           *int           `json:"first,omitempty"`
+	Last            *int           `json:"last,omitempty"`
+	Offset          *int           `json:"offset,omitempty"`
+	Before          *string        `json:"before,omitempty"`
+	After           *string        `json:"after,omitempty"`
+	BeforeInclusive *bool          `json:"beforeInclusive,omitempty"`
+	AfterInclusive  *bool          `json:"afterInclusive,omitempty"`
+	Aggregate       *string        `json:"aggregate,omitempty"` // "count" only per instaql.clj:1190
+	Fields          []string       `json:"fields,omitempty"`
 }
 
 // InstaqlResultEnvelope is the ={data,page-info,aggregate} shape shipped in refresh-ok.
@@ -174,15 +174,15 @@ type Aggregate struct {
 
 // WhereOperator enumerates the allowed where leaf operators.
 const (
-	WhereIn              = "$in"
-	WhereNot             = "$not"
-	WhereNe              = "$ne"
-	WhereIsNull          = "$isNull"
-	WhereGt              = "$gt"
-	WhereGte             = "$gte"
-	WhereLt              = "$lt"
-	WhereLte             = "$lte"
-	WhereLike            = "$like"
-	WhereIlike           = "$ilike"
+	WhereIn                 = "$in"
+	WhereNot                = "$not"
+	WhereNe                 = "$ne"
+	WhereIsNull             = "$isNull"
+	WhereGt                 = "$gt"
+	WhereGte                = "$gte"
+	WhereLt                 = "$lt"
+	WhereLte                = "$lte"
+	WhereLike               = "$like"
+	WhereIlike              = "$ilike"
 	WhereEntityIDStartsWith = "$entityIdStartsWith"
 )

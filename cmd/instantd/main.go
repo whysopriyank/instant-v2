@@ -399,13 +399,11 @@ func run(logger *slog.Logger) error {
 			"Live websocket/SSE sessions.", nil, nil,
 			func() float64 { return float64(ws.ConnCount()) + float64(sseH.ConnCount()) })
 		for name, p := range map[string]*pgxpool.Pool{"write": writePool, "read": readPool} {
-			p := p
 			for state, fn := range map[string]func() int32{
 				"acquired": func() int32 { return p.Stat().AcquiredConns() },
 				"idle":     func() int32 { return p.Stat().IdleConns() },
 				"max":      func() int32 { return p.Stat().MaxConns() },
 			} {
-				state := state
 				metrics.RegisterGauge("instant_db_pool_conns",
 					"pgxpool connections by state.", []string{"pool", "state"},
 					[]string{name, state}, func() float64 { return float64(fn()) })

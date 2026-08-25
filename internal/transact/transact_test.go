@@ -245,7 +245,8 @@ func TestPermsEnforcedOnUpdateDeleteDeleteEntity(t *testing.T) {
 func TestPermsAuthScopedUpdate(t *testing.T) {
 	db := testDB(t)
 	ctx := context.Background()
-	appID, cat, ids := seed(t, db)
+	var cat *platform.AttrCatalog
+	appID, _, ids := seed(t, db)
 	ownerID := uuidStr(rand16())
 
 	var ownerAttr platform.Attr

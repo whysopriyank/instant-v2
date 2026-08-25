@@ -43,7 +43,9 @@ jobs:
       - name: Lint
         uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
+          # Pinned: 'latest' resolved to the v1 line (built on go1.24),
+          # which refuses go.mod targets >= 1.25 ("exit code 3").
+          version: v2.13.1
       - name: Test (live PG, sequential packages)
         run: go test ./... -race -count=1 -short -p 1
 

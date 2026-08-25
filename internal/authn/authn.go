@@ -113,7 +113,6 @@ type Service struct {
 	mu       sync.Mutex
 	attrByID map[[16]byte]systemAttrs // keyed by appID
 	attempts map[string]*attemptRecord
-	nowFn    func() time.Time // swappable for tests
 
 	// Providers overrides the builtin oauth registry (tests; custom OIDC
 	// clients land with apps.rules persistence in Phase 5).

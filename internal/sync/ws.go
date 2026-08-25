@@ -194,11 +194,10 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		// Per-app frame budget (session chatter): shed before dispatch.
-		if h.Manager.Deps.Limiter != nil {
-			class := "ws"
-			if op == "transact" {
-				class = "transact" // enforced inside handleTransact with its own hint
-			} else if ok2, retry := h.Manager.Deps.Limiter.Allow(sess.AppID, class); !ok2 {
+		// Per-app frame budget; transacts are budgeted inside handleTransact
+		// with its own retry hint instead.
+		if h.Manager.Deps.Limiter != nil && op != "transact" {
+			if ok2, retry := h.Manager.Deps.Limiter.Allow(sess.AppID, "ws"); !ok2 {
 				sendErr(429, "rate-limited", fmt.Sprintf("rate limited; retry after %s", retry.Round(time.Millisecond)))
 				continue
 			}

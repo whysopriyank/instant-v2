@@ -258,10 +258,6 @@ func putBody(t *testing.T, urlStr string, body []byte) (int, map[string]any) {
 	return resp.StatusCode, out
 }
 
-func deleteJSON(t *testing.T, srv *httptest.Server, path string, body map[string]any) (int, map[string]any) {
-	return deleteJSONAuthed(t, srv, path, body, "")
-}
-
 func deleteJSONAuthed(t *testing.T, srv *httptest.Server, path string, body map[string]any, token string) (int, map[string]any) {
 	t.Helper()
 	b, _ := json.Marshal(body)
@@ -349,7 +345,7 @@ func TestStorageAdminGate(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		return resp.StatusCode
 	}
 	if got := postStatus(bare, ""); got != http.StatusServiceUnavailable {

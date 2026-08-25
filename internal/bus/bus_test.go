@@ -475,14 +475,14 @@ func TestIntegrationBusRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen Connect: %v", err)
 	}
-	defer listenConn.Close(ctx)
+	defer func() { _ = listenConn.Close(ctx) }()
 
 	// Publisher connection (separate, as in production — two nodes).
 	pubConn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
 		t.Fatalf("pub Connect: %v", err)
 	}
-	defer pubConn.Close(ctx)
+	defer func() { _ = pubConn.Close(ctx) }()
 
 	received := make(chan Invalidation, 4)
 	runErr := make(chan error, 1)

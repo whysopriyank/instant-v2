@@ -362,10 +362,10 @@ func ApplyStatementLimits(cfg *pgxpool.Config, statementTimeout, lockTimeout, id
 	if cfg == nil || cfg.ConnConfig == nil {
 		return
 	}
-	if cfg.ConnConfig.Config.RuntimeParams == nil {
-		cfg.ConnConfig.Config.RuntimeParams = map[string]string{}
+	if cfg.ConnConfig.RuntimeParams == nil {
+		cfg.ConnConfig.RuntimeParams = map[string]string{}
 	}
-	rp := cfg.ConnConfig.Config.RuntimeParams
+	rp := cfg.ConnConfig.RuntimeParams
 	if statementTimeout > 0 {
 		rp["statement_timeout"] = statementTimeout.String()
 	}

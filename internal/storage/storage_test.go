@@ -352,7 +352,7 @@ func TestApplyStatementLimits(t *testing.T) {
 		"lock_timeout":                        "5s",
 		"idle_in_transaction_session_timeout": "45s",
 	}
-	rp := cfg.ConnConfig.Config.RuntimeParams
+	rp := cfg.ConnConfig.RuntimeParams
 	for k, v := range want {
 		if rp[k] != v {
 			t.Fatalf("RuntimeParams[%s]=%q want %q", k, rp[k], v)
@@ -362,7 +362,7 @@ func TestApplyStatementLimits(t *testing.T) {
 	// Zero durations must be skipped (server default stands), not set to 0s.
 	cfg2 := &pgxpool.Config{ConnConfig: &pgx.ConnConfig{}}
 	ApplyStatementLimits(cfg2, 0, 5*time.Second, 0)
-	rp2 := cfg2.ConnConfig.Config.RuntimeParams
+	rp2 := cfg2.ConnConfig.RuntimeParams
 	if _, ok := rp2["statement_timeout"]; ok {
 		t.Fatal("zero statement_timeout must be skipped, not installed")
 	}

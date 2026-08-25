@@ -41,7 +41,7 @@ func TestRunSupervisedReconnects(t *testing.T) {
 	acquire := func(ctx context.Context) (Conn, func(), error) {
 		acquires.Add(1)
 		c := &dyingConn{}
-	c.failLeft.Store(1) // every conn dies once → forces repeat retries
+		c.failLeft.Store(1) // every conn dies once → forces repeat retries
 		return c, func() {}, nil
 	}
 

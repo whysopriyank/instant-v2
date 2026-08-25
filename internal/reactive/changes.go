@@ -73,8 +73,8 @@ func (n *Notifier) enqueue(appID string, subIDs []string, txID int64, ch []Chang
 		}
 		n.pending[id] = txID
 		added++
-		switch {
-		case ch == nil:
+		switch ch {
+		case nil:
 			delete(n.pendingCh, id) // unknown swallows accumulated knowledge
 		default:
 			merged := mergeChanges(n.pendingCh[id], ch)

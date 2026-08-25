@@ -149,18 +149,18 @@ func TestLoadPGTimeouts(t *testing.T) {
 	})
 	t.Run("override and explicit disable", func(t *testing.T) {
 		setEnv(t, map[string]string{
-			"INSTANT_V2_STORAGE_SECRET":         "s",
-			"INSTANT_V2_PG_STATEMENT_TIMEOUT":   "2s",
-			"INSTANT_V2_PG_LOCK_TIMEOUT":        "0",
-			"INSTANT_V2_PG_IDLE_TX_TIMEOUT":     "1m",
-			"INSTANT_V2_MAX_SUBS_PER_APP":       "10",
-			"INSTANT_V2_MAX_WS_CONNS":           "10",
-			"INSTANT_V2_MAX_SSE_CONNS":          "10",
-			"INSTANT_V2_MAX_UPLOAD_BYTES":       "1024",
-			"INSTANT_V2_MAX_BACKUP_BYTES":       "2048",
-			"INSTANT_V2_WRITE_POOL_MAXCONNS":    "4",
-			"INSTANT_V2_READ_POOL_MAXCONNS":     "4",
-			"INSTANT_V2_MAX_QUEUE_DEPTH":        "8",
+			"INSTANT_V2_STORAGE_SECRET":       "s",
+			"INSTANT_V2_PG_STATEMENT_TIMEOUT": "2s",
+			"INSTANT_V2_PG_LOCK_TIMEOUT":      "0",
+			"INSTANT_V2_PG_IDLE_TX_TIMEOUT":   "1m",
+			"INSTANT_V2_MAX_SUBS_PER_APP":     "10",
+			"INSTANT_V2_MAX_WS_CONNS":         "10",
+			"INSTANT_V2_MAX_SSE_CONNS":        "10",
+			"INSTANT_V2_MAX_UPLOAD_BYTES":     "1024",
+			"INSTANT_V2_MAX_BACKUP_BYTES":     "2048",
+			"INSTANT_V2_WRITE_POOL_MAXCONNS":  "4",
+			"INSTANT_V2_READ_POOL_MAXCONNS":   "4",
+			"INSTANT_V2_MAX_QUEUE_DEPTH":      "8",
 		})
 		cfg, err := Load()
 		if err != nil {

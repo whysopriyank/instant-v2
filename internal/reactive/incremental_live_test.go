@@ -118,7 +118,6 @@ func TestLiveIncrementalMatchesExecutor(t *testing.T) {
 	}
 	topics := map[string]bool{titleStr: true, tagStr: true}
 	for _, dq := range queries {
-		dq := dq
 		sub := &Subscription{
 			ID: "sub-" + dq.name, AppID: appStr,
 			Query:  json.RawMessage(dq.raw),
