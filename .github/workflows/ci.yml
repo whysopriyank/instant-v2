@@ -42,3 +42,76 @@ jobs:
         env:
           DATABASE_URL: postgres://instant:instant@localhost:5432/instant_v2_test?sslmode=disable
         run: go test ./... -race -count=1 -short -p 1
+
+  # Soak-as-gate (docs/01 §6-B follow-up): correctness gate under sustained
+  # load. tools/soak exits 1 on ANY dropped refresh or protocol violation
+  # (missed refresh, bad ordering); the RSS ceiling below additionally guards
+  # against unbounded memory growth at CI scale. Budgets are deliberately
+  # generous — this gates regressions, not absolute performance.
+  soak-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: instant
+          POSTGRES_PASSWORD: instant
+          POSTGRES_DB: instant_v2_soak
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U instant"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+        cmd: ["postgres", "-c", "wal_level=logical"]
+    env:
+      DATABASE_URL: postgres://instant:instant@localhost:5432/instant_v2_soak?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build server + harness
+        run: |
+          go build -o instantd ./cmd/instantd
+          go build -o soaksetup ./tools/soaksetup
+          go build -o soak ./tools/soak
+      - name: Seed app + attr
+        run: |
+          OUT=$(./soaksetup)
+          echo "SOAK_APP=$(echo "$OUT" | grep '^APP=' | cut -d= -f2)" >> "$GITHUB_ENV"
+          echo "SOAK_ATTR=$(echo "$OUT" | grep '^ATTR=' | cut -d= -f2)" >> "$GITHUB_ENV"
+      - name: Start instantd
+        env:
+          INSTANT_V2_HTTP_ADDR: "127.0.0.1:8888"
+          INSTANT_V2_INSECURE_DEV_SECRETS: "1"
+        run: |
+          ./instantd > instantd.log 2>&1 &
+          echo $! > server.pid
+          for i in $(seq 1 60); do
+            curl -s -o /dev/null http://127.0.0.1:8888/runtime/sse && exit 0
+            sleep 1
+          done
+          echo "instantd did not become ready"; tail -50 instantd.log; exit 1
+      - name: Soak (150 sessions, 90s hold — writes start at ramp+30s)
+        timeout-minutes: 6
+        run: |
+          ./soak \
+            -url ws://127.0.0.1:8888/runtime/session \
+            -app "$SOAK_APP" -attr "$SOAK_ATTR" \
+            -sessions 150 -ramp 10s -duration 90s \
+            -global-tx-rate 8 -tx-interval 2s
+      - name: RSS ceiling (1 GiB)
+        if: always()
+        run: |
+          PID=$(cat server.pid)
+          RSS_KB=$(ps -o rss= -p "$PID" | tr -d ' ')
+          echo "instantd RSS: $((RSS_KB / 1024)) MiB"
+          if [ "$RSS_KB" -gt 1048576 ]; then
+            echo "RSS budget exceeded"; exit 1
+          fi
+      - name: Dump server log on failure
+        if: failure()
+        run: tail -100 instantd.log
