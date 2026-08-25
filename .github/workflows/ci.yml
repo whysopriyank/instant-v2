@@ -41,10 +41,11 @@ jobs:
       - name: Vet
         run: go vet ./...
       - name: Lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v7
         with:
-          # Pinned: 'latest' resolved to the v1 line (built on go1.24),
-          # which refuses go.mod targets >= 1.25 ("exit code 3").
+          # Pinned: 'latest' under v6 resolved to the v1 line (built on
+          # go1.24), which refuses go.mod targets >= 1.25 ("exit code 3").
+          # Action v6 also cannot drive golangci-lint v2 — hence v7.
           version: v2.13.1
       - name: Test (live PG, sequential packages)
         run: go test ./... -race -count=1 -short -p 1
