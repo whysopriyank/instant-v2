@@ -33,6 +33,10 @@ type sseConn struct {
 	sess      *Session
 	events    chan Frame
 	sessionID string
+	// msgMu serializes POST handling per stream: two overlapping POSTs with
+	// the same sse_token would otherwise race conn.sess materialization and
+	// Session map mutations (concurrent map writes = process-fatal).
+	msgMu sync.Mutex
 }
 
 // SSEHandler serves the /runtime/sse pair. Wire Manager/Store/Refresh exactly
@@ -194,6 +198,9 @@ func (h *SSEHandler) postSSE(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown sse session", http.StatusUnauthorized)
 		return
 	}
+	// One writer at a time per stream (see sseConn.msgMu).
+	conn.msgMu.Lock()
+	defer conn.msgMu.Unlock()
 	if conn.sess == nil {
 		// Lazily materialize a Session bound to this stream; the protocol
 		// `init` op below completes auth/app resolution.
