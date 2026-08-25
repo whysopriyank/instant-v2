@@ -14,8 +14,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/instant-v2/instant-v2/internal/platform"
@@ -268,7 +270,36 @@ func decodeValue(raw []byte, isRef bool) (any, error) {
 
 // DeleteTriples removes exact (e,a,value) matches using SQL-computed md5 —
 // port of v1 delete-multi! without lookup-ref expansion (Phase 2 concern).
+// Runs on the pool (autocommit): only for standalone cleanups that are not
+// part of a larger transaction. The transact pipeline must use DeleteTx.
 func (d *DB) DeleteTriples(ctx context.Context, appID [16]byte, ts []triple.Triple) (int64, error) {
+	return deleteTriplesExec(ctx, d.Pool, appID, ts)
+}
+
+// DeleteTx is DeleteTriples scoped to a caller-owned transaction so retract
+// effects commit or roll back together with the rest of the Transact batch
+// ("journal first" invariant: every visible effect has its transactions row).
+func (d *DB) DeleteTx(ctx context.Context, tx pgx.Tx, appID [16]byte, ts []triple.Triple) (int64, error) {
+	return deleteTriplesExec(ctx, tx, appID, ts)
+}
+
+// deleteExecutor is satisfied by both pgx.Tx and *pgxpool.Pool.
+type deleteExecutor interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+}
+
+// deleteTriplesExec deletes exactly one row per supplied (e,a,value) tuple.
+// Dimensions are correlated PER ROW — never as set-membership across the
+// batch. A batch {(e1,a1,v1),(e2,a2,v2)} must not touch a pre-existing
+// (e1,a1,v2): entity/attr/value_md5 all bind to the same input row, unlike a
+// cross-product of IN-lists. Duplicate tuples delete the row once.
+//
+// Matching is EXACT-md5 (v1 delete-multi! parity): the md5 binds to the
+// canonical jsonb text of the stored value, so a value written with a
+// different numeric scale (1 vs 1.0) has a different fingerprint and a
+// retract of one form will not match the other. Writes share this pipeline;
+// only externally-restored rows can diverge.
+func deleteTriplesExec(ctx context.Context, exec deleteExecutor, appID [16]byte, ts []triple.Triple) (int64, error) {
 	if len(ts) == 0 {
 		return 0, nil
 	}
@@ -284,21 +315,45 @@ func (d *DB) DeleteTriples(ctx context.Context, appID [16]byte, ts []triple.Trip
 		attrs = append(attrs, t.A)
 		vals = append(vals, enc)
 	}
-	tag, err := d.Pool.Exec(ctx, `
+	tag, err := exec.Exec(ctx, `
 		WITH input(entity_id, attr_id, value) AS (
 			SELECT * FROM unnest($2::uuid[], $3::uuid[], $4::jsonb[])
-		), target AS (
-			SELECT md5(i.value::text) AS value_md5 FROM input i
 		)
-		DELETE FROM triples t USING target m
-		 WHERE t.app_id = $1 AND t.entity_id IN (SELECT entity_id FROM input)
-		   AND t.attr_id IN (SELECT attr_id FROM input)
-		   AND t.value_md5 = m.value_md5`,
+		DELETE FROM triples t
+		 USING input i
+		 WHERE t.app_id = $1
+		   AND t.entity_id = i.entity_id
+		   AND t.attr_id = i.attr_id
+		   AND t.value_md5 = md5(i.value::text)`,
 		appID, ents, attrs, vals)
 	if err != nil {
 		return 0, err
 	}
 	return tag.RowsAffected(), nil
+}
+
+// ApplyStatementLimits installs per-connection Postgres ceilings on a pool
+// config via RuntimeParams: one pathological query must not pin a pooled
+// connection forever (writer budget is shared by transacts and refreshes).
+// Zero-valued durations are skipped, leaving the server default. Migrations
+// run on their own database/sql connection and are intentionally exempt.
+func ApplyStatementLimits(cfg *pgxpool.Config, statementTimeout, lockTimeout, idleInTxTimeout time.Duration) {
+	if cfg == nil || cfg.ConnConfig == nil {
+		return
+	}
+	if cfg.ConnConfig.Config.RuntimeParams == nil {
+		cfg.ConnConfig.Config.RuntimeParams = map[string]string{}
+	}
+	rp := cfg.ConnConfig.Config.RuntimeParams
+	if statementTimeout > 0 {
+		rp["statement_timeout"] = statementTimeout.String()
+	}
+	if lockTimeout > 0 {
+		rp["lock_timeout"] = lockTimeout.String()
+	}
+	if idleInTxTimeout > 0 {
+		rp["idle_in_transaction_session_timeout"] = idleInTxTimeout.String()
+	}
 }
 
 // RecordTransaction appends a journal row and returns its identity id — the

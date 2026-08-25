@@ -3,12 +3,16 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
-	_ "github.com/jackc/pgx/v5/stdlib"
 	"os"
 	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
+	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/instant-v2/instant-v2/internal/platform"
 	"github.com/instant-v2/instant-v2/internal/triple"
@@ -250,6 +254,165 @@ func TestDeleteExactMatch(t *testing.T) {
 	rows, _ := db.FetchTriples(ctx, appID, FetchFilter{EntityIDs: [][16]byte{e}})
 	if len(rows) != 1 || rows[0].Triple.V != uuidStr(t2) {
 		t.Fatalf("remaining rows wrong: %+v", rows)
+	}
+}
+
+// TestDeleteExactMatchMultiTuple pins per-row correlation for batched
+// deletes: dimensions must never decouple into a cross-product. With rows
+// (e1,A,t1),(e1,A,t2),(e2,A,t2) present, deleting [(e1,A,t1),(e2,A,t2)] must
+// remove exactly those two tuples and leave (e1,A,t2) intact.
+func TestDeleteExactMatchMultiTuple(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	appID, cat, ids := seedCatalog(t, db)
+	e1, e2, t1, t2 := rand16(), rand16(), rand16(), rand16()
+	A := ids.link // ref/many: same attr can hold several values per entity
+	if _, err := db.InsertTriples(ctx, appID, cat, []triple.Triple{
+		{E: e1, A: A, V: uuidStr(t1)},
+		{E: e1, A: A, V: uuidStr(t2)}, // survivor under the cross-product bug
+		{E: e2, A: A, V: uuidStr(t2)},
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := db.DeleteTriples(ctx, appID, []triple.Triple{
+		{E: e1, A: A, V: uuidStr(t1)},
+		{E: e2, A: A, V: uuidStr(t2)},
+	})
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("deleted %d rows, want exactly 2 (cross-product over-deletes)", n)
+	}
+	rows, err := db.FetchTriples(ctx, appID, FetchFilter{EntityIDs: [][16]byte{e1, e2}})
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("want exactly 1 surviving row, got %+v", rows)
+	}
+	if rows[0].Triple.E != e1 || rows[0].Triple.A != A || rows[0].Triple.V != uuidStr(t2) {
+		t.Fatalf("survivor mismatch: got (%v,%v,%v) want (e1,A,t2)",
+			rows[0].Triple.E, rows[0].Triple.A, rows[0].Triple.V)
+	}
+}
+
+// TestDeleteExactMatchJSONNil pins the null canonicalization on the delete
+// path: retracting a nil value must match the stored jsonb 'null' via
+// md5('null') and remove exactly that row. (Nulls are only legal on blob
+// attrs — refs enforce uuid values via ref_values_are_uuid.)
+func TestDeleteExactMatchJSONNil(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	appID, cat, ids := seedCatalog(t, db)
+	eNil, eReal := rand16(), rand16()
+	if _, err := db.InsertTriples(ctx, appID, cat, []triple.Triple{
+		{E: eNil, A: ids.name, V: nil},
+		{E: eReal, A: ids.name, V: "real"},
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	tx := mustTx(t, db, ctx)
+	n, err := db.DeleteTx(ctx, tx, appID, []triple.Triple{{E: eNil, A: ids.name, V: nil}})
+	if err != nil {
+		t.Fatalf("nil delete: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("nil delete n=%d want 1", n)
+	}
+	rows, err := db.FetchTriples(ctx, appID, FetchFilter{EntityIDs: [][16]byte{eNil, eReal}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Triple.V != "real" {
+		t.Fatalf("want only the real value to survive: %+v", rows)
+	}
+}
+
+func mustTx(t *testing.T, db *DB, ctx context.Context) pgx.Tx {
+	t.Helper()
+	tx, err := db.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tx.Rollback(context.Background()) })
+	return tx
+}
+
+// TestApplyStatementLimits unit-pins RuntimeParams installation semantics.
+func TestApplyStatementLimits(t *testing.T) {
+	cfg := &pgxpool.Config{ConnConfig: &pgx.ConnConfig{}}
+	ApplyStatementLimits(cfg, 30*time.Second, 5*time.Second, 45*time.Second)
+	want := map[string]string{
+		"statement_timeout":                   "30s",
+		"lock_timeout":                        "5s",
+		"idle_in_transaction_session_timeout": "45s",
+	}
+	rp := cfg.ConnConfig.Config.RuntimeParams
+	for k, v := range want {
+		if rp[k] != v {
+			t.Fatalf("RuntimeParams[%s]=%q want %q", k, rp[k], v)
+		}
+	}
+
+	// Zero durations must be skipped (server default stands), not set to 0s.
+	cfg2 := &pgxpool.Config{ConnConfig: &pgx.ConnConfig{}}
+	ApplyStatementLimits(cfg2, 0, 5*time.Second, 0)
+	rp2 := cfg2.ConnConfig.Config.RuntimeParams
+	if _, ok := rp2["statement_timeout"]; ok {
+		t.Fatal("zero statement_timeout must be skipped, not installed")
+	}
+	if _, ok := rp2["idle_in_transaction_session_timeout"]; ok {
+		t.Fatal("zero idle_in_transaction timeout must be skipped")
+	}
+	if rp2["lock_timeout"] != "5s" {
+		t.Fatalf("lock_timeout=%q want 5s", rp2["lock_timeout"])
+	}
+}
+
+// TestStatementTimeoutEnforcedLive proves the ceiling is real: a pooled
+// connection reports the configured statement_timeout and pg_sleep beyond it
+// is cancelled by the server.
+func TestStatementTimeoutEnforcedLive(t *testing.T) {
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		t.Skip("DATABASE_URL not set; skipping live statement-timeout probe")
+	}
+	ctx := context.Background()
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ApplyStatementLimits(cfg, 750*time.Millisecond, 5*time.Second, 30*time.Second)
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+
+	var got string
+	if err := pool.QueryRow(ctx, `SHOW statement_timeout`).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != "750ms" {
+		t.Fatalf("SHOW statement_timeout = %q, want 750ms", got)
+	}
+	start := time.Now()
+	err = pool.QueryRow(ctx, `SELECT pg_sleep(5)`).Scan(&got)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("pg_sleep(5) must fail under a 750ms statement_timeout")
+	}
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "57014" {
+		t.Fatalf("want query_canceled(57014), got %v", err)
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("cancellation took %s; ceiling not enforced server-side", elapsed)
 	}
 }
 
