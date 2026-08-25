@@ -208,16 +208,19 @@ func gateQuery(doc *perms.RuleDoc, rawQ json.RawMessage) error {
 	return nil
 }
 
-func (m *Manager) rulesFor(ctx context.Context, appID string) *perms.RuleDoc {
+// Security invariant: an unloadable rule doc must never widen access. The
+// HTTP planes fail closed (main.go, runtimeapi); the sync plane refuses the
+// op with a protocol error instead of degrading to default-open enforcement.
+func (m *Manager) rulesFor(ctx context.Context, appID string) (*perms.RuleDoc, error) {
 	if m.Deps.Rules == nil {
-		return nil
+		return nil, nil
 	}
 	doc, err := m.Deps.Rules(ctx, appID)
 	if err != nil {
-		m.logger().Warn("sync: rules load failed; default-open", "app", appID, "err", err)
-		return nil
+		m.logger().Warn("sync: rules load failed; refusing op", "app", appID, "err", err)
+		return nil, err
 	}
-	return doc
+	return doc, nil
 }
 
 // HandleInit validates the init op and builds the session.
@@ -374,7 +377,11 @@ func (m *Manager) handleAddQuery(ctx context.Context, sess *Session, f Frame) ([
 	// View-rule gate: dynamic rules cannot be honored on shared subscriptions
 	// (no rule-where pushdown yet) — refuse them for non-admin callers rather
 	// than leak. Closed rules proceed with an empty-result gate.
-	doc := m.rulesFor(ctx, sess.AppID)
+	doc, rerr := m.rulesFor(ctx, sess.AppID)
+	if rerr != nil {
+		return []Frame{ErrFrame(503, "rules-unavailable",
+			"permission rules temporarily unavailable; retry shortly")}, nil
+	}
 	if !sess.Admin {
 		if gerr := gateQuery(doc, rawQ); gerr != nil {
 			return []Frame{ErrFrame(400, "invalid-query", gerr.Error())}, nil
@@ -442,7 +449,11 @@ func (m *Manager) handleTransact(ctx context.Context, sess *Session, f Frame) ([
 		return []Frame{ErrFrame(404, "unknown-app", "no such app")}, nil
 	}
 	appID := parseUUIDOrZero(sess.AppID)
-	doc := m.rulesFor(ctx, sess.AppID)
+	doc, rerr := m.rulesFor(ctx, sess.AppID)
+	if rerr != nil {
+		return []Frame{ErrFrame(503, "rules-unavailable",
+			"permission rules temporarily unavailable; retry shortly")}, nil
+	}
 	opts := transact.Options{
 		Admin:    sess.Admin,
 		AuthUser: sess.AuthUser,
