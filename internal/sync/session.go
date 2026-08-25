@@ -397,7 +397,7 @@ func (m *Manager) handleAddQuery(ctx context.Context, sess *Session, f Frame) ([
 					fmt.Sprintf("per-app subscription cap (%d) exceeded", capErr.Max))},
 				fmt.Errorf("%w: %v", ErrCloseSession, aerr)
 		}
-		return []Frame{ErrFrame(500, "internal", aerr.Error())}, aerr
+		return []Frame{ErrFrame(500, "internal", platform.ClientMessage(aerr))}, aerr
 	}
 
 	reply := Frame{"op": json.RawMessage(`"add-query-ok"`)}
@@ -462,7 +462,7 @@ func (m *Manager) handleTransact(ctx context.Context, sess *Session, f Frame) ([
 	res, err := transact.Transact(ctx, m.Deps.DB, cat, appID, parsed, opts, doc)
 	metrics.TransactDuration.WithLabelValues("ws").Observe(time.Since(started).Seconds())
 	if err != nil {
-		return []Frame{ErrFrame(403, "transact-error", err.Error())}, nil
+		return []Frame{ErrFrame(403, "transact-error", platform.ClientMessage(err))}, nil
 	}
 	if res.AttrsChanged && m.Deps.Catalogs != nil {
 		m.Deps.Catalogs.Invalidate(sess.AppID)

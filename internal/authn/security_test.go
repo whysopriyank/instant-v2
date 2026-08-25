@@ -92,3 +92,37 @@ func TestLockoutSharedAcrossNodes(t *testing.T) {
 		t.Fatalf("lockout must be visible to other nodes sharing the DB, got: %v", err)
 	}
 }
+
+// Adversarial-review defect 1: a user who never completes verification must
+// be able to request a fresh code after the resend cooldown. Regression pin
+// for the ON CONFLICT RETURNING semantics bug that blocked resends forever.
+func TestResendAllowedAfterCooldownWithoutVerify(t *testing.T) {
+	svc, _, appID, cleanup := env(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	email := "resendloop@test"
+	mailer := &captureMailer{}
+	svc.Mailer = mailer
+	base := time.Now()
+	svc.NowFunc = func() time.Time { return base }
+
+	if err := svc.SendMagicCode(ctx, appID, email); err != nil {
+		t.Fatalf("first send: %v", err)
+	}
+	first := mailer.code
+
+	// Advance well past the resend cooldown; NO verification happens.
+	svc.NowFunc = func() time.Time { return base.Add(2 * time.Minute) }
+	if err := svc.SendMagicCode(ctx, appID, email); err != nil {
+		t.Fatalf("second send: %v", err)
+	}
+	if mailer.code == "" || mailer.code == first {
+		t.Fatalf("RESEND BLOCKED FOREVER: no fresh code after cooldown (%q vs %q)", mailer.code, first)
+	}
+
+	// The fresh code must actually verify.
+	if _, err := svc.VerifyMagicCode(ctx, appID, email, mailer.code, "", nil, false); err != nil {
+		t.Fatalf("fresh code must verify: %v", err)
+	}
+}

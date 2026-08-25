@@ -238,9 +238,9 @@ func emailKey(email string) string {
 func (s *Service) recordLocked(ctx context.Context, appID [16]byte, email string) bool {
 	var locked bool
 	err := s.Pool.QueryRow(ctx, `
-		SELECT locked_until > now() FROM auth_throttle
+		SELECT locked_until > $3 FROM auth_throttle
 		 WHERE app_id = $1 AND key = $2`,
-		appID, emailKey(email)).Scan(&locked)
+		appID, emailKey(email), s.now()).Scan(&locked)
 	return err == nil && locked
 }
 
@@ -256,9 +256,9 @@ func (s *Service) noteFailure(ctx context.Context, appID [16]byte, email string)
 		    WHEN auth_throttle.fails + 1 >= $3 THEN 0
 		    ELSE auth_throttle.fails + 1 END,
 		  locked_until = CASE
-		    WHEN auth_throttle.fails + 1 >= $3 THEN now() + make_interval(secs => $4)
+		    WHEN auth_throttle.fails + 1 >= $3 THEN $5::timestamptz + make_interval(secs => $4)
 		    ELSE auth_throttle.locked_until END`,
-		appID, emailKey(email), maxMagicCodeFails, int(magicLockout.Seconds())); err != nil {
+		appID, emailKey(email), maxMagicCodeFails, int(magicLockout.Seconds()), s.now()); err != nil {
 		s.logger().Error("authn: noteFailure", "err", err)
 	}
 }
@@ -271,22 +271,42 @@ func (s *Service) clearFailures(ctx context.Context, appID [16]byte, email strin
 
 // resendBlocked reports whether email is inside the silent resend cooldown;
 // it stamps last_sent as a side effect so the first request starts the
-// cooldown window. RETURNING exposes (a) whether the row pre-existed
-// (xmax<>0 on the conflicting update) and (b) the PRE-update last_sent via
-// the qualified column — so a first-ever send is never blocked.
+// cooldown window. The outer SELECT reads through the statement's shared
+// snapshot, so it sees the PRE-upsert last_sent (data-modifying CTEs cannot
+// see their own effects); a first-ever send finds no row → never blocked.
+// (Adversarial-review fix: RETURNING on ON CONFLICT exposes only the new
+// tuple, which made every resends-blocked check read age≈0 forever.)
 func (s *Service) resendBlocked(ctx context.Context, appID [16]byte, email string) bool {
-	var existed bool
 	var prevAge float64
+	now := s.now()
 	err := s.Pool.QueryRow(ctx, `
-		INSERT INTO auth_throttle(app_id, key, last_sent)
-		VALUES ($1, $2, now())
-		ON CONFLICT (app_id, key) DO UPDATE SET last_sent = EXCLUDED.last_sent
-		RETURNING (xmax <> 0), EXTRACT(EPOCH FROM (now() - auth_throttle.last_sent))`,
-		appID, emailKey(email)).Scan(&existed, &prevAge)
+		WITH upsert AS (
+		  INSERT INTO auth_throttle(app_id, key, last_sent)
+		  VALUES ($1, $2, $3)
+		  ON CONFLICT (app_id, key) DO UPDATE SET last_sent = EXCLUDED.last_sent
+		  RETURNING 1
+		)
+		SELECT EXTRACT(EPOCH FROM ($3::timestamptz - t.last_sent))::float8
+		  FROM auth_throttle t
+		 WHERE t.app_id = $1 AND t.key = $2
+		   AND EXISTS (SELECT 1 FROM upsert)`,
+		appID, emailKey(email), now).Scan(&prevAge)
 	if err != nil {
-		return false // throttle table unavailable → don't block auth sends
+		return false // first-ever send (no prior row) or table hiccup → allow
 	}
-	return existed && prevAge >= 0 && prevAge < minResendInterval.Seconds()
+	return prevAge >= 0 && prevAge < minResendInterval.Seconds()
+}
+
+// PruneThrottle deletes throttle rows idle beyond ttl (no sends, no active
+// lockout). Called at boot and periodically; keeps auth_throttle bounded so
+// the shared-state fix doesn't just relocate unbounded growth into Postgres
+// (adversarial-review defect 3).
+func (s *Service) PruneThrottle(ctx context.Context, ttl time.Duration) {
+	_, _ = s.Pool.Exec(ctx, `
+		DELETE FROM auth_throttle
+		 WHERE last_sent < now() - make_interval(secs => $1)
+		   AND locked_until < now()`,
+		int(ttl.Seconds()))
 }
 
 // HashToken ports app-user-refresh-token-model/hash-token:

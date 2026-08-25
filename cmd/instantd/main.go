@@ -277,6 +277,21 @@ func run(logger *slog.Logger) error {
 			Catalogs: cats,
 			Logger:   logger,
 		}
+		// Keep auth_throttle bounded (audit follow-up): prune idle rows at
+		// boot and hourly; 24h covers lockout + resend horizons.
+		authSvc.PruneThrottle(ctx, 24*time.Hour)
+		go func() {
+			t := time.NewTicker(time.Hour)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					authSvc.PruneThrottle(ctx, 24*time.Hour)
+				}
+			}
+		}()
 		// Shared per-app traffic budgets (docs/03 §9): HTTP middleware and the
 		// WS/SSE frame gates draw from one token-bucket set.
 		mgr := syncpkg.NewManager(syncpkg.Deps{

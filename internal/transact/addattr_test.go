@@ -2,6 +2,8 @@ package transact_test
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5"
 	"strings"
 	"testing"
 
@@ -266,5 +268,57 @@ func TestCheckedDataTypePersistedAndEnforced(t *testing.T) {
 	)
 	if _, err := transact.Transact(ctx, db, cat2, appID, good, transact.Options{Admin: true}, nil); err != nil {
 		t.Fatalf("number value into number-typed attr must succeed: %v", err)
+	}
+}
+
+// Audit L1 / adversarial-review gap: tx batches are capped so permission
+// probes can't pin a writer connection for O(unbounded) work.
+func TestTransactRejectsExcessiveSteps(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	appID, cat, ids := seed(t, db)
+
+	steps := make([]transact.Step, 0, 10001)
+	for i := 0; i <= 10000; i++ {
+		steps = append(steps, parseSteps(t,
+			mustJSON(t, []any{"add-triple", uuidStr(rand16()), uuidToStr(ids.name), "x"}),
+		)[0])
+	}
+	if _, err := transact.Transact(ctx, db, cat, appID, steps, transact.Options{}, nil); err == nil {
+		t.Fatal("over-cap tx must be rejected")
+	}
+}
+
+// Audit M3: value-position lookups require a unique attr — non-unique
+// matches made link targets nondeterministic.
+func TestValueLookupRequiresUniqueAttr(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	appID, _, ids := seed(t, db)
+
+	var tagAttr platform.Attr
+	if err := db.WithTx(ctx, func(tx pgx.Tx) error {
+		var e error
+		tagAttr, e = platform.GetOrCreateAttr(ctx, tx, appID, "todos", "tag", "blob", "many", false, true)
+		return e
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cat2 := mustCatalog(t, db, appID)
+	setup := parseSteps(t,
+		mustJSON(t, []any{"add-triple", uuidStr(rand16()), uuidStr(tagAttr.ID), "dup"}),
+		mustJSON(t, []any{"add-triple", uuidStr(rand16()), uuidStr(tagAttr.ID), "dup"}),
+	)
+	if _, err := transact.Transact(ctx, db, cat2, appID, setup, transact.Options{Admin: true}, nil); err != nil {
+		t.Fatalf("setup two dup tags: %v", err)
+	}
+
+	lookupRef := []any{uuidStr(tagAttr.ID), "dup"}
+	src := rand16()
+	steps := parseSteps(t,
+		mustJSON(t, []any{"add-triple", uuidStr(src), uuidToStr(ids.link), lookupRef}),
+	)
+	if _, err := transact.Transact(ctx, db, cat2, appID, steps, transact.Options{Admin: true}, nil); err == nil {
+		t.Fatal("value-position lookup on non-unique attr must be rejected")
 	}
 }

@@ -444,3 +444,18 @@ func TestLimitOffsetPagesAreDisjointAndCovering(t *testing.T) {
 	}
 	_ = wantIDs
 }
+
+// Audit L1: InstaQL nesting is depth-capped so one query can't drive
+// hundreds of sequential round-trips.
+func TestCoerceRejectsExcessiveDepth(t *testing.T) {
+	deep := map[string]any{"todos": map[string]any{}}
+	cur := deep["todos"].(map[string]any)
+	for i := 0; i < 25; i++ {
+		next := map[string]any{}
+		cur["$nest"] = next // any child key deepens the form
+		cur = next
+	}
+	if _, err := instaql.Coerce(deep); err == nil {
+		t.Fatal("over-deep nesting must be rejected")
+	}
+}

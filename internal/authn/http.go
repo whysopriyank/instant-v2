@@ -91,7 +91,7 @@ func (h *Handler) sendMagicCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.Service.SendMagicCode(r.Context(), appID, email); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"message": err.Error()})
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"message": platform.ClientMessage(err)})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"sent": true})
@@ -135,7 +135,7 @@ func (h *Handler) signInGuest(w http.ResponseWriter, r *http.Request) {
 	extra, _ := m["extra-fields"].(map[string]any)
 	res, err := h.Service.SignInGuest(r.Context(), appID, extra)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"message": err.Error()})
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"message": platform.ClientMessage(err)})
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
@@ -171,7 +171,7 @@ func (h *Handler) signOut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.Service.SignOut(r.Context(), appID, token); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"message": err.Error()})
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"message": platform.ClientMessage(err)})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{})

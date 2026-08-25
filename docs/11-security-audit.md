@@ -37,8 +37,18 @@ timeouts · explicit `MaxHeaderBytes` · metrics-server `IdleTimeout`.
   CEL eval errors themselves fail closed.
 - **Wildcard WS origins** default: safe today (tokens ride frames, not
   cookies); set `INSTANT_V2_WS_ALLOWED_ORIGINS` before cookie auth ships.
-- **Per-process limits** (rate limiter, previously lockout): rate budgets are
-  still per-node by design; the auth-critical lockout is now shared.
+- **Per-process limits** (rate limiter): traffic budgets remain per-node by
+  design; the auth-critical lockout/resend state is shared via Postgres.
+- **Rate-limit keying**: non-UUID `app-id` values fall back to the IP bucket,
+  but an attacker can still rotate *valid* self-generated UUIDs to get fresh
+  buckets. Closing that fully requires server-side app existence checks
+  (cache lookup per request) or IP-only keying — revisit with multi-node
+  limiter work. Known-app poisoning of a victim's budget is inherent to
+  per-app budgets keyed on public ids.
+- **auth_throttle growth**: bounded operationally — rows are pruned at boot
+  and hourly (24h idle TTL) and deleted on successful verification — not
+  structurally (no FK cascade from user deletion). Acceptable at expected
+  scale; revisit if per-app cardinality explodes.
 - **No storage quotas**: any app admin can fill the file volume; multi-node
   quota tracking deferred to Phase 6 (shared-state work).
 - `email_verified` absent (vs explicitly false) is still treated as verified
@@ -46,6 +56,24 @@ timeouts · explicit `MaxHeaderBytes` · metrics-server `IdleTimeout`.
 - Global server Read/WriteTimeout intentionally unset (breaks WS/SSE
   hijacked streams); covered instead by header timeout, frame/body caps,
   WS keepalive, and SSE write deadlines.
+- Pre-existing (flagged by adversarial review, predates wave): SSE sessions
+  receive `Send` but not `SendRaw` on init, so raw-frame fan-out skips them;
+  live push over SSE relies on the snapshot path. Tracked for the SSE
+  transport follow-up.
+
+## Adversarial review
+
+The wave passed one fresh-context falsification pass (read-only reviewer
+with the ledger and full diff). Verdict was REJECT on first pass; both
+blocking items were repaired in this wave: (1) the resend-throttle upsert's
+RETURNING semantics silently blocked all resends forever — rewritten as a
+data-modifying CTE reading the pre-upsert row through the statement
+snapshot, service clock threaded into SQL so tests control time, pinned by
+`TestResendAllowedAfterCooldownWithoutVerify`; (2) the error-sanitizer had
+not been committed on two hottest WS boundaries plus three authn HTTP 500s —
+now applied repo-wide at client-facing 4xx/5xx sites. Reviewer-flagged test
+gaps closed: strict ParseBool rejection, tx-step cap, InstaQL depth cap,
+value-position uniqueness requirement.
 
 ## Evidence
 
