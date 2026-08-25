@@ -1,6 +1,9 @@
 package main
 
 import (
+	"strings"
+
+	"github.com/instant-v2/instant-v2/internal/config"
 	"net/http/httptest"
 	"testing"
 )
@@ -34,5 +37,19 @@ func TestRouteKeyValidatesAppID(t *testing.T) {
 		if got != tc.want {
 			t.Fatalf("%s: want key %q, got %q", tc.name, tc.want, got)
 		}
+	}
+}
+
+// Audit M11: insecure-dev-secrets parsing must be strict booleans — the old
+// exact-match switch enabled insecure mode for "no"/"off"/"False".
+func TestLoadRejectsJunkInsecureFlag(t *testing.T) {
+	t.Setenv("INSTANT_V2_HTTP_ADDR", "127.0.0.1:0")
+	t.Setenv("INSTANT_V2_INSECURE_DEV_SECRETS", "no")
+	if _, err := config.Load(); err == nil || !strings.Contains(err.Error(), "not a boolean") {
+		t.Fatalf("junk boolean must fail load with explicit error, got %v", err)
+	}
+	t.Setenv("INSTANT_V2_INSECURE_DEV_SECRETS", "off")
+	if _, err := config.Load(); err == nil {
+		t.Fatal("'off' must also be rejected")
 	}
 }
