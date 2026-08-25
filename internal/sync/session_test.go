@@ -71,7 +71,7 @@ func fakeStack(t *testing.T) (*syncpkg.Manager, *reactive.Store, *reactive.Notif
 		DB:       st,
 		Catalogs: cats,
 		Store:    store,
-		OnCommit: func(ctx context.Context, appID string, attrIDs []string, txID int64) {
+		OnCommit: func(ctx context.Context, appID string, attrIDs []string, txID int64, attrsChanged bool) {
 			notifier.Notify(ctx, appID, attrIDs, txID)
 		},
 	})

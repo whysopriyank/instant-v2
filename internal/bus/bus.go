@@ -48,6 +48,11 @@ type Invalidation struct {
 	// (docs/09-tier2-architecture.md §T2.5). Optional: older payloads and
 	// size-degraded ones omit it, which receivers treat as topic-granular.
 	Changes []EntityChange `json:"ch,omitempty"`
+	// AttrsChanged marks commits that created attributes. Peers must drop
+	// their cached AttrCatalog for the app on receipt, or their catalogs go
+	// stale relative to the writer's node (queries miss the new attr).
+	// Degradation-safe: Encode never strips it, and absent == false.
+	AttrsChanged bool `json:"ac,omitempty"`
 }
 
 // EntityChange is one touched entity on the bus. Mirrors reactive.Change's

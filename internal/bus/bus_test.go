@@ -547,3 +547,63 @@ func TestIntegrationBusRoundTrip(t *testing.T) {
 		t.Fatal("Run did not exit after cancel")
 	}
 }
+
+// TestAttrsChangedSurvivesRoundTripAndDegradation pins cross-node catalog
+// invalidation: the attrs.create flag must survive json round-trip AND the
+// staged size degradation (which strips Changes, then AttrIDs) so every peer
+// drops its cached AttrCatalog when any node creates attributes.
+func TestAttrsChangedSurvivesRoundTripAndDegradation(t *testing.T) {
+	inv := Invalidation{
+		AppID:        "app-1",
+		AttrIDs:      []string{"a1"},
+		TxID:         7,
+		Changes:      []EntityChange{{Etype: "todos", EntityID: "e1", AttrIDs: []string{"a1"}}},
+		AttrsChanged: true,
+	}
+	b, err := Encode(inv)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	var got Invalidation
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !got.AttrsChanged {
+		t.Fatal("small payload lost AttrsChanged on round-trip")
+	}
+
+	// Degrade past 7400 bytes: Changes and AttrIDs go, the flag must stay.
+	big := Invalidation{AppID: "app-1", TxID: 7, AttrsChanged: true}
+	for i := 0; i < 400; i++ {
+		big.Changes = append(big.Changes, EntityChange{
+			Etype: "todos", EntityID: fmt.Sprintf("e%03d", i),
+			AttrIDs: []string{strings.Repeat("x", 36)},
+		})
+	}
+	db, err := Encode(big)
+	if err != nil {
+		t.Fatalf("Encode big: %v", err)
+	}
+	if len(db) > 8000 {
+		t.Fatalf("degraded payload still too large for NOTIFY: %d", len(db))
+	}
+	got = Invalidation{}
+	if err := json.Unmarshal(db, &got); err != nil {
+		t.Fatalf("unmarshal degraded: %v", err)
+	}
+	if !got.AttrsChanged {
+		t.Fatal("degraded payload lost AttrsChanged — peers would keep stale catalogs")
+	}
+	if got.Changes != nil || got.AttrIDs != nil {
+		t.Fatalf("degradation did not strip payload fields: %+v", got)
+	}
+
+	// Absent flag decodes false (old senders / flag-less commits).
+	var old Invalidation
+	if err := json.Unmarshal([]byte(`{"app_id":"a","tx_id":1}`), &old); err != nil {
+		t.Fatalf("unmarshal legacy: %v", err)
+	}
+	if old.AttrsChanged {
+		t.Fatal("legacy payload decoded AttrsChanged=true")
+	}
+}

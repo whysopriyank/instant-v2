@@ -620,6 +620,12 @@ func paginateWrap(entitySQL string, args []any, o *Options, cat *platform.AttrCa
 		return "SELECT entity_id FROM (" + entitySQL + ") s", args
 	}
 	wrapped := "SELECT entity_id FROM (" + entitySQL + ") s"
+	if limit > 0 || offset > 0 {
+		// Deterministic paging: without a total order LIMIT takes an
+		// arbitrary subset of the matched set and OFFSET pages can overlap
+		// or skip rows as the planner's emit order shifts between runs.
+		wrapped += " ORDER BY s.entity_id"
+	}
 	if limit > 0 {
 		wrapped += fmt.Sprintf(" LIMIT %d", limit)
 	}

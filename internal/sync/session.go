@@ -88,7 +88,7 @@ type Deps struct {
 	Store    *reactive.Store
 	Auth     Authenticator
 	Rooms    *RoomHub
-	OnCommit func(ctx context.Context, appID string, attrIDs []string, txID int64)
+	OnCommit func(ctx context.Context, appID string, attrIDs []string, txID int64, attrsChanged bool)
 	Logger   *slog.Logger
 	// Rules resolves the app's permission RuleDoc for transact checks and
 	// subscription view gates. nil → default-open (no rules configured).
@@ -108,7 +108,7 @@ type Deps struct {
 	// (docs/09-tier2-architecture.md §T2.5): when set and every step of a
 	// transact resolves to a plain triple write, it is preferred over
 	// OnCommit so the incremental engine can splice instead of recompute.
-	OnCommitChanges func(ctx context.Context, appID string, changes []reactive.Change, txID int64)
+	OnCommitChanges func(ctx context.Context, appID string, changes []reactive.Change, txID int64, attrsChanged bool)
 }
 
 // Session is one live WebSocket connection's state.
@@ -481,12 +481,12 @@ func (m *Manager) handleTransact(ctx context.Context, sess *Session, f Frame) ([
 						AttrIDs:  []string{tt.AttrID},
 					})
 				}
-				m.Deps.OnCommitChanges(ctx, sess.AppID, changes, res.TxID)
+				m.Deps.OnCommitChanges(ctx, sess.AppID, changes, res.TxID, res.AttrsChanged)
 			} else {
-				m.Deps.OnCommit(ctx, sess.AppID, attrIDs, res.TxID)
+				m.Deps.OnCommit(ctx, sess.AppID, attrIDs, res.TxID, res.AttrsChanged)
 			}
 		} else {
-			m.Deps.OnCommit(ctx, sess.AppID, attrIDs, res.TxID)
+			m.Deps.OnCommit(ctx, sess.AppID, attrIDs, res.TxID, res.AttrsChanged)
 		}
 	}
 	txID, _ := f.String("client-event-id")

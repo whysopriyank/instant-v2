@@ -332,3 +332,115 @@ func TestViewGateRules(t *testing.T) {
 		t.Fatalf("nil-rule query lost data: %s", data["posts"])
 	}
 }
+
+// TestRangePredicatesAreTyped pins type-aware range comparison: numbers
+// compare numerically ('10' > '9' must hold — pure text extraction ordered
+// it below), strings compare lexically, and cross-type bounds match nothing
+// instead of falling back to text ordering.
+func TestRangePredicatesAreTyped(t *testing.T) {
+	db := qdb(t)
+	ctx := context.Background()
+	appID, cat, ids := qseed(t, db)
+
+	p1, p2, p3 := rand16(), rand16(), rand16()
+	if _, err := db.InsertTriples(ctx, appID, cat, []triple.Triple{
+		{E: p1, A: ids.title, V: "alpha"}, {E: p1, A: ids.views, V: int64(5)},
+		{E: p2, A: ids.title, V: "beta"}, {E: p2, A: ids.views, V: int64(10)},
+		{E: p3, A: ids.title, V: "alphabet"}, {E: p3, A: ids.views, V: int64(100)},
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+
+	ex := &instaql.Executor{DB: db.Pool}
+	countWhere := func(attr string, where map[string]any) int {
+		raw := map[string]any{"posts": map[string]any{"$": map[string]any{"where": map[string]any{attr: where}}}}
+		q, _ := instaql.Coerce(raw)
+		res, err := ex.Run(ctx, q, cat, appID)
+		if err != nil {
+			t.Fatalf("run %+v: %v", where, err)
+		}
+		var arr []map[string]any
+		if string(res.Data["posts"]) == "null" || len(res.Data["posts"]) == 0 {
+			return 0
+		}
+		if err := json.Unmarshal(res.Data["posts"], &arr); err != nil {
+			t.Fatalf("unmarshal %s: %v", res.Data["posts"], err)
+		}
+		return len(arr)
+	}
+
+	// Numeric: lexical ordering would return 0 ('100','10','5' all < '9').
+	if got := countWhere("views", map[string]any{"$gt": 9}); got != 2 {
+		t.Fatalf("$gt 9 numeric: %d want 2 (lexical regression returns 0)", got)
+	}
+	if got := countWhere("views", map[string]any{"$lte": 10}); got != 2 {
+		t.Fatalf("$lte 10 numeric: %d want 2", got)
+	}
+	// String ranges still work lexically.
+	if got := countWhere("title", map[string]any{"$gte": "beta"}); got != 1 {
+		t.Fatalf("$gte beta string: %d want 1", got)
+	}
+	// Cross-type bound excludes instead of comparing as text.
+	if got := countWhere("views", map[string]any{"$gt": "x"}); got != 0 {
+		t.Fatalf("$gt cross-type: %d want 0", got)
+	}
+}
+
+// TestLimitOffsetPagesAreDisjointAndCovering pins end-to-end paging: with a
+// deterministic order, fixed-size offset pages partition the match set.
+func TestLimitOffsetPagesAreDisjointAndCovering(t *testing.T) {
+	db := qdb(t)
+	ctx := context.Background()
+	appID, cat, ids := qseed(t, db)
+
+	ents := make([]triple.Triple, 0, 12)
+	var wantIDs []string
+	for i := 0; i < 6; i++ {
+		e := rand16()
+		wantIDs = append(wantIDs, uuidStr(e))
+		ents = append(ents, triple.Triple{E: e, A: ids.title, V: fmt.Sprintf("t%d", i)})
+	}
+	if _, err := db.InsertTriples(ctx, appID, cat, ents, false); err != nil {
+		t.Fatal(err)
+	}
+
+	ex := &instaql.Executor{DB: db.Pool}
+	pageIDs := func(offset int) []string {
+		raw := map[string]any{"posts": map[string]any{"$": map[string]any{
+			"limit": float64(2), "offset": float64(offset),
+		}}}
+		q, _ := instaql.Coerce(raw)
+		res, err := ex.Run(ctx, q, cat, appID)
+		if err != nil {
+			t.Fatalf("run page %d: %v", offset, err)
+		}
+		var arr []map[string]any
+		if err := json.Unmarshal(res.Data["posts"], &arr); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		out := make([]string, 0, len(arr))
+		for _, item := range arr {
+			id, _ := item["id"].(string)
+			out = append(out, id)
+		}
+		return out
+	}
+
+	seen := map[string]bool{}
+	for off := 0; off < 6; off += 2 {
+		page := pageIDs(off)
+		if len(page) != 2 {
+			t.Fatalf("page@%d returned %d rows, want 2", off, len(page))
+		}
+		for _, id := range page {
+			if seen[id] {
+				t.Fatalf("page@%d repeated entity %s — pages overlap", off, id)
+			}
+			seen[id] = true
+		}
+	}
+	if len(seen) != 6 {
+		t.Fatalf("pages covered %d entities, want 6 (skipped rows?)", len(seen))
+	}
+	_ = wantIDs
+}

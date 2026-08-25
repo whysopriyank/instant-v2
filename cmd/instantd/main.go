@@ -172,8 +172,8 @@ func run(logger *slog.Logger) error {
 		// (docs/09-tier2-architecture.md §T2.4). Self-echo is harmless —
 		// Notify dedupes via the subscription watermark.
 		var publisher bus.Publisher // nil unless the postgres bus is on
-		var invalidate func(ctx context.Context, appID string, attrIDs []string, txID int64)
-		var invalidateChanges func(ctx context.Context, appID string, changes []reactive.Change, txID int64)
+		var invalidate func(ctx context.Context, appID string, attrIDs []string, txID int64, attrsChanged bool)
+		var invalidateChanges func(ctx context.Context, appID string, changes []reactive.Change, txID int64, attrsChanged bool)
 		if cfg.InvalidationBus == "postgres" {
 			pubConn, perr := dedicatedConn(ctx, writePool)
 			if perr != nil {
@@ -202,6 +202,14 @@ func run(logger *slog.Logger) error {
 				// Entity-annotated events let peers splice too
 				// (docs/09 §T2.5); degraded payloads carry attr ids
 				// only and take the topic-wide path.
+				//
+				// Schema propagation: a peer's cached catalog must not
+				// outlive another node's attrs.create — drop it so the
+				// next query reloads (cross-node half of the staleness
+				// fix; the writer's own node invalidates inline).
+				if inv.AttrsChanged {
+					cats.Invalidate(inv.AppID)
+				}
 				if len(inv.Changes) > 0 {
 					changes := make([]reactive.Change, 0, len(inv.Changes))
 					for _, c := range inv.Changes {
@@ -216,12 +224,12 @@ func run(logger *slog.Logger) error {
 			}, logger)
 			logger.Info("invalidation bus enabled", "channel", bus.Channel, "node", cfg.NodeName())
 		}
-		invalidate = func(ctx context.Context, appID string, attrIDs []string, txID int64) {
+		invalidate = func(ctx context.Context, appID string, attrIDs []string, txID int64, attrsChanged bool) {
 			notifier.Notify(ctx, appID, attrIDs, txID)
 			if publisher != nil {
 				go func() {
 					if err := publisher.PublishInvalidation(context.WithoutCancel(ctx),
-						bus.Invalidation{AppID: appID, AttrIDs: attrIDs, TxID: txID}); err != nil {
+						bus.Invalidation{AppID: appID, AttrIDs: attrIDs, TxID: txID, AttrsChanged: attrsChanged}); err != nil {
 						logger.Warn("bus publish failed", "err", err)
 					}
 				}()
@@ -232,7 +240,7 @@ func run(logger *slog.Logger) error {
 		// incremental engine locally AND on peers (docs/09 §T2.5). The
 		// attr-id projection rides along so Encode's staged size
 		// degradation can drop Changes first and keep topic granularity.
-		invalidateChanges = func(ctx context.Context, appID string, changes []reactive.Change, txID int64) {
+		invalidateChanges = func(ctx context.Context, appID string, changes []reactive.Change, txID int64, attrsChanged bool) {
 			notifier.NotifyChanges(ctx, appID, changes, txID)
 			if publisher != nil {
 				attrSet := map[string]bool{}
@@ -252,7 +260,7 @@ func run(logger *slog.Logger) error {
 				}
 				go func() {
 					if err := publisher.PublishInvalidation(context.WithoutCancel(ctx),
-						bus.Invalidation{AppID: appID, AttrIDs: attrs, TxID: txID, Changes: entity}); err != nil {
+						bus.Invalidation{AppID: appID, AttrIDs: attrs, TxID: txID, Changes: entity, AttrsChanged: attrsChanged}); err != nil {
 						logger.Warn("bus publish failed", "err", err)
 					}
 				}()
@@ -346,14 +354,14 @@ func run(logger *slog.Logger) error {
 			DB:       st,
 			Catalogs: cats,
 			Logger:   logger,
-			OnCommit: func(ctx context.Context, appID [16]byte, attrIDs []string, txID int64) {
+			OnCommit: func(ctx context.Context, appID [16]byte, attrIDs []string, txID int64, attrsChanged bool) {
 				// Admin-plane writes must invalidate live subscribers on
 				// every node. Detach: the request context dies when
 				// handleTransact returns, but refreshes must outlive it.
-				go invalidate(context.WithoutCancel(ctx), platform.UUIDToStr(appID), attrIDs, txID)
+				go invalidate(context.WithoutCancel(ctx), platform.UUIDToStr(appID), attrIDs, txID, attrsChanged)
 			},
-			OnCommitChanges: func(ctx context.Context, appID [16]byte, changes []reactive.Change, txID int64) {
-				go invalidateChanges(context.WithoutCancel(ctx), platform.UUIDToStr(appID), changes, txID)
+			OnCommitChanges: func(ctx context.Context, appID [16]byte, changes []reactive.Change, txID int64, attrsChanged bool) {
+				go invalidateChanges(context.WithoutCancel(ctx), platform.UUIDToStr(appID), changes, txID, attrsChanged)
 			},
 		})
 
@@ -552,8 +560,8 @@ func writeJSONError(w http.ResponseWriter, status int, msg string) {
 
 // transactHandler runs one runtime transaction batch.
 func transactHandler(st *storage.DB, cats *platform.CatalogCache,
-	invalidate func(ctx context.Context, appID string, attrIDs []string, txID int64),
-	invalidateChanges func(ctx context.Context, appID string, changes []reactive.Change, txID int64),
+	invalidate func(ctx context.Context, appID string, attrIDs []string, txID int64, attrsChanged bool),
+	invalidateChanges func(ctx context.Context, appID string, changes []reactive.Change, txID int64, attrsChanged bool),
 	gate func(appID string) error, logger *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := otel.GetTextMapPropagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header))
@@ -624,14 +632,14 @@ func transactHandler(st *storage.DB, cats *platform.CatalogCache,
 						Etype: tt.Etype, EntityID: tt.EntityID, AttrIDs: []string{tt.AttrID},
 					})
 				}
-				go invalidateChanges(context.WithoutCancel(r.Context()), req.AppID, changes, res.TxID)
+				go invalidateChanges(context.WithoutCancel(r.Context()), req.AppID, changes, res.TxID, res.AttrsChanged)
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(map[string]any{"tx-id": res.TxID})
 				return
 			}
 		}
 		attrsTouched := touchedAttrs(parsed, cat)
-		go invalidate(context.WithoutCancel(r.Context()), req.AppID, attrsTouched, res.TxID)
+		go invalidate(context.WithoutCancel(r.Context()), req.AppID, attrsTouched, res.TxID, res.AttrsChanged)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"tx-id": res.TxID})
 	}

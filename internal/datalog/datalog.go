@@ -174,8 +174,17 @@ func (c *Condition) predPlaceholders(n *int, args *[]any) string {
 	case PredGt, PredGte, PredLt, PredLte:
 		op := map[PredOp]string{PredGt: ">", PredGte: ">=", PredLt: "<", PredLte: "<="}[c.Op]
 		ph := bind(c.Args[0])
-		return "(CASE WHEN jsonb_typeof(value) IN ('string','number','boolean') THEN value->>0 END) " +
-			op + " (CASE WHEN jsonb_typeof(" + ph + "::jsonb) IN ('string','number','boolean') THEN " + ph + "::jsonb->>0 END)"
+		// Same-type comparison only: numbers compare numerically, strings
+		// and booleans lexically, mismatched types match nothing (both arms
+		// false / NULL) instead of falling back to text ordering where
+		// '10' < '9'.
+		pj := ph + "::jsonb"
+		num := "(jsonb_typeof(value) = 'number' AND jsonb_typeof(" + pj + ") = 'number'" +
+			" AND (value->>0)::numeric " + op + " (" + pj + "->>0)::numeric)"
+		txt := "(jsonb_typeof(value) IS NOT NULL AND jsonb_typeof(value) <> 'number'" +
+			" AND jsonb_typeof(value) = jsonb_typeof(" + pj + ")" +
+			" AND value->>0 " + op + " " + pj + "->>0)"
+		return "(" + num + " OR " + txt + ")"
 	case PredLike:
 		return "(value->>0) LIKE " + bind(c.Args[0])
 	case PredILike:
