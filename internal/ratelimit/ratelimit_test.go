@@ -3,9 +3,11 @@ package ratelimit
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -226,5 +228,79 @@ func TestUnknownClassFallsBack(t *testing.T) {
 	err := l.Acquire(context.Background(), "app", "bogus-class")
 	if err == nil {
 		t.Fatal("bogus class bypassed limiting; want transact fallback budget applied")
+	}
+}
+
+// Audit H4: the bucket map must be bounded. Distinct client-chosen keys used
+// to allocate forever; now idle buckets evict (lazily at cap and via
+// SweepLoop) and over-cap admits untracked rather than locking new callers
+// out.
+func TestBucketMapBoundedAndFailOpen(t *testing.T) {
+	base := time.Unix(0, 0)
+	clock := base
+	l := New(Config{Classes: map[Class]ClassConfig{
+		ClassWS: {Rate: 1000, Burst: 1000},
+	}, MaxBuckets: 3, IdleTTL: time.Minute})
+	l.now = func() time.Time { return clock }
+
+	// Fill to cap.
+	for i := 0; i < 3; i++ {
+		if ok, _ := l.Allow(fmt.Sprintf("app-%d", i), ClassWS); !ok {
+			t.Fatalf("bucket %d must be admitted", i)
+		}
+	}
+	if len(l.buckets) != 3 {
+		t.Fatalf("want 3 buckets, got %d", len(l.buckets))
+	}
+	// Over cap with nothing evictable: still allowed, not tracked.
+	for i := 10; i < 20; i++ {
+		if ok, _ := l.Allow(fmt.Sprintf("app-%d", i), ClassWS); !ok {
+			t.Fatalf("over-cap request must fail open (allowed), key app-%d denied", i)
+		}
+		if len(l.buckets) > 3 {
+			t.Fatalf("bucket map grew past cap: %d", len(l.buckets))
+		}
+	}
+	// Advance past IdleTTL: lazy insert path evicts the stale set.
+	clock = base.Add(2 * time.Minute)
+	if ok, _ := l.Allow("fresh", ClassWS); !ok {
+		t.Fatal("fresh bucket after idle sweep must be admitted")
+	}
+	for k := range l.buckets {
+		if k.appID != "fresh" && strings.HasPrefix(k.appID, "app-") && k.appID != "app-0" && k.appID != "app-1" && k.appID != "app-2" {
+			t.Fatalf("unexpected survivor %q", k.appID)
+		}
+	}
+	found := false
+	for k := range l.buckets {
+		if k.appID == "fresh" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("fresh key missing after eviction cycle")
+	}
+}
+
+func TestSweepLoopEvictsIdleBuckets(t *testing.T) {
+	base := time.Unix(1, 0)
+	clock := base
+	l := New(Config{IdleTTL: time.Minute})
+	l.now = func() time.Time { return clock }
+	if ok, _ := l.Allow("doomed", ClassAuth); !ok {
+		t.Fatal("initial allow must succeed")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { l.SweepLoop(ctx, time.Millisecond); close(done) }()
+	clock = base.Add(2 * time.Minute)
+	deadline := time.Now().Add(2 * time.Second)
+	for len(l.buckets) != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	<-done
+	if len(l.buckets) != 0 {
+		t.Fatalf("sweep loop left %d buckets behind", len(l.buckets))
 	}
 }

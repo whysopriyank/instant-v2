@@ -35,6 +35,12 @@ type WSHandler struct {
 	// fails — or hangs — for this long marks the connection dead and tears
 	// the session down through the normal read-error path.
 	PingInterval time.Duration
+	// ReadLimit bounds one inbound frame in bytes; <= 0 means 4 MiB. The
+	// historical 64 MiB let any unauthenticated session stream 64 MiB
+	// payloads at the per-app chatter rate — memory/CPU exhaustion by math,
+	// not cleverness. Refresh envelopes ride the WRITE direction and are
+	// unaffected by this bound.
+	ReadLimit int64
 
 	live connRegistry // live conns for graceful drain
 }
@@ -106,9 +112,14 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	// refresh-ok carries full InstaQL results; large apps blow past the
-	// 32 KiB default read limit before any sane bound. Writes are unbounded.
-	conn.SetReadLimit(64 << 20)
+	// Inbound frames are bounded (audit H3): init/add-query/transact
+	// payloads are KBs; refresh-ok results ride the write direction.
+	// Configurable via INSTANT_V2_MAX_FRAME_BYTES.
+	readLimit := h.ReadLimit
+	if readLimit <= 0 {
+		readLimit = 4 << 20
+	}
+	conn.SetReadLimit(readLimit)
 	h.live.add(conn)
 	defer h.live.remove(conn)
 	defer conn.Close(websocket.StatusNormalClosure, "")

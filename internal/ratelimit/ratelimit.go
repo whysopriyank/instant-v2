@@ -52,7 +52,20 @@ type ClassConfig struct {
 // without restating the others.
 type Config struct {
 	Classes map[Class]ClassConfig
+	// MaxBuckets caps the bucket map; zero applies DefaultMaxBuckets. When
+	// the cap is hit, idle buckets are evicted first and requests needing a
+	// brand-new key are admitted WITHOUT tracking (fail-open) so the cap
+	// itself can never become a denial lever.
+	MaxBuckets int
+	// IdleTTL is how long an untouched bucket survives eviction; zero
+	// applies DefaultIdleTTL.
+	IdleTTL time.Duration
 }
+
+const (
+	DefaultMaxBuckets = 100_000
+	DefaultIdleTTL    = 10 * time.Minute
+)
 
 // DefaultConfig returns the documented defaults (see package comment).
 func DefaultConfig() Config {
@@ -102,18 +115,57 @@ type bucket struct {
 
 // Limiter is the in-process token-bucket set. Safe for concurrent use.
 type Limiter struct {
-	mu      sync.Mutex
-	cfg     map[Class]ClassConfig
-	buckets map[bucketKey]*bucket
-	now     func() time.Time // swappable for tests
+	mu         sync.Mutex
+	cfg        map[Class]ClassConfig
+	buckets    map[bucketKey]*bucket
+	now        func() time.Time // swappable for tests
+	maxBuckets int
+	idleTTL    time.Duration
 }
 
 // New builds a Limiter from cfg (missing classes inherit defaults).
 func New(cfg Config) *Limiter {
+	maxB := cfg.MaxBuckets
+	if maxB <= 0 {
+		maxB = DefaultMaxBuckets
+	}
+	ttl := cfg.IdleTTL
+	if ttl <= 0 {
+		ttl = DefaultIdleTTL
+	}
 	return &Limiter{
-		cfg:     cfg.resolved(),
-		buckets: map[bucketKey]*bucket{},
-		now:     time.Now,
+		cfg:        cfg.resolved(),
+		buckets:    map[bucketKey]*bucket{},
+		now:        time.Now,
+		maxBuckets: maxB,
+		idleTTL:    ttl,
+	}
+}
+
+// SweepLoop evicts idle buckets every `every` until ctx is canceled. Without
+// it, eviction still happens lazily when the bucket cap is hit; the loop
+// reclaims memory from long quiet periods proactively (audit H4).
+func (l *Limiter) SweepLoop(ctx context.Context, every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			l.mu.Lock()
+			l.evictLocked(l.now())
+			l.mu.Unlock()
+		}
+	}
+}
+
+// evictLocked drops buckets idle longer than idleTTL. Caller holds mu.
+func (l *Limiter) evictLocked(now time.Time) {
+	for k, b := range l.buckets {
+		if now.Sub(b.last) > l.idleTTL {
+			delete(l.buckets, k)
+		}
 	}
 }
 
@@ -137,6 +189,14 @@ func (l *Limiter) Allow(appID string, class Class) (ok bool, retryAfter time.Dur
 	b, okb := l.buckets[key]
 	now := l.now()
 	if !okb {
+		if len(l.buckets) >= l.maxBuckets {
+			l.evictLocked(now)
+		}
+		if len(l.buckets) >= l.maxBuckets {
+			// Cap reached with nothing evictable: admit untracked so the
+			// cap stays a memory bound, not a denial-of-service lever.
+			return true, 0
+		}
 		b = &bucket{tokens: float64(cc.Burst), last: now}
 		l.buckets[key] = b
 	} else {

@@ -83,6 +83,9 @@ func run(logger *slog.Logger) error {
 	// Shared per-app traffic budgets (docs/03 §9): the HTTP middleware and
 	// the WS/SSE frame gates draw from one token-bucket set.
 	limiter := ratelimit.New(ratelimit.Config{})
+	// Proactive eviction of idle buckets (audit H4): without this the map
+	// only shrinks lazily when the cap is hit under pressure.
+	go limiter.SweepLoop(ctx, time.Minute)
 	if db == nil {
 		mux.HandleFunc("GET /health", health(nil, nil))
 	}
@@ -295,6 +298,7 @@ func run(logger *slog.Logger) error {
 			Store:       store,
 			Compression: cfg.WSCompression,
 			MaxConns:    cfg.MaxWSConns,
+			ReadLimit:   int64(cfg.MaxFrameBytes),
 			Refresh: func(ctx context.Context, sub *reactive.Subscription) (json.RawMessage, error) {
 				q, err := instaql.Coerce(rawToMap(sub.Query))
 				if err != nil {
@@ -416,6 +420,7 @@ func run(logger *slog.Logger) error {
 		Handler:           assembleMiddleware(mux, cfg, logger, limiter),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()
@@ -487,17 +492,24 @@ func classifyRoute(r *http.Request) (string, ratelimit.Class) {
 }
 
 func routeKey(r *http.Request) string {
+	// Security (audit H4): the key must be server-derived. Honor a client
+	// app-id only when it parses as a real UUID — rotating garbage header
+	// values must not mint fresh rate-limit buckets. Non-UUID callers share
+	// their IP's bucket instead.
+	isUUID := func(s string) bool {
+		_, err := platform.ScanUUIDErr(s)
+		return err == nil
+	}
 	for _, k := range []string{"app-id", "X-app-id"} {
-		if v := r.Header.Get(k); v != "" {
+		if v := r.Header.Get(k); v != "" && isUUID(v) {
 			return v
 		}
 	}
 	q := r.URL.Query()
-	if v := q.Get("app-id"); v != "" {
-		return v
-	}
-	if v := q.Get("app_id"); v != "" {
-		return v
+	for _, k := range []string{"app-id", "app_id"} {
+		if v := q.Get(k); v != "" && isUUID(v) {
+			return v
+		}
 	}
 	host := r.RemoteAddr
 	if i := strings.LastIndex(host, ":"); i > 0 {
@@ -519,7 +531,7 @@ func bodyLimitFor(path string, cfg config.Config, method string) int64 {
 	case strings.HasPrefix(path, "/storage/upload/") && method == http.MethodPut:
 		return cfg.MaxUploadBytes + (1 << 20) // headroom for query metadata
 	case path == "/runtime/transact" || path == "/admin/transact":
-		return 64 << 20 // tx batches ride the WS read limit
+		return int64(cfg.MaxFrameBytes) // tx batches ride the WS frame limit
 	case strings.HasPrefix(path, "/admin/query"):
 		return 16 << 20
 	case path == "/runtime/sse" && method == http.MethodPost:

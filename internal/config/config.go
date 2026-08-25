@@ -53,6 +53,11 @@ type Config struct {
 	// Resource bounds. Zero values below fall back to the documented defaults.
 	MaxSubsPerApp  int   // INSTANT_V2_MAX_SUBS_PER_APP, default 2000
 	MaxWSConns     int   // INSTANT_V2_MAX_WS_CONNS, default 20000
+	// MaxFrameBytes bounds one inbound WS/SSE message and the transact HTTP
+	// bodies. Default 4 MiB — refresh-ok envelopes ride the write direction
+	// and are unaffected; the historical 64 MiB let unauthenticated clients
+	// drive ~6 GiB/s of parse churn per app-id (audit H3).
+	MaxFrameBytes int // INSTANT_V2_MAX_FRAME_BYTES
 	MaxSSEConns    int   // INSTANT_V2_MAX_SSE_CONNS, default 10000
 	MaxUploadBytes int64 // INSTANT_V2_MAX_UPLOAD_BYTES, default 512MiB
 	MaxBackupBytes int64 // INSTANT_V2_MAX_BACKUP_BYTES, default 32GiB
@@ -137,6 +142,9 @@ func Load() (Config, error) {
 		return cfg, err
 	}
 	if cfg.MaxWSConns, err = envInt("INSTANT_V2_MAX_WS_CONNS", 20000); err != nil {
+		return cfg, err
+	}
+	if cfg.MaxFrameBytes, err = envInt("INSTANT_V2_MAX_FRAME_BYTES", 4<<20); err != nil {
 		return cfg, err
 	}
 	if cfg.MaxSSEConns, err = envInt("INSTANT_V2_MAX_SSE_CONNS", 10000); err != nil {
