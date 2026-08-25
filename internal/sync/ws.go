@@ -31,6 +31,10 @@ type WSHandler struct {
 	// connections are refused with 1013 (Try Again Later) before any
 	// session work happens.
 	MaxConns int
+	// PingInterval is the keepalive cadence; <= 0 means 30s. A ping that
+	// fails — or hangs — for this long marks the connection dead and tears
+	// the session down through the normal read-error path.
+	PingInterval time.Duration
 
 	live connRegistry // live conns for graceful drain
 }
@@ -40,6 +44,37 @@ func (h *WSHandler) maxConns() int {
 		return h.MaxConns
 	}
 	return 20000
+}
+
+func (h *WSHandler) pingInterval() time.Duration {
+	if h.PingInterval > 0 {
+		return h.PingInterval
+	}
+	return 30 * time.Second
+}
+
+// runKeepalive pings until ctx ends, invoking onDead exactly once when a
+// ping fails or hangs longer than one interval. Extracted from ServeHTTP so
+// the failure modes it exists for — write error, hung write path against a
+// half-open peer — are unit-testable without fragile network simulation.
+func (h *WSHandler) runKeepalive(ctx context.Context, write func(context.Context) error, onDead func()) {
+	interval := h.pingInterval()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		wctx, cancel := context.WithTimeout(ctx, interval)
+		err := write(wctx)
+		cancel()
+		if err != nil {
+			onDead()
+			return
+		}
+	}
 }
 
 func compressionMode(cfg string) websocket.CompressionMode {
@@ -99,30 +134,17 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Keepalive: half-open TCP connections (laptop sleep, NAT drop, SIGKILLed
 	// client) never surface as Read errors, so sessions would otherwise
 	// linger as ghosts until process restart. Ping periodically; a failed
-	// ping cancels the read context, which surfaces as a Read error and runs
-	// the normal teardown path.
+	// or hung ping cancels the read context, which surfaces as a Read error
+	// and runs the normal teardown path.
 	pingCtx, cancelPing := context.WithCancel(ctx)
 	defer cancelPing()
 	readCtx, cancelRead := context.WithCancel(ctx)
 	defer cancelRead()
-	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-pingCtx.Done():
-				return
-			case <-ticker.C:
-				writeMu.Lock()
-				err := conn.Ping(pingCtx)
-				writeMu.Unlock()
-				if err != nil {
-					cancelRead()
-					return
-				}
-			}
-		}
-	}()
+	go h.runKeepalive(pingCtx, func(wctx context.Context) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		return conn.Ping(wctx)
+	}, cancelRead)
 	send := func(f Frame) error {
 		b, err := f.Encode()
 		if err != nil {
