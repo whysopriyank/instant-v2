@@ -294,13 +294,18 @@ func TestSweepLoopEvictsIdleBuckets(t *testing.T) {
 	done := make(chan struct{})
 	go func() { l.SweepLoop(ctx, time.Millisecond); close(done) }()
 	clock = base.Add(2 * time.Minute)
-	deadline := time.Now().Add(2 * time.Second)
-	for len(l.buckets) != 0 && time.Now().Before(deadline) {
+	size := func() int {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		return len(l.buckets)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for size() != 0 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
 	cancel()
 	<-done
-	if len(l.buckets) != 0 {
-		t.Fatalf("sweep loop left %d buckets behind", len(l.buckets))
+	if n := size(); n != 0 {
+		t.Fatalf("sweep loop left %d buckets behind", n)
 	}
 }

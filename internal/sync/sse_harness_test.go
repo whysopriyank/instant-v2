@@ -85,5 +85,5 @@ func postMsgs(t *testing.T, srvURL, token string, msgs ...map[string]any) {
 	if err != nil {
 		t.Fatalf("post: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 }

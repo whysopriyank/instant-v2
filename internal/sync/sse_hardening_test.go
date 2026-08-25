@@ -17,7 +17,7 @@ func TestSSEPerIPCap(t *testing.T) {
 	bodies := []*http.Response{}
 	defer func() {
 		for _, r := range bodies {
-			r.Body.Close()
+			_ = r.Body.Close()
 		}
 	}()
 	for i := 0; i < 2; i++ {
@@ -26,7 +26,7 @@ func TestSSEPerIPCap(t *testing.T) {
 			t.Fatalf("stream %d: %v", i, err)
 		}
 		if resp.StatusCode != http.StatusOK {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			t.Fatalf("stream %d: want 200, got %d", i, resp.StatusCode)
 		}
 		bodies = append(bodies, resp)
@@ -35,20 +35,20 @@ func TestSSEPerIPCap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("third stream: %v", err)
 	}
-	defer third.Body.Close()
+	defer func() { _ = third.Body.Close() }()
 	if third.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("third stream from same IP must be 503, got %d", third.StatusCode)
 	}
 
 	// Releasing a slot admits the next caller.
-	bodies[0].Body.Close()
+	_ = bodies[0].Body.Close()
 	bodies = bodies[1:]
 	time.Sleep(150 * time.Millisecond)
 	fourth, err := http.Get(srv.URL + "/runtime/sse?app_id=" + appID)
 	if err != nil {
 		t.Fatalf("post-release stream: %v", err)
 	}
-	defer fourth.Body.Close()
+	defer func() { _ = fourth.Body.Close() }()
 	if fourth.StatusCode != http.StatusOK {
 		t.Fatalf("stream after release must be 200, got %d", fourth.StatusCode)
 	}
@@ -61,7 +61,7 @@ func TestSSEHeartbeat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	sc := bufio.NewScanner(resp.Body)
 
 	start := time.Now()

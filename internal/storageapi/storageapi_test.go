@@ -572,7 +572,7 @@ func TestDownloadNeutralizesActiveContent(t *testing.T) {
 
 	dl := downloadURLFor(t, srv, appID, id)
 	resp := doReq(t, http.MethodGet, dl, nil)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != 200 {
 		t.Fatalf("download: %d", resp.StatusCode)
 	}
