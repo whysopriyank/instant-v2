@@ -251,8 +251,14 @@ func (s *Service) VerifyIDToken(ctx context.Context, p *ResolvedProvider, idToke
 
 	if nonce != "" {
 		got, _ := claims["nonce"].(string)
-		// v1 quirks preserved: Google omits nonce, Apple sends sha256(nonce).
-		if got != "" && got != nonce && hashHex(got) != nonce {
+		// Audit F2a: when the caller requested a nonce binding, an id_token
+		// without a nonce claim is a replay vector (stolen tokens pass any
+		// check). Absence is now rejected; callers that don't bind a nonce
+		// are unaffected. Apple-style sha256(nonce) stays accepted.
+		if got == "" {
+			return nil, errors.New("authn: id_token missing required nonce claim")
+		}
+		if got != nonce && hashHex(got) != nonce {
 			return nil, errors.New("authn: nonce mismatch")
 		}
 	}

@@ -431,6 +431,12 @@ func (s *Service) VerifyMagicCodeTrusted(ctx context.Context, appID [16]byte,
 		return nil, err
 	}
 	if created {
+		// Audit F2b: the OAuth/id_token path must enforce the SAME signup
+		// gate as the magic-code path — apps denying open signup via
+		// $users.create=false must not get accounts minted here.
+		if err := s.checkCreatePerm(ctx, appID, email); err != nil {
+			return nil, err
+		}
 		ts := []triple.Triple{
 			{E: userID, A: a.userID, V: formatUUID(userID)},
 			{E: userID, A: a.userEmail, V: email},

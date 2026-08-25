@@ -61,12 +61,6 @@ const (
 	minResendInterval = 60 * time.Second
 )
 
-type attemptRecord struct {
-	fails       int
-	lockedUntil time.Time
-	lastSent    time.Time
-}
-
 // User is an app-level user record ($users entity projection).
 type User struct {
 	ID    string
@@ -112,7 +106,6 @@ type Service struct {
 
 	mu       sync.Mutex
 	attrByID map[[16]byte]systemAttrs // keyed by appID
-	attempts map[string]*attemptRecord
 
 	// Providers overrides the builtin oauth registry (tests; custom OIDC
 	// clients land with apps.rules persistence in Phase 5).
@@ -232,48 +225,68 @@ func (s *Service) now() time.Time {
 	return time.Now()
 }
 
-// attemptKey namespaces brute-force state per app and email.
-func attemptKey(appID [16]byte, email string) string {
-	return platform.UUIDToStr(appID) + "\x00" + strings.ToLower(strings.TrimSpace(email))
+// emailKey normalizes the identity for auth_throttle rows. (The app scope
+// lives in its own uuid column; Go-map NUL separators are invalid PG text.)
+func emailKey(email string) string {
+	return strings.ToLower(strings.TrimSpace(email))
 }
 
-func (s *Service) recordLocked(appID [16]byte, email string) bool {
-	key := attemptKey(appID, email)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.attempts == nil {
-		s.attempts = map[string]*attemptRecord{}
-	}
-	rec := s.attempts[key]
-	return rec != nil && s.now().Before(rec.lockedUntil)
+// Throttle state lives in Postgres (audit F4/M4): every node sharing the DB
+// enforces ONE lockout/resend budget per (app,email). All statements below
+// are single-statement atomic upserts — no read-modify-write races.
+
+func (s *Service) recordLocked(ctx context.Context, appID [16]byte, email string) bool {
+	var locked bool
+	err := s.Pool.QueryRow(ctx, `
+		SELECT locked_until > now() FROM auth_throttle
+		 WHERE app_id = $1 AND key = $2`,
+		appID, emailKey(email)).Scan(&locked)
+	return err == nil && locked
 }
 
-// noteFailure bumps the failure counter and locks on threshold.
-func (s *Service) noteFailure(appID [16]byte, email string) {
-	key := attemptKey(appID, email)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.attempts == nil {
-		s.attempts = map[string]*attemptRecord{}
-	}
-	rec := s.attempts[key]
-	if rec == nil {
-		rec = &attemptRecord{}
-		s.attempts[key] = rec
-	}
-	rec.fails++
-	if rec.fails >= maxMagicCodeFails {
-		rec.lockedUntil = s.now().Add(magicLockout)
-		rec.fails = 0 // fresh count after cooldown
+// noteFailure bumps the failure counter and locks on threshold in one
+// statement; the CASE keeps concurrent verifiers from overshooting the
+// reset-on-lockout semantics.
+func (s *Service) noteFailure(ctx context.Context, appID [16]byte, email string) {
+	if _, err := s.Pool.Exec(ctx, `
+		INSERT INTO auth_throttle(app_id, key, fails)
+		VALUES ($1, $2, 1)
+		ON CONFLICT (app_id, key) DO UPDATE SET
+		  fails = CASE
+		    WHEN auth_throttle.fails + 1 >= $3 THEN 0
+		    ELSE auth_throttle.fails + 1 END,
+		  locked_until = CASE
+		    WHEN auth_throttle.fails + 1 >= $3 THEN now() + make_interval(secs => $4)
+		    ELSE auth_throttle.locked_until END`,
+		appID, emailKey(email), maxMagicCodeFails, int(magicLockout.Seconds())); err != nil {
+		s.logger().Error("authn: noteFailure", "err", err)
 	}
 }
 
-// clearFailures resets state after a successful verification.
-func (s *Service) clearFailures(appID [16]byte, email string) {
-	key := attemptKey(appID, email)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.attempts, key)
+func (s *Service) clearFailures(ctx context.Context, appID [16]byte, email string) {
+	_, _ = s.Pool.Exec(ctx,
+		`DELETE FROM auth_throttle WHERE app_id = $1 AND key = $2`,
+		appID, emailKey(email))
+}
+
+// resendBlocked reports whether email is inside the silent resend cooldown;
+// it stamps last_sent as a side effect so the first request starts the
+// cooldown window. RETURNING exposes (a) whether the row pre-existed
+// (xmax<>0 on the conflicting update) and (b) the PRE-update last_sent via
+// the qualified column — so a first-ever send is never blocked.
+func (s *Service) resendBlocked(ctx context.Context, appID [16]byte, email string) bool {
+	var existed bool
+	var prevAge float64
+	err := s.Pool.QueryRow(ctx, `
+		INSERT INTO auth_throttle(app_id, key, last_sent)
+		VALUES ($1, $2, now())
+		ON CONFLICT (app_id, key) DO UPDATE SET last_sent = EXCLUDED.last_sent
+		RETURNING (xmax <> 0), EXTRACT(EPOCH FROM (now() - auth_throttle.last_sent))`,
+		appID, emailKey(email)).Scan(&existed, &prevAge)
+	if err != nil {
+		return false // throttle table unavailable → don't block auth sends
+	}
+	return existed && prevAge >= 0 && prevAge < minResendInterval.Seconds()
 }
 
 // HashToken ports app-user-refresh-token-model/hash-token:
@@ -317,23 +330,10 @@ func (s *Service) SendMagicCode(ctx context.Context, appID [16]byte, email strin
 	// Resend throttle: silently honor requests inside the cooldown window
 	// (the previously issued code remains valid) so clients see the same
 	// contract while mail-bombing stays impossible. No enumeration signal.
-	key := attemptKey(appID, email)
-	s.mu.Lock()
-	if s.attempts == nil {
-		s.attempts = map[string]*attemptRecord{}
-	}
-	rec := s.attempts[key]
-	now := s.now()
-	if rec != nil && now.Sub(rec.lastSent) < minResendInterval {
-		s.mu.Unlock()
+	// State is shared across nodes via auth_throttle (audit F4/M4).
+	if s.resendBlocked(ctx, appID, email) {
 		return nil
 	}
-	if rec == nil {
-		rec = &attemptRecord{}
-		s.attempts[key] = rec
-	}
-	rec.lastSent = now
-	s.mu.Unlock()
 
 	a, err := s.attrs(ctx, appID)
 	if err != nil {
@@ -485,7 +485,7 @@ func (s *Service) VerifyMagicCode(ctx context.Context, appID [16]byte,
 	admin bool,
 ) (map[string]any, error) {
 	// Brute-force gate: locked pairs are refused before any code check.
-	if s.recordLocked(appID, email) {
+	if s.recordLocked(ctx, appID, email) {
 		return nil, ErrLocked
 	}
 	a, err := s.attrs(ctx, appID)
@@ -525,14 +525,14 @@ func (s *Service) VerifyMagicCode(ctx context.Context, appID [16]byte,
 			}
 		}
 		if err := s.consumeCode(ctx, appID, a, email, code); err != nil {
-			s.noteFailure(appID, email)
+			s.noteFailure(ctx, appID, email)
 			return nil, err
 		}
 	} else if err := s.consumeCode(ctx, appID, a, email, code); err != nil {
-		s.noteFailure(appID, email)
+		s.noteFailure(ctx, appID, email)
 		return nil, err
 	}
-	s.clearFailures(appID, email)
+	s.clearFailures(ctx, appID, email)
 
 	var userID [16]byte
 	switch {
@@ -666,57 +666,51 @@ func (s *Service) userByEmail(ctx context.Context, appID [16]byte, email string,
 // consumeCode ports app-user-magic-code-model/consume!: find the entity
 // holding BOTH {codeHash=sha256(code)} and {email}, enforce TTL on
 // triples.created_at, then burn (delete) its code triples.
+//
+// The claim is a single atomic DELETE ... RETURNING (audit F3): two nodes
+// racing the same code cannot both observe the pre-delete state, so exactly
+// one verification wins. TTL is enforced from the claimed row's created_at,
+// preserving v1's delete-then-expire ordering (an expired code stays burnt).
 func (s *Service) consumeCode(ctx context.Context, appID [16]byte, a systemAttrs, email, code string) error {
 	hash := HashToken(code)
-	rows, err := s.Pool.Query(ctx, `
-		SELECT h.entity_id, h.created_at
-		  FROM triples h
-		  JOIN triples e
-		    ON e.app_id = h.app_id AND e.entity_id = h.entity_id
-		   AND e.attr_id = $4 AND e.value = $5::jsonb
-		 WHERE h.app_id = $1 AND h.attr_id = $3 AND h.value = $2::jsonb`,
-		appID, mustJSON(hash), a.magicCodeHash, a.magicCodeEmail, mustJSON(email))
-	if err != nil {
-		return err
-	}
-	type hit struct {
-		e       [16]byte
-		created time.Time
-	}
-	var hits []hit
-	for rows.Next() {
-		var h hit
-		if err := rows.Scan(&h.e, &h.created); err != nil {
-			rows.Close()
-			return err
-		}
-		hits = append(hits, h)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
-	}
 	ttl := s.CodeTTL
 	if ttl <= 0 {
 		ttl = DefaultMagicCodeTTL
 	}
-	burn := func(e [16]byte) error {
-		_, err := s.DB.DeleteTriples(ctx, appID, []triple.Triple{
-			{E: e, A: a.magicCodeHash, V: hash},
-			{E: e, A: a.magicCodeEmail, V: email},
-		})
-		return err
-	}
-	if len(hits) == 0 {
+	var (
+		claimed     [16]byte
+		codeCreated time.Time
+	)
+	err := s.Pool.QueryRow(ctx, `
+		WITH claimed AS (
+		  DELETE FROM triples t
+		   USING triples h
+		   WHERE t.app_id = $1
+		     AND h.app_id = $1
+		     AND h.attr_id = $3 AND h.value = $2::jsonb
+		     AND t.entity_id = h.entity_id
+		     AND EXISTS (
+		       SELECT 1 FROM triples e
+		        WHERE e.app_id = $1 AND e.entity_id = h.entity_id
+		          AND e.attr_id = $4 AND e.value = $5::jsonb)
+		     AND (t.attr_id = $3 OR t.attr_id = $4)
+		  RETURNING t.entity_id, t.attr_id, t.created_at
+		)
+		SELECT entity_id,
+		       max(created_at) FILTER (WHERE attr_id = $3) AS code_created
+		  FROM claimed
+		 GROUP BY entity_id
+		 ORDER BY code_created DESC
+		 LIMIT 1`,
+		appID, mustJSON(hash), a.magicCodeHash, a.magicCodeEmail, mustJSON(email),
+	).Scan(&claimed, &codeCreated)
+	if err == pgx.ErrNoRows {
 		return ErrInvalidCode
 	}
-	h := hits[0]
-	// v1 order: delete first, THEN expired? throws — the burn happens
-	// regardless so an expired code can't be retried.
-	if err := burn(h.e); err != nil {
+	if err != nil {
 		return err
 	}
-	if time.Since(h.created) > ttl {
+	if s.now().Sub(codeCreated) > ttl {
 		return ErrExpiredCode
 	}
 	return nil
