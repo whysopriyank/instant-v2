@@ -325,10 +325,13 @@ func run(logger *slog.Logger) error {
 			},
 		}
 		sseH := &syncpkg.SSEHandler{
-			Manager:  mgr,
-			Store:    store,
-			Refresh:  refreshFor(ex, cats),
-			MaxConns: cfg.MaxSSEConns,
+			Manager:        mgr,
+			Store:          store,
+			Refresh:        refreshFor(ex, cats),
+			MaxConns:       cfg.MaxSSEConns,
+			MaxConnsPerIP:  cfg.MaxSSEConnsPerIP,
+			HeartbeatEvery: 20 * time.Second,
+			Limiter:        limiter,
 		}
 		sseH.AdminAuth = func(ctx context.Context, appID, token string) bool {
 			ok, err := cats.CheckAdminToken(ctx, appID, token)

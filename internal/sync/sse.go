@@ -22,10 +22,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/instant-v2/instant-v2/internal/platform"
+	"github.com/instant-v2/instant-v2/internal/ratelimit"
 	"github.com/instant-v2/instant-v2/internal/reactive"
 )
 
@@ -37,6 +40,9 @@ type sseConn struct {
 	// the same sse_token would otherwise race conn.sess materialization and
 	// Session map mutations (concurrent map writes = process-fatal).
 	msgMu sync.Mutex
+	// initialized flips true after a successful protocol `init` op; every
+	// other op is refused before that (mirrors the WS loop guard).
+	initialized bool
 }
 
 // SSEHandler serves the /runtime/sse pair. Wire Manager/Store/Refresh exactly
@@ -51,9 +57,20 @@ type SSEHandler struct {
 	// MaxConns caps concurrent SSE streams; <= 0 means 10000. Excess GETs
 	// answer 503 before any handshake state is allocated.
 	MaxConns int
+	// MaxConnsPerIP caps streams per client IP; <= 0 means 100. The global
+	// cap alone let one host squat every slot indefinitely (audit H5).
+	MaxConnsPerIP int
+	// HeartbeatEvery is the SSE comment-ping cadence; <= 0 means 20s. Each
+	// write carries a deadline of one heartbeat interval, so a dead reader
+	// frees its slot within ~1 interval instead of forever.
+	HeartbeatEvery time.Duration
+	// Limiter charges per-message chatter on the POST batch path (same ws
+	// class as the WS loop); nil disables charging (tests).
+	Limiter *ratelimit.Limiter
 
 	mu     sync.Mutex
 	conns  map[string]*sseConn // sha256hex(sseToken) → conn
+	perIP  map[string]int      // client IP → live stream count
 	bootID string
 }
 
@@ -62,6 +79,20 @@ func (h *SSEHandler) maxConns() int {
 		return h.MaxConns
 	}
 	return 10000
+}
+
+func (h *SSEHandler) maxConnsPerIP() int {
+	if h.MaxConnsPerIP > 0 {
+		return h.MaxConnsPerIP
+	}
+	return 100
+}
+
+func (h *SSEHandler) heartbeatEvery() time.Duration {
+	if h.HeartbeatEvery > 0 {
+		return h.HeartbeatEvery
+	}
+	return 20 * time.Second
 }
 
 func (h *SSEHandler) conn(tokenHash string) (*sseConn, bool) {
@@ -113,6 +144,21 @@ func (h *SSEHandler) getSSE(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "sse connection limit reached", http.StatusServiceUnavailable)
 		return
 	}
+	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		ip = r.RemoteAddr
+	}
+	// Per-IP cap (audit H5): one host must not be able to squat every slot.
+	h.mu.Lock()
+	if h.perIP == nil {
+		h.perIP = map[string]int{}
+	}
+	if h.perIP[ip] >= h.maxConnsPerIP() {
+		h.mu.Unlock()
+		http.Error(w, "sse connection limit reached for client", http.StatusServiceUnavailable)
+		return
+	}
+	h.perIP[ip]++
 	sseToken := randSSEToken()
 	sessionID := newSSESessID()
 	hash := tokenHashOf(sseToken)
@@ -120,7 +166,6 @@ func (h *SSEHandler) getSSE(w http.ResponseWriter, r *http.Request) {
 		sessionID: sessionID,
 		events:    make(chan Frame, 128),
 	}
-	h.mu.Lock()
 	if h.conns == nil {
 		h.conns = map[string]*sseConn{}
 	}
@@ -129,6 +174,10 @@ func (h *SSEHandler) getSSE(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		h.mu.Lock()
 		delete(h.conns, hash)
+		h.perIP[ip]--
+		if h.perIP[ip] <= 0 {
+			delete(h.perIP, ip)
+		}
 		h.mu.Unlock()
 		if conn.sess != nil {
 			h.Manager.DetachAll(conn.sess)
@@ -136,24 +185,34 @@ func (h *SSEHandler) getSSE(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	rc := http.NewResponseController(w)
+	writeDeadline := func() bool {
+		_ = rc.SetWriteDeadline(time.Now().Add(h.heartbeatEvery()))
+		return true
+	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
+	writeDeadline()
 	w.WriteHeader(http.StatusOK)
 
-	writeEvent := func(f Frame) bool {
-		b, err := f.Encode()
-		if err != nil {
-			return true // skip malformed; keep stream alive
-		}
+	flushEvent := func(b []byte) bool {
 		if _, err := fmt.Fprintf(w, "data: %s\n\n", b); err != nil {
 			return false
 		}
 		fl.Flush()
 		return true
 	}
+	writeEvent := func(f Frame) bool {
+		b, err := f.Encode()
+		if err != nil {
+			return true // skip malformed; keep stream alive
+		}
+		return flushEvent(b)
+	}
 
 	// First event mirrors v1's handle-sse-init!: transport handshake only —
 	// the protocol-level `init` op still arrives via POST messages.
+	writeDeadline()
 	_ = writeEvent(Frame{
 		"op":         json.RawMessage(`"init-ok"`),
 		"machine-id": json.RawMessage(mustJSON(h.machineID())),
@@ -161,19 +220,32 @@ func (h *SSEHandler) getSSE(w http.ResponseWriter, r *http.Request) {
 		"sse-token":  json.RawMessage(mustJSON(sseToken)),
 	})
 
+	// Heartbeat comments (audit H5): dead readers trip the write deadline
+	// within one interval, freeing the slot; live proxies stay warm.
+	hb := time.NewTicker(h.heartbeatEvery())
+	defer hb.Stop()
+
 	ctx := r.Context()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-hb.C:
+			writeDeadline()
+			if _, err := fmt.Fprint(w, ": ping\n\n"); err != nil {
+				return
+			}
+			fl.Flush()
 		case f := <-conn.events:
 			if raw, isRaw := f["__raw"]; isRaw {
+				writeDeadline()
 				if _, err := fmt.Fprintf(w, "data: %s\n\n", raw); err != nil {
 					return
 				}
 				fl.Flush()
 				continue
 			}
+			writeDeadline()
 			if !writeEvent(f) {
 				return
 			}
@@ -202,8 +274,9 @@ func (h *SSEHandler) postSSE(w http.ResponseWriter, r *http.Request) {
 	conn.msgMu.Lock()
 	defer conn.msgMu.Unlock()
 	if conn.sess == nil {
-		// Lazily materialize a Session bound to this stream; the protocol
-		// `init` op below completes auth/app resolution.
+		// Lazily materialize a Session bound to this stream; it carries the
+		// Send closures until the protocol `init` op replaces it wholesale
+		// and marks the stream initialized. Ops before init are refused.
 		conn.sess = &Session{
 			ID:       conn.sessionID,
 			AppID:    req.AppID,
@@ -235,6 +308,12 @@ func (h *SSEHandler) postSSE(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		op, _ := f.GetOp()
+		// Protocol guard (audit M5): mirror the WS loop — every op except
+		// init is refused until the session is initialized.
+		if op != "init" && !conn.initialized {
+			pushReply(conn.events, ErrFrame(401, "not-initialized", "send init first"))
+			continue
+		}
 		if op == "init" {
 			sess, reply, ierr := h.Manager.HandleInit(r.Context(), f)
 			if ierr != nil {
@@ -243,8 +322,18 @@ func (h *SSEHandler) postSSE(w http.ResponseWriter, r *http.Request) {
 			}
 			sess.Send = conn.sess.Send
 			conn.sess = sess
+			conn.initialized = true
 			pushReply(conn.events, reply)
 			continue
+		}
+		// Per-message chatter budget (audit H5): the WS loop charges the
+		// ws class for non-transact ops; the batch POST path must not be a
+		// limiter bypass. Transacts stay self-limited in handleTransact.
+		if h.Limiter != nil && op != "transact" {
+			if aerr := h.Limiter.Acquire(r.Context(), conn.sess.AppID, ratelimit.ClassWS); aerr != nil {
+				pushReply(conn.events, ErrFrame(429, "rate-limited", "rate limited"))
+				break
+			}
 		}
 		replies, herr := h.Manager.Handle(r.Context(), conn.sess, f)
 		for _, rf := range replies {
