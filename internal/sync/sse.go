@@ -44,10 +44,20 @@ type SSEHandler struct {
 	// AdminAuth gates POST /admin/subscribe-query; cmd injects
 	// CatalogCache.CheckAdminToken. nil disables the endpoint.
 	AdminAuth func(ctx context.Context, appID, token string) bool
+	// MaxConns caps concurrent SSE streams; <= 0 means 10000. Excess GETs
+	// answer 503 before any handshake state is allocated.
+	MaxConns int
 
 	mu     sync.Mutex
 	conns  map[string]*sseConn // sha256hex(sseToken) → conn
 	bootID string
+}
+
+func (h *SSEHandler) maxConns() int {
+	if h.MaxConns > 0 {
+		return h.MaxConns
+	}
+	return 10000
 }
 
 func (h *SSEHandler) conn(tokenHash string) (*sseConn, bool) {
@@ -93,6 +103,10 @@ func (h *SSEHandler) getSSE(w http.ResponseWriter, r *http.Request) {
 	fl, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", 500)
+		return
+	}
+	if h.ConnCount() >= h.maxConns() {
+		http.Error(w, "sse connection limit reached", http.StatusServiceUnavailable)
 		return
 	}
 	sseToken := randSSEToken()
@@ -252,7 +266,7 @@ func (h *SSEHandler) snapshot(ctx context.Context, sess *Session, f Frame) {
 	if sess.TreeResults {
 		class = wireTree
 	}
-	key := groupKey(sess.AppID, class, rawQ)
+	key := groupKey(sess.AppID, class, rawQ, sess.Admin)
 	sub, ok := h.Store.Get(key)
 	if !ok {
 		return

@@ -4,14 +4,17 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
+	"github.com/instant-v2/instant-v2/internal/perms"
 	"github.com/instant-v2/instant-v2/internal/triple"
 
 	"github.com/instant-v2/instant-v2/internal/instaql"
@@ -262,3 +265,70 @@ func TestCoerceRejectsUnknowns(t *testing.T) {
 }
 
 func strptr(s string) *string { return &s }
+
+// TestViewGateRules pins the read-side permission gate: closed view rules
+// render empty results, dynamic rules are refused for non-admin callers
+// (fail-closed until rule-where pushdown exists), admins bypass, and a nil
+// doc keeps v1 default-open behavior.
+func TestViewGateRules(t *testing.T) {
+	db := qdb(t)
+	ctx := context.Background()
+	appID, cat, ids := qseed(t, db)
+	st := storage.New(db.Pool)
+
+	e := rand16()
+	if _, err := st.InsertTriples(ctx, appID, cat, []triple.Triple{
+		{E: e, A: ids.title, V: "visible-ish"},
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	run := func(doc *perms.RuleDoc, admin bool) (map[string]json.RawMessage, error) {
+		q, err := instaql.Coerce(map[string]any{"posts": map[string]any{}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ex := &instaql.Executor{DB: db.Pool, Rules: doc, Admin: admin}
+		res, rerr := ex.Run(ctx, q, cat, appID)
+		if rerr != nil {
+			return nil, rerr
+		}
+		return res.Data, nil
+	}
+
+	closed, _ := perms.ParseRuleDoc([]byte(`{"posts":{"allow":{"view":"false"}}}`))
+	data, err := run(closed, false)
+	if err != nil {
+		t.Fatalf("closed view should not error: %v", err)
+	}
+	if string(data["posts"]) != "[]" {
+		t.Fatalf("closed view must return [], got: %s", data["posts"])
+	}
+
+	open, _ := perms.ParseRuleDoc([]byte(`{"posts":{"allow":{"view":"true"}}}`))
+	data, err = run(open, false)
+	if err != nil {
+		t.Fatalf("open view errored: %v", err)
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(data["posts"], &rows); err != nil || len(rows) != 1 {
+		t.Fatalf("open view lost data: %s (%v)", data["posts"], err)
+	}
+
+	dyn, _ := perms.ParseRuleDoc([]byte(`{"posts":{"allow":{"view":"auth.id == data.ownerId"}}}`))
+	_, err = run(dyn, false)
+	var unsupported *instaql.ErrRuleFilterUnsupported
+	if !errors.As(err, &unsupported) || unsupported.Etype != "posts" {
+		t.Fatalf("expected ErrRuleFilterUnsupported for dynamic rule, got: %v", err)
+	}
+	if _, err = run(dyn, true); err != nil {
+		t.Fatalf("admin bypass failed: %v", err)
+	}
+
+	data, err = run(nil, false)
+	if err != nil {
+		t.Fatalf("nil rules must stay open: %v", err)
+	}
+	if !strings.Contains(string(data["posts"]), "visible-ish") {
+		t.Fatalf("nil-rule query lost data: %s", data["posts"])
+	}
+}

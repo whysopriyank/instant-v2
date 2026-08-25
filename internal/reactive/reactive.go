@@ -36,6 +36,12 @@ type Frame struct {
 
 // Subscription is one registered live query.
 type Subscription struct {
+	// AttachCtx carries transport-scoped metadata alongside the subscription.
+	// The sync layer stores its permission-gate snapshot here (rule doc +
+	// caller class) so refresh executors can reproduce exactly the visibility
+	// the group was admitted under. Opaque to this package.
+	AttachCtx any
+
 	ID     string
 	AppID  string
 	Query  json.RawMessage

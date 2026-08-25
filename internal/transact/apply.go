@@ -102,7 +102,13 @@ func Transact(
 					continue
 				}
 				if !opts.Admin && ruleDoc != nil {
-					if expr := ruleDoc.ResolveExpr("attrs", "create"); expr == "false" {
+					allow, err := perms.Check("attrs", "create", ruleDoc, perms.Bindings{
+						Auth: opts.AuthUser, RuleParams: opts.RuleParams, Request: opts.Request,
+					})
+					if err != nil {
+						return fmt.Errorf("transact: attrs.create: %w", err)
+					}
+					if !allow {
 						return fmt.Errorf("transact: attrs.create denied")
 					}
 				}
@@ -122,6 +128,16 @@ func Transact(
 		}
 		if err := resolveValues(ctx, tx, appID, steps, txCat); err != nil {
 			return err
+		}
+
+		// Permission gate: every mutating step is checked against the app's
+		// RuleDoc with real data/newData/auth bindings BEFORE execution.
+		// Fail-closed — compile or eval errors deny the whole batch. Admin
+		// callers bypass (v1 :admin? true semantics).
+		if ruleDoc != nil && !opts.Admin {
+			if err := enforcePerms(ctx, tx, appID, txCat, steps, opts, ruleDoc); err != nil {
+				return err
+			}
 		}
 
 		// Capture rule-params scoped by entity.
@@ -152,33 +168,12 @@ func Transact(
 				}
 
 			case "add-triple":
-				// Optional per-step permission checks when a doc is supplied.
-				if ruleDoc != nil && !opts.Admin {
-					for _, st := range batch {
-						ta, err := parseTripleArgs(st, txCat)
-						if err != nil {
-							return err
-						}
-						etype := etypeFor(txCat, ta.AttrID)
-						allow, err := perms.Check(etype, "create", ruleDoc, perms.Bindings{
-							Data: map[string]any{},
-							Auth: opts.AuthUser,
-						})
-						if err != nil {
-							return fmt.Errorf("perms create: %w", err)
-						}
-						if !allow {
-							return fmt.Errorf("transact: permission denied (create %s)", etype)
-						}
-						_ = ta
-					}
-				}
 				if err := applyAddTriples(ctx, tx, db, appID, txCat, batch, opts.OverwriteT); err != nil {
 					return err
 				}
 
 			case "retract-triple":
-				if err := applyRetract(ctx, db, appID, txCat, batch); err != nil {
+				if err := applyRetract(ctx, tx, db, appID, txCat, batch); err != nil {
 					return err
 				}
 
@@ -229,16 +224,30 @@ func applyAddTriples(ctx context.Context, tx pgx.Tx, db *storage.DB, appID [16]b
 	return applyInsertInto(ctx, tx, appID, cat, ts, overwriteT)
 }
 
-func applyRetract(ctx context.Context, db *storage.DB, appID [16]byte, cat *platform.AttrCatalog, batch []Step) error {
+// applyRetract resolves retract steps into exact (e,a,value) triples and
+// deletes them INSIDE the caller's transaction: a failed batch must leave
+// previously-retracted values in place, and committed retracts must always
+// have their journal row (storage.DeleteTx keeps the single-tx invariant).
+func applyRetract(ctx context.Context, tx pgx.Tx, db *storage.DB, appID [16]byte, cat *platform.AttrCatalog, batch []Step) error {
 	ts := make([]triple.Triple, 0, len(batch))
 	for _, st := range batch {
-		ta, _ := parseTripleArgs(st, cat)
+		ta, err := parseTripleArgs(st, cat)
+		if err != nil {
+			// A malformed retract must abort the transaction, not silently
+			// no-op into a zero-value delete target.
+			return fmt.Errorf("retract-triple: %w", err)
+		}
 		var eid [16]byte
-		_ = parseUUID(strings.Trim(string(ta.EID), `"`), &eid)
-		v, _ := parseValueJSON(ta.Value)
+		if err := parseUUID(strings.Trim(string(ta.EID), `"`), &eid); err != nil {
+			return fmt.Errorf("retract-triple: eid %s: %w", ta.EID, err)
+		}
+		v, err := parseValueJSON(ta.Value)
+		if err != nil {
+			return fmt.Errorf("retract-triple: value: %w", err)
+		}
 		ts = append(ts, triple.Triple{E: eid, A: ta.AttrID, V: v})
 	}
-	_, err := db.DeleteTriples(ctx, appID, ts)
+	_, err := db.DeleteTx(ctx, tx, appID, ts)
 	return err
 }
 
@@ -306,17 +315,21 @@ func applyDeleteEntity(ctx context.Context, tx pgx.Tx, db *storage.DB, appID [16
 	if len(ids) == 0 {
 		return nil
 	}
-	_, err := tx.Exec(ctx, `DELETE FROM triples WHERE app_id=$1 AND entity_id = ANY($2::uuid[])`, appID, ids)
-	_ = err
-	// Also delete reverse references (where value equals one of these entity ids).
-	// Serialize each eid as jsonb '["<uuid>"]'? No — v1 stores refs as jsonb strings,
-	// so value = '"<uuid>"'::jsonb. Compare via triples_extract-like comparison:
-	// v is stored as jsonb string, so `value = to_jsonb($eidText)` works.
+	if _, err := tx.Exec(ctx, `DELETE FROM triples WHERE app_id=$1 AND entity_id = ANY($2::uuid[])`, appID, ids); err != nil {
+		return fmt.Errorf("delete-entity: %w", err)
+	}
+	// Reverse references (value = one of these entity ids). Refs are stored as
+	// jsonb strings ('"<uuid>"'), so match via to_jsonb over a text array in
+	// ONE parameterized statement. A failure here must abort the transaction:
+	// silently keeping dangling forward refs corrupts link semantics.
+	texts := make([]string, 0, len(ids))
 	for _, id := range ids {
-		textStr := uuidToStr(id)
-		if _, err := tx.Exec(ctx, `DELETE FROM triples WHERE app_id=$1 AND vae AND value = to_jsonb($2::text)`, appID, textStr); err != nil {
-			return err
-		}
+		texts = append(texts, uuidToStr(id))
+	}
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM triples WHERE app_id=$1 AND vae AND value = ANY(SELECT to_jsonb(t) FROM unnest($2::text[]) AS t)`,
+		appID, texts); err != nil {
+		return fmt.Errorf("delete-entity reverse refs: %w", err)
 	}
 	return nil
 }
@@ -468,6 +481,162 @@ func etypeFor(cat *platform.AttrCatalog, attrID [16]byte) string {
 		}
 	}
 	return "$default"
+}
+
+// entityProjection projects one entity's committed triples into a
+// label→value map (the `data` binding v1 rules see). Cardinality-many attrs
+// accumulate as arrays; unknown attrs are skipped.
+func entityProjection(ctx context.Context, tx pgx.Tx, appID [16]byte, eid [16]byte, cat *platform.AttrCatalog) map[string]any {
+	out := map[string]any{}
+	rows, err := storage.FetchTx(ctx, tx, appID, storage.FetchFilter{
+		EntityIDs: [][16]byte{eid},
+	})
+	if err != nil {
+		return out // projection is best-effort: eval proceeds with what loaded
+	}
+	for _, r := range rows {
+		a, ok := cat.ByID(r.Triple.A)
+		if !ok || a.Label == nil {
+			continue
+		}
+		label := *a.Label
+		if a.Cardinality == "many" {
+			arr, _ := out[label].([]any)
+			out[label] = append(arr, r.Triple.V)
+		} else {
+			out[label] = r.Triple.V
+		}
+	}
+	return out
+}
+
+func permBindings(opts Options, data, newData map[string]any) perms.Bindings {
+	return perms.Bindings{
+		Data:       data,
+		NewData:    newData,
+		Auth:       opts.AuthUser,
+		RuleParams: opts.RuleParams,
+		Request:    opts.Request,
+	}
+}
+
+// enforcePerms checks every mutating step in the batch against doc. Runs
+// inside the write transaction after lookup resolution so existence probes
+// and data projections see same-batch state. Any check error or denial
+// aborts the whole transaction (fail-closed).
+func enforcePerms(ctx context.Context, tx pgx.Tx, appID [16]byte,
+	cat *platform.AttrCatalog, steps []Step, opts Options, doc *perms.RuleDoc,
+) error {
+	for _, op := range orderSteps(steps) {
+		switch op {
+		case "add-triple", "deep-merge-triple":
+			for _, st := range filterSteps(steps, op) {
+				ta, err := parseTripleArgs(st, cat)
+				if err != nil {
+					return err
+				}
+				var eid [16]byte
+				if err := parseUUID(strings.Trim(string(ta.EID), `"`), &eid); err != nil {
+					return fmt.Errorf("perms: eid %s: %w", ta.EID, err)
+				}
+				action := "create"
+				existing, err := storage.FetchTx(ctx, tx, appID, storage.FetchFilter{
+					EntityIDs: [][16]byte{eid}, AttrIDs: [][16]byte{ta.AttrID},
+				})
+				if err != nil {
+					return err
+				}
+				if len(existing) > 0 {
+					action = "update"
+				}
+				etype := etypeFor(cat, ta.AttrID)
+				data := entityProjection(ctx, tx, appID, eid, cat)
+				newData := cloneMap(data)
+				incoming, err := parseValueJSON(ta.Value)
+				if err != nil {
+					return err
+				}
+				if label := attrLabel(cat, ta.AttrID); label != "" {
+					newData[label] = incoming
+				}
+				allow, err := perms.Check(etype, action, doc, permBindings(opts, data, newData))
+				if err != nil {
+					return fmt.Errorf("perms %s %s: %w", etype, action, err)
+				}
+				if !allow {
+					return fmt.Errorf("transact: permission denied (%s %s)", action, etype)
+				}
+			}
+
+		case "retract-triple":
+			for _, st := range filterSteps(steps, op) {
+				ta, err := parseTripleArgs(st, cat)
+				if err != nil {
+					return err
+				}
+				var eid [16]byte
+				if err := parseUUID(strings.Trim(string(ta.EID), `"`), &eid); err != nil {
+					return fmt.Errorf("perms: eid %s: %w", ta.EID, err)
+				}
+				etype := etypeFor(cat, ta.AttrID)
+				data := entityProjection(ctx, tx, appID, eid, cat)
+				newData := cloneMap(data)
+				if label := attrLabel(cat, ta.AttrID); label != "" {
+					delete(newData, label) // post-retract state approximation
+				}
+				allow, err := perms.Check(etype, "delete", doc, permBindings(opts, data, newData))
+				if err != nil {
+					return fmt.Errorf("perms %s delete: %w", etype, err)
+				}
+				if !allow {
+					return fmt.Errorf("transact: permission denied (delete %s)", etype)
+				}
+			}
+
+		case "delete-entity":
+			for _, st := range filterSteps(steps, op) {
+				var eidStr string
+				if err := json.Unmarshal(st.Args[0], &eidStr); err != nil {
+					continue // non-uuid eids never reached applyDeleteEntity either
+				}
+				var eid [16]byte
+				if err := parseUUID(eidStr, &eid); err != nil {
+					continue
+				}
+				data := entityProjection(ctx, tx, appID, eid, cat)
+				etype := "$default"
+				if len(st.Args) == 2 {
+					var e string
+					if json.Unmarshal(st.Args[1], &e) == nil && e != "" {
+						etype = e
+					}
+				}
+				allow, err := perms.Check(etype, "delete", doc, permBindings(opts, data, map[string]any{}))
+				if err != nil {
+					return fmt.Errorf("perms %s delete: %w", etype, err)
+				}
+				if !allow {
+					return fmt.Errorf("transact: permission denied (delete %s)", etype)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func cloneMap(m map[string]any) map[string]any {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+func attrLabel(cat *platform.AttrCatalog, id [16]byte) string {
+	if a, ok := cat.ByID(id); ok && a.Label != nil {
+		return *a.Label
+	}
+	return ""
 }
 
 // TouchedTriple describes one resolved triple-level write for change-routed

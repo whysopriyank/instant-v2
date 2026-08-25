@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/coder/websocket"
 
@@ -26,8 +27,19 @@ type WSHandler struct {
 	// historical byte-exact behavior; takeover mode persists the LZ77 window
 	// across frames, which is where large refresh envelopes win.
 	Compression string
+	// MaxConns caps live websocket connections; <= 0 means 20000. Excess
+	// connections are refused with 1013 (Try Again Later) before any
+	// session work happens.
+	MaxConns int
 
 	live connRegistry // live conns for graceful drain
+}
+
+func (h *WSHandler) maxConns() int {
+	if h.MaxConns > 0 {
+		return h.MaxConns
+	}
+	return 20000
 }
 
 func compressionMode(cfg string) websocket.CompressionMode {
@@ -45,6 +57,13 @@ func compressionMode(cfg string) websocket.CompressionMode {
 func (h *WSHandler) ConnCount() int { return h.live.len() }
 
 func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if h.live.len() >= h.maxConns() {
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{OriginPatterns: []string{"*"}})
+		if err == nil {
+			_ = conn.Close(websocket.StatusTryAgainLater, "connection limit reached")
+		}
+		return
+	}
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		OriginPatterns:  []string{"*"},
 		CompressionMode: compressionMode(h.Compression),
@@ -116,6 +135,16 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			sendErr(401, "not-initialized", "send init first")
 			continue
 		}
+		// Per-app frame budget (session chatter): shed before dispatch.
+		if h.Manager.Deps.Limiter != nil {
+			class := "ws"
+			if op == "transact" {
+				class = "transact" // enforced inside handleTransact with its own hint
+			} else if ok2, retry := h.Manager.Deps.Limiter.Allow(sess.AppID, class); !ok2 {
+				sendErr(429, "rate-limited", fmt.Sprintf("rate limited; retry after %s", retry.Round(time.Millisecond)))
+				continue
+			}
+		}
 
 		replies, err := h.Manager.Handle(ctx, sess, f)
 		closing := errors.Is(err, ErrCloseSession)
@@ -133,7 +162,7 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				if sess.TreeResults {
 					class = wireTree
 				}
-				key := groupKey(sess.AppID, class, rawQ)
+				key := groupKey(sess.AppID, class, rawQ, sess.Admin)
 				sub, ok := h.Store.Get(key)
 				if !ok || h.Refresh == nil {
 					sendErr(500, "internal", "subscription missing after add-query")

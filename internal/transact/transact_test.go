@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -197,6 +198,183 @@ func TestPermissionAllowsWhenTrue(t *testing.T) {
 	steps := parseSteps(t, mustJSON(t, []any{"add-triple", uuidStr(rand16()), uuidToStr(ids.name), "ok"}))
 	if _, err := transact.Transact(ctx, db, cat, appID, steps, transact.Options{}, doc); err != nil {
 		t.Fatalf("should be allowed: %v", err)
+	}
+}
+
+// TestPermsEnforcedOnUpdateDeleteDeleteEntity pins the write-path gate: with
+// deny-all rules for the todos etype, deep-merge (update), retract (delete),
+// and delete-entity must all be refused — not just add-triple/create.
+func TestPermsEnforcedOnUpdateDeleteDeleteEntity(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	appID, cat, ids := seed(t, db)
+	denyDoc, _ := perms.ParseRuleDoc([]byte(`{"todos":{"allow":{"create":"false","update":"false","delete":"false"}}}`))
+
+	e := rand16()
+	seedSteps := parseSteps(t,
+		mustJSON(t, []any{"add-triple", uuidStr(e), uuidToStr(ids.name), "keep"}),
+		mustJSON(t, []any{"add-triple", uuidStr(e), uuidToStr(ids.link), uuidStr(rand16())}),
+	)
+	if _, err := transact.Transact(ctx, db, cat, appID, seedSteps, transact.Options{Admin: true}, nil); err != nil {
+		t.Fatalf("admin seed: %v", err)
+	}
+
+	cases := []struct {
+		name  string
+		steps []transact.Step
+	}{
+		{"deep-merge denied", parseSteps(t, mustJSON(t, []any{"deep-merge-triple", uuidStr(e), uuidToStr(ids.name), `{"a":1}`}))},
+		{"retract denied", parseSteps(t, mustJSON(t, []any{"retract-triple", uuidStr(e), uuidToStr(ids.name), "keep"}))},
+		{"delete-entity denied", parseSteps(t, mustJSON(t, []any{"delete-entity", uuidStr(e), "todos"}))},
+	}
+	for _, tc := range cases {
+		_, err := transact.Transact(ctx, db, cat, appID, tc.steps, transact.Options{}, denyDoc)
+		if err == nil || !strings.Contains(err.Error(), "permission denied") {
+			t.Fatalf("%s: expected permission denied, got: %v", tc.name, err)
+		}
+	}
+	// Nothing was written or removed by the denied batches.
+	rows, _ := db.FetchTriples(ctx, appID, storage.FetchFilter{EntityIDs: [][16]byte{e}})
+	if len(rows) != 2 {
+		t.Fatalf("denied batch mutated state: %+v", rows)
+	}
+}
+
+// TestPermsAuthScopedUpdate pins identity-aware rules: only the owner may
+// update. An anonymous caller is denied; the owning auth binding is allowed.
+func TestPermsAuthScopedUpdate(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	appID, cat, ids := seed(t, db)
+	ownerID := uuidStr(rand16())
+
+	var ownerAttr platform.Attr
+	if err := db.WithTx(ctx, func(tx pgx.Tx) error {
+		var e error
+		ownerAttr, e = platform.GetOrCreateAttr(ctx, tx, appID, "todos", "ownerId", "blob", "one", false, true)
+		return e
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cat, _ = reloadCatalog(t, db, appID)
+
+	doc, _ := perms.ParseRuleDoc([]byte(`{"todos":{"allow":{"update":"auth.id == data.ownerId"}}}`))
+	e := rand16()
+
+	if _, err := transact.Transact(ctx, db, cat, appID, parseSteps(t,
+		mustJSON(t, []any{"add-triple", uuidStr(e), uuidToStr(ids.name), "mine"}),
+		mustJSON(t, []any{"add-triple", uuidStr(e), uuidToStr(ownerAttr.ID), ownerID}),
+	), transact.Options{Admin: true}, nil); err != nil {
+		t.Fatalf("seed owner attr: %v", err)
+	}
+
+	// Anonymous update → denied.
+	_, err := transact.Transact(ctx, db, cat, appID,
+		parseSteps(t, mustJSON(t, []any{"add-triple", uuidStr(e), uuidToStr(ids.name), "hacked"})),
+		transact.Options{}, doc)
+	if err == nil || !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("anonymous update should be denied, got: %v", err)
+	}
+
+	// Owner update → allowed.
+	if _, err := transact.Transact(ctx, db, cat, appID,
+		parseSteps(t, mustJSON(t, []any{"add-triple", uuidStr(e), uuidToStr(ids.name), "mine v2"})),
+		transact.Options{AuthUser: map[string]any{"id": ownerID}}, doc); err != nil {
+		t.Fatalf("owner update should be allowed: %v", err)
+	}
+}
+
+func reloadCatalog(t *testing.T, db *storage.DB, appID [16]byte) (*platform.AttrCatalog, error) {
+	t.Helper()
+	return platform.LoadAttrCatalog(context.Background(), db.Pool, appID)
+}
+
+// TestRetractAtomicWithFailedStep pins that retract deletions participate in
+// Transact's single transaction: a batch of [retract-triple ok, add-triple
+// unknown-attr ⇒ fail] must roll back BOTH steps. Before the fix, retracts
+// autocommitted on the pool, so the retracted value vanished even though the
+// transaction failed and no journal row survived.
+func TestRetractAtomicWithFailedStep(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	appID, cat, ids := seed(t, db)
+	e := rand16()
+	seedSteps := parseSteps(t, mustJSON(t, []any{"add-triple", uuidStr(e), uuidToStr(ids.name), "keep-me"}))
+	if _, err := transact.Transact(ctx, db, cat, appID, seedSteps, transact.Options{}, nil); err != nil {
+		t.Fatalf("seed triple: %v", err)
+	}
+	var txCountBefore int64
+	if err := db.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM transactions WHERE app_id=$1`, appID).Scan(&txCountBefore); err != nil {
+		t.Fatal(err)
+	}
+
+	steps := parseSteps(t,
+		mustJSON(t, []any{"retract-triple", uuidStr(e), uuidToStr(ids.name), "keep-me"}),
+		mustJSON(t, []any{"add-triple", uuidStr(e), "no_such_attr_label", "boom"}),
+	)
+	res, err := transact.Transact(ctx, db, cat, appID, steps, transact.Options{}, nil)
+	if err == nil {
+		t.Fatalf("expected the unknown-attr step to fail the transaction (res=%+v)", res)
+	}
+
+	rows, fetchErr := db.FetchTriples(ctx, appID, storage.FetchFilter{EntityIDs: [][16]byte{e}})
+	if fetchErr != nil {
+		t.Fatalf("fetch after rollback: %v", fetchErr)
+	}
+	if len(rows) != 1 || rows[0].Triple.V != "keep-me" {
+		t.Fatalf("retract was not rolled back with its transaction: rows=%+v", rows)
+	}
+
+	var txCountAfter int64
+	if err := db.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM transactions WHERE app_id=$1`, appID).Scan(&txCountAfter); err != nil {
+		t.Fatal(err)
+	}
+	if txCountAfter != txCountBefore {
+		t.Fatalf("failed transaction left journal rows: before=%d after=%d", txCountBefore, txCountAfter)
+	}
+}
+
+// TestRetractBatchAtomicWithFailedStep combines both contract halves: a
+// MULTI-tuple retract batch (different entities, same value shape that
+// triggers the old cross-product) inside a transaction that later fails.
+// Every retracted value must survive the rollback.
+func TestRetractBatchAtomicWithFailedStep(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	appID, cat, ids := seed(t, db)
+	e1, e2 := rand16(), rand16()
+	for _, e := range []([16]byte){e1, e2} {
+		seedSteps := parseSteps(t, mustJSON(t, []any{"add-triple", uuidStr(e), uuidToStr(ids.name), "shared-value"}))
+		if _, err := transact.Transact(ctx, db, cat, appID, seedSteps, transact.Options{}, nil); err != nil {
+			t.Fatalf("seed %s: %v", uuidStr(e), err)
+		}
+	}
+
+	steps := parseSteps(t,
+		mustJSON(t, []any{"retract-triple", uuidStr(e1), uuidToStr(ids.name), "shared-value"}),
+		mustJSON(t, []any{"retract-triple", uuidStr(e2), uuidToStr(ids.name), "other-value"}),
+		mustJSON(t, []any{"retract-triple", uuidStr(e2), uuidToStr(ids.name), "shared-value"}),
+		mustJSON(t, []any{"add-triple", uuidStr(e1), "no_such_attr_label", "boom"}),
+	)
+	if _, err := transact.Transact(ctx, db, cat, appID, steps, transact.Options{}, nil); err == nil {
+		t.Fatal("expected the unknown-attr step to fail the transaction")
+	}
+
+	rows, err := db.FetchTriples(ctx, appID, storage.FetchFilter{EntityIDs: [][16]byte{e1, e2}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("both retracts must roll back with the failed tx: rows=%+v", rows)
+	}
+	got := map[string]bool{}
+	for _, r := range rows {
+		got[fmt.Sprintf("%x|%v", r.Triple.E, r.Triple.V)] = true
+	}
+	if !got[fmt.Sprintf("%x|%v", e1, "shared-value")] || !got[fmt.Sprintf("%x|%v", e2, "shared-value")] {
+		t.Fatalf("exact survivors missing: %+v", rows)
 	}
 }
 

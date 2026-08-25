@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/instant-v2/instant-v2/internal/perms"
 	"github.com/instant-v2/instant-v2/internal/platform"
 )
 
@@ -216,6 +217,13 @@ func parseWireAttr(raw json.RawMessage) (platform.Attr, error) {
 	label := wa.ForwardIdentity[2]
 	if etype == "" || label == "" {
 		return platform.Attr{}, fmt.Errorf("forward-identity etype/label must be non-empty")
+	}
+	if perms.ReservedNamespaces[etype] {
+		// System namespaces ($users, $files, $default, …) are provisioned by
+		// the server. Client-minted attrs there would let any session inject
+		// data into auth/user projections.
+		return platform.Attr{}, fmt.Errorf(
+			"transact: add-attr: %q is a reserved namespace", etype)
 	}
 	var fwdIdent [16]byte
 	if parseUUID(wa.ForwardIdentity[0], &fwdIdent) != nil {

@@ -9,6 +9,31 @@ import (
 	"github.com/instant-v2/instant-v2/internal/transact"
 )
 
+// TestAddAttrRejectsReservedNamespaces pins the tenant guard on client
+// schema minting: system namespaces are server-provisioned, and a runtime
+// session must not be able to create attrs inside them (e.g. $users fields
+// that would surface in auth/user projections).
+func TestAddAttrRejectsReservedNamespaces(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	appID, cat, _ := seed(t, db)
+
+	for _, etype := range []string{"$users", "$files", "$default", "$streams", "$rateLimits"} {
+		attrID := rand16()
+		steps := parseSteps(t,
+			mustJSON(t, []any{"add-attr", map[string]any{
+				"id":               uuidStr(attrID),
+				"forward-identity": []string{uuidStr(attrID), etype, "sneaky"},
+				"value-type":       "blob",
+				"cardinality":      "one",
+			}}),
+		)
+		if _, err := transact.Transact(ctx, db, cat, appID, steps, transact.Options{}, nil); err == nil {
+			t.Fatalf("%s: reserved namespace add-attr must be rejected", etype)
+		}
+	}
+}
+
 // The frozen protocol lets clients mint attr ids (instaml add-attr) and
 // reference them in the SAME batch. Regression: add-attr was a stub, so every
 // real SDK write died with "unknown attr <id>".

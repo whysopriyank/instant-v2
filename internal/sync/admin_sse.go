@@ -99,6 +99,7 @@ func (h *SSEHandler) AdminSubscribe(w http.ResponseWriter, r *http.Request) {
 		ID:          sessionID,
 		AppID:       appID,
 		Features:    Features{}, // admin subscribe never negotiates client gates
+		Admin:       true,       // authenticated above via AdminAuth
 		TreeResults: true,
 		Subs:        map[string]bool{},
 		Rooms:       map[string]bool{},
@@ -171,7 +172,7 @@ func (h *SSEHandler) AdminSubscribe(w http.ResponseWriter, r *http.Request) {
 	if sess.TreeResults {
 		class = wireTree
 	}
-	key := groupKey(sess.AppID, class, qraw)
+	key := groupKey(sess.AppID, class, qraw, sess.Admin)
 	sub, _ := h.Store.Get(key)
 	result, meta := json.RawMessage("null"), json.RawMessage("{}")
 	if sub != (*reactive.Subscription)(nil) && h.Refresh != nil {

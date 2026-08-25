@@ -10,15 +10,35 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/instant-v2/instant-v2/internal/datalog"
+	"github.com/instant-v2/instant-v2/internal/perms"
 	"github.com/instant-v2/instant-v2/internal/platform"
 )
 
 // Executor runs coerced queries against Postgres.
+//
+// Rules/Auth/Admin gate reads: ViewOpen etypes are served normally,
+// ViewClosed etypes return empty results, and ViewDynamic etypes are refused
+// for non-admin callers with ErrRuleFilterUnsupported — a dynamic rule cannot
+// be honored without CEL→SQL rule-where pushdown, and evaluating it without
+// data bindings could over-allow data-dependent rules. Admin callers bypass
+// (v1 permissioned-query :admin? semantics).
 type Executor struct {
 	DB interface {
 		Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 		QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 	}
+	Rules *perms.RuleDoc // nil → default-open
+	Auth  map[string]any // caller identity (reserved for pushdown)
+	Admin bool           // admin callers bypass the view gate
+}
+
+// ErrRuleFilterUnsupported is returned when a query touches an etype whose
+// view rule is dynamic and the caller is not an admin.
+type ErrRuleFilterUnsupported struct{ Etype string }
+
+func (e *ErrRuleFilterUnsupported) Error() string {
+	return "instaql: view rule for " + e.Etype +
+		" requires server-side filtering (rule-where pushdown); not supported on this endpoint yet"
 }
 
 // Result is the wire envelope.
@@ -73,6 +93,19 @@ func uuidToStr(u [16]byte) string {
 }
 
 func (x *Executor) runForm(ctx context.Context, f *Form, cat *platform.AttrCatalog, appID string, parentRef *refLink, res *Result) error {
+	// View gate (every level — nested etypes carry their own rules). Denied
+	// etypes surface as empty results; dynamic rules refuse non-admin
+	// execution entirely rather than risk over-allowing.
+	switch perms.ViewGate(x.Rules, f.Etype) {
+	case perms.ViewClosed:
+		res.Data[f.Etype] = json.RawMessage(`[]`)
+		return nil
+	case perms.ViewDynamic:
+		if !x.Admin {
+			return &ErrRuleFilterUnsupported{Etype: f.Etype}
+		}
+	}
+
 	etypeAttrs := attrsOfEtype(cat, f.Etype)
 	attrIDs := make([]string, 0, len(etypeAttrs))
 	for id := range etypeAttrs {

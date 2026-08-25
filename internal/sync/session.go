@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/instant-v2/instant-v2/internal/instaql"
 	"github.com/instant-v2/instant-v2/internal/metrics"
 	"github.com/instant-v2/instant-v2/internal/perms"
 	"github.com/instant-v2/instant-v2/internal/platform"
@@ -89,6 +90,15 @@ type Deps struct {
 	Rooms    *RoomHub
 	OnCommit func(ctx context.Context, appID string, attrIDs []string, txID int64)
 	Logger   *slog.Logger
+	// Rules resolves the app's permission RuleDoc for transact checks and
+	// subscription view gates. nil → default-open (no rules configured).
+	Rules func(ctx context.Context, appID string) (*perms.RuleDoc, error)
+	// Limiter is the optional per-app traffic gate wired from cmd (the
+	// ratelimit package's token buckets). class is "transact" | "ws".
+	// Denials surface as 429-shaped protocol frames with Retry-After.
+	Limiter interface {
+		Allow(appID string, class string) (bool, time.Duration)
+	}
 	// TransactGate consults overload state (notifier queue depth,
 	// docs/09-tier2-architecture.md §T2.1) before executing a transact
 	// op. nil means always allow. A *reactive.ShedError denial becomes
@@ -146,6 +156,68 @@ func (m *Manager) logger() *slog.Logger {
 		return m.log
 	}
 	return slog.Default()
+}
+
+// QueryGate is the permission snapshot stored on every subscription at
+// attach time (Subscription.AttachCtx). Refresh executors rebuild the same
+// visibility the group was admitted under: Rules drives instaql's view gate
+// (closed etypes render empty; dynamic ones were rejected pre-attach for
+// non-admin callers), Admin bypasses.
+type QueryGate struct {
+	Rules *perms.RuleDoc
+	Admin bool
+}
+
+// collectEtypes walks a raw InstaQL body and returns every etype name at any
+// nesting level (the "$" options key excluded).
+func collectEtypes(rawQ json.RawMessage) []string {
+	var q map[string]any
+	if err := json.Unmarshal(rawQ, &q); err != nil {
+		return nil
+	}
+	var out []string
+	var walk func(map[string]any)
+	seen := map[string]bool{}
+	walk = func(m map[string]any) {
+		for k, v := range m {
+			if k == "$" || seen[k] {
+				continue
+			}
+			seen[k] = true
+			out = append(out, k)
+			if child, ok := v.(map[string]any); ok {
+				walk(child)
+			}
+		}
+	}
+	walk(q)
+	return out
+}
+
+// gateQuery enforces view rules for a would-be subscription. Returns:
+//   - err non-nil → dynamic view rule and caller is not admin (reject).
+//
+// Closed etypes are allowed through with an empty-result gate: refreshes
+// render [] via instaql's Executor, so live updates never leak denied data.
+func gateQuery(doc *perms.RuleDoc, rawQ json.RawMessage) error {
+	for _, etype := range collectEtypes(rawQ) {
+		if perms.ViewGate(doc, etype) == perms.ViewDynamic {
+			return &instaql.ErrRuleFilterUnsupported{Etype: etype}
+		}
+	}
+	return nil
+}
+
+func (m *Manager) rulesFor(ctx context.Context, appID string) *perms.RuleDoc {
+	if m.Deps.Rules == nil {
+		return nil
+	}
+	doc, err := m.Deps.Rules(ctx, appID)
+	if err != nil {
+		m.logger().Warn("sync: rules load failed; default-open", "app", appID, "err", err)
+		return nil
+	}
+	return doc
 }
 
 // HandleInit validates the init op and builds the session.
@@ -231,7 +303,7 @@ func (m *Manager) Handle(ctx context.Context, sess *Session, f Frame) ([]Frame, 
 				if sess.TreeResults {
 					class = wireTree
 				}
-				id = groupKey(sess.AppID, class, raw)
+				id = groupKey(sess.AppID, class, raw, sess.Admin)
 			}
 		}
 		m.detachMember(sess, id)
@@ -274,7 +346,7 @@ func (m *Manager) handleAddQuery(ctx context.Context, sess *Session, f Frame) ([
 	if sess.TreeResults {
 		class = wireTree
 	}
-	key := groupKey(sess.AppID, class, rawQ)
+	key := groupKey(sess.AppID, class, rawQ, sess.Admin)
 
 	// Same session re-adding its own query → v1 add-query-exists.
 	sess.mu.Lock()
@@ -299,9 +371,19 @@ func (m *Manager) handleAddQuery(ctx context.Context, sess *Session, f Frame) ([
 		return []Frame{ErrFrame(404, "unknown-app", "no such app")}, nil
 	}
 
+	// View-rule gate: dynamic rules cannot be honored on shared subscriptions
+	// (no rule-where pushdown yet) — refuse them for non-admin callers rather
+	// than leak. Closed rules proceed with an empty-result gate.
+	doc := m.rulesFor(ctx, sess.AppID)
+	if !sess.Admin {
+		if gerr := gateQuery(doc, rawQ); gerr != nil {
+			return []Frame{ErrFrame(400, "invalid-query", gerr.Error())}, nil
+		}
+	}
+
 	// Attach (creates the shared subscription on first use). Cap breaches
 	// reject with the exact 429 protocol frames and close the connection.
-	if _, aerr := m.attachGroup(sess, rawQ, topics, cat, class); aerr != nil {
+	if _, aerr := m.attachGroup(sess, rawQ, topics, cat, class, doc); aerr != nil {
 		var capErr *reactive.SubLimitError
 		if errors.As(aerr, &capErr) {
 			return []Frame{ErrFrame(429, "subscription-limit",
@@ -326,6 +408,13 @@ func (m *Manager) handleTransact(ctx context.Context, sess *Session, f Frame) ([
 	rawSteps, ok := f["tx-steps"]
 	if !ok {
 		return []Frame{ErrFrame(400, "bad-request", "transact requires tx-steps")}, nil
+	}
+	// Per-app write budget: shed before parsing/DB work.
+	if m.Deps.Limiter != nil {
+		if ok2, retry := m.Deps.Limiter.Allow(sess.AppID, "transact"); !ok2 {
+			return []Frame{ErrFrame(429, "rate-limited",
+				fmt.Sprintf("rate limited; retry after %s", retry.Round(time.Millisecond)))}, nil
+		}
 	}
 	// Shed before doing any work: an overloaded drain loop must shed
 	// publishers at the gate, not after they burned a Postgres txn
@@ -353,12 +442,13 @@ func (m *Manager) handleTransact(ctx context.Context, sess *Session, f Frame) ([
 		return []Frame{ErrFrame(404, "unknown-app", "no such app")}, nil
 	}
 	appID := parseUUIDOrZero(sess.AppID)
+	doc := m.rulesFor(ctx, sess.AppID)
 	opts := transact.Options{
 		Admin:    sess.Admin,
 		AuthUser: sess.AuthUser,
 	}
 	started := time.Now()
-	res, err := transact.Transact(ctx, m.Deps.DB, cat, appID, parsed, opts, nil)
+	res, err := transact.Transact(ctx, m.Deps.DB, cat, appID, parsed, opts, doc)
 	metrics.TransactDuration.WithLabelValues("ws").Observe(time.Since(started).Seconds())
 	if err != nil {
 		return []Frame{ErrFrame(403, "transact-error", err.Error())}, nil

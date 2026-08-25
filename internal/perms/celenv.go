@@ -76,14 +76,14 @@ func requestDescriptor() protoreflect.MessageDescriptor {
 						TypeName: n(".google.protobuf.Timestamp"),
 					},
 					{
-						Name:  n("ip"),
+						Name:   n("ip"),
 						Number: num(3),
-						Type:  descriptorpb.FieldDescriptorProto_TYPE_STRING.Enum(),
+						Type:   descriptorpb.FieldDescriptorProto_TYPE_STRING.Enum(),
 					},
 					{
-						Name:  n("origin"),
+						Name:   n("origin"),
 						Number: num(4),
-						Type:  descriptorpb.FieldDescriptorProto_TYPE_STRING.Enum(),
+						Type:   descriptorpb.FieldDescriptorProto_TYPE_STRING.Enum(),
 					},
 				},
 			}},
@@ -102,6 +102,12 @@ func requestDescriptor() protoreflect.MessageDescriptor {
 	return cachedDesc
 }
 
+// maxCELCost bounds one rule evaluation. Rules are admin-authored, but they
+// run against attacker-influenced data/newData payloads on a shared process —
+// an unbounded map/reduce chain must not become a tenant-to-tenant CPU
+// amplifier. Sized generously above any legitimate v1-style rule.
+const maxCELCost = 1_000_000
+
 // compile produces or memoizes a program for a raw CEL expression string.
 func compile(expr string) (cel.Program, error) {
 	if v, ok := progMemo.Load(expr); ok {
@@ -112,7 +118,7 @@ func compile(expr string) (cel.Program, error) {
 	if iss != nil && iss.Err() != nil {
 		return nil, iss.Err()
 	}
-	prg, err := e.Program(ast)
+	prg, err := e.Program(ast, cel.CostLimit(maxCELCost))
 	if err != nil {
 		return nil, err
 	}

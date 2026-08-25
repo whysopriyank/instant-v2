@@ -18,6 +18,7 @@ import (
 	"sync"
 
 	"github.com/instant-v2/instant-v2/internal/metrics"
+	"github.com/instant-v2/instant-v2/internal/perms"
 	"github.com/instant-v2/instant-v2/internal/platform"
 	"github.com/instant-v2/instant-v2/internal/reactive"
 )
@@ -70,13 +71,22 @@ func (g *queryGroup) snapshotMembers() (members []member, anyDelta bool) {
 // groupKey derives the registry key. The query participates compacted so
 // cosmetic whitespace differences share a group; key-order differences do
 // not (documented limitation — clients emit stable JSON in practice).
-func groupKey(appID string, class wireClass, rawQ json.RawMessage) string {
+//
+// The caller class (admin vs public) is mixed in: admins bypass view gates,
+// so a shared group across classes would leak denied etypes to public
+// members through admin-seeded snapshots.
+func groupKey(appID string, class wireClass, rawQ json.RawMessage, admin bool) string {
 	var c bytes.Buffer
 	_ = json.Compact(&c, rawQ)
 	h := fnv.New64a()
 	h.Write([]byte(appID))
 	h.Write([]byte{0})
 	h.Write([]byte{byte(class)})
+	if admin {
+		h.Write([]byte{1})
+	} else {
+		h.Write([]byte{0})
+	}
 	h.Write(c.Bytes())
 	return fmt.Sprintf("grp-%s-%016x", class, h.Sum64())
 }
@@ -90,9 +100,9 @@ func groupKey(appID string, class wireClass, rawQ json.RawMessage) string {
 // Caller must have computed topics and cat already (same compilation the
 // pre-group code performed).
 func (m *Manager) attachGroup(sess *Session, rawQ json.RawMessage, topics map[string]bool,
-	cat *platform.AttrCatalog, class wireClass,
+	cat *platform.AttrCatalog, class wireClass, doc *perms.RuleDoc,
 ) (*queryGroup, error) {
-	key := groupKey(sess.AppID, class, rawQ)
+	key := groupKey(sess.AppID, class, rawQ, sess.Admin)
 
 	m.groupsMu.Lock()
 	defer m.groupsMu.Unlock()
@@ -105,10 +115,11 @@ func (m *Manager) attachGroup(sess *Session, rawQ json.RawMessage, topics map[st
 	g := m.groups[key]
 	if g == nil {
 		sub := &reactive.Subscription{
-			ID:     key,
-			AppID:  sess.AppID,
-			Query:  rawQ,
-			Topics: topics,
+			ID:        key,
+			AppID:     sess.AppID,
+			Query:     rawQ,
+			Topics:    topics,
+			AttachCtx: &QueryGate{Rules: doc, Admin: sess.Admin},
 		}
 		sub.Delta.Store(sess.Features["delta-refresh"])
 		sub.Emit = func(fr reactive.Frame) {

@@ -8,17 +8,20 @@ import (
 	"sync"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/instant-v2/instant-v2/internal/perms"
 )
 
 // ErrNoRows re-exported for callers without a pgx dependency.
 var ErrNoRows = errors.New("platform: no rows")
 
-// CatalogCache memoizes AttrCatalog per app and resolves admin tokens.
+// CatalogCache memoizes AttrCatalog + RuleDoc per app and resolves admin tokens.
 type CatalogCache struct {
 	Pool  Queryer
 	RowQ  RowQueryer
 	mu    sync.Mutex
 	cache map[string]*AttrCatalog
+	rules map[string]*perms.RuleDoc
 }
 
 // RowQueryer is the query surface the catalog cache needs.
@@ -29,7 +32,7 @@ type RowQueryer interface {
 
 // NewCatalogCache builds a cache over the pool.
 func NewCatalogCache(q Queryer, rq RowQueryer) *CatalogCache {
-	return &CatalogCache{Pool: q, RowQ: rq, cache: map[string]*AttrCatalog{}}
+	return &CatalogCache{Pool: q, RowQ: rq, cache: map[string]*AttrCatalog{}, rules: map[string]*perms.RuleDoc{}}
 }
 
 // For returns the app's catalog, loading it on first use.
@@ -51,11 +54,49 @@ func (c *CatalogCache) For(ctx context.Context, appID string) (*AttrCatalog, err
 	return cat, nil
 }
 
-// Invalidate drops one app's cached catalog.
+// Invalidate drops one app's cached catalog and rule doc.
 func (c *CatalogCache) Invalidate(appID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.cache, appID)
+	delete(c.rules, appID)
+}
+
+// RuleDocFor returns the app's parsed permission rules, loading on first use.
+// Apps without a rules row get an empty doc — v1 default-open semantics — so
+// callers can pass the result straight into perms.Check. The cache shares the
+// catalog's invalidation cycle (Invalidate clears both).
+func (c *CatalogCache) RuleDocFor(ctx context.Context, appID string) (*perms.RuleDoc, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if d, ok := c.rules[appID]; ok {
+		return d, nil
+	}
+	var id [16]byte
+	if err := ScanUUID(appID, &id); err != nil {
+		return nil, err
+	}
+	rows, err := c.RowQ.Query(ctx,
+		`SELECT code FROM rules WHERE app_id=$1::uuid`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var raw []byte
+	for rows.Next() {
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	doc, err := perms.ParseRuleDoc(raw)
+	if err != nil {
+		return nil, err
+	}
+	c.rules[appID] = doc
+	return doc, nil
 }
 
 // CheckAdminToken verifies an admin token belongs to the app.

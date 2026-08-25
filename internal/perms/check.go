@@ -16,6 +16,38 @@ type Decision struct {
 	Err   error // compile or runtime error surfaced as a permission hint
 }
 
+// ViewGate statically classifies the view rule for (etype) so read paths can
+// decide WITHOUT record bindings:
+//
+//	ViewOpen    — no rule, or the rule is literally "true": everyone may view.
+//	ViewClosed  — the rule is literally "false": nobody may view.
+//	ViewDynamic — any other expression: needs auth/data bindings to decide.
+//
+// Read planes use this to fail closed on ViewDynamic until CEL→SQL rule-where
+// pushdown exists (a dynamic rule evaluated without data bindings could
+// over-allow data-dependent rules).
+type ViewMode int
+
+const (
+	ViewOpen ViewMode = iota
+	ViewClosed
+	ViewDynamic
+)
+
+func ViewGate(doc *RuleDoc, etype string) ViewMode {
+	if doc == nil {
+		return ViewOpen
+	}
+	switch expr := doc.ResolveExpr(etype, "view"); expr {
+	case "", "true":
+		return ViewOpen
+	case "false":
+		return ViewClosed
+	default:
+		return ViewDynamic
+	}
+}
+
 // Check evaluates the resolved program for (etype, action) with the given
 // bindings. Mirrors db/cel.clj eval-program! with the patch-code semantics
 // (literal strings "true"/"false" pass through) and with-binds wrapping.
@@ -82,7 +114,7 @@ func bindingsMap(b Bindings) map[string]any {
 	m := map[string]any{
 		"data":       anyToDyn(b.Data),
 		"newData":    anyToDyn(b.NewData),
-		"auth":       anyToDyn(b.Auth),
+		"auth":       normalizedAuth(b.Auth),
 		"ruleParams": anyToDyn(b.RuleParams),
 		"request":    newRequestMessage(b.Request),
 	}
@@ -94,6 +126,24 @@ func bindingsMap(b Bindings) map[string]any {
 	}
 	m["rateLimit"] = map[string]any{}
 	return m
+}
+
+// normalizedAuth guarantees auth.id is ALWAYS bound (null when absent) so
+// rules written as `auth.id != null && …` evaluate cleanly for anonymous
+// callers instead of raising "no such key" — which would deny every request
+// through the fail-closed eval-error path.
+func normalizedAuth(auth map[string]any) map[string]any {
+	out := map[string]any{"id": nil}
+	for k, v := range auth {
+		if k == "id" {
+			continue
+		}
+		out[k] = v
+	}
+	if id, ok := auth["id"]; ok {
+		out["id"] = id
+	}
+	return out
 }
 
 func newRequestMessage(r RequestInfo) any {
