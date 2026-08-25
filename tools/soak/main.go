@@ -19,6 +19,7 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -27,6 +28,27 @@ import (
 
 	"github.com/coder/websocket"
 )
+
+// Lag samples (write→next-refresh-at-this-session), filled from reader
+// goroutines under each session's mu.
+var (
+	lagMu      sync.Mutex
+	lagSamples []time.Duration
+)
+
+func recordLag(d time.Duration) {
+	lagMu.Lock()
+	lagSamples = append(lagSamples, d)
+	lagMu.Unlock()
+}
+
+func percentile(sorted []time.Duration, p float64) time.Duration {
+	if len(sorted) == 0 {
+		return 0
+	}
+	idx := int(float64(len(sorted)-1) * p)
+	return sorted[idx]
+}
 
 func main() {
 	url := flag.String("url", envOr("SOAK_URL", "ws://localhost:8888/runtime/session"), "session ws url")
@@ -38,6 +60,7 @@ func main() {
 	attr := flag.String("attr", os.Getenv("SOAK_ATTR"), "attr uuid (uuid string) to write")
 	rampUp := flag.Duration("ramp", 30*time.Second, "dial ramp window")
 	pprofAddr := flag.String("pprof", "127.0.0.1:18811", "pprof endpoint")
+	maxP99 := flag.Duration("max-p99-lag", 0, "fail when p99 write→refresh delivery lag exceeds this (0=off)")
 	flag.Parse()
 
 	go func() { _ = http.ListenAndServe(*pprofAddr, nil) }()
@@ -138,6 +161,23 @@ loop:
 			"first", dropped[0].Error())
 		os.Exit(1)
 	}
+
+	// Delivery-lag budget: p50/p99/max of write→refresh samples.
+	lagMu.Lock()
+	sorted := append([]time.Duration(nil), lagSamples...)
+	lagMu.Unlock()
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	p50, p99 := percentile(sorted, 0.50), percentile(sorted, 0.99)
+	var max time.Duration
+	if n := len(sorted); n > 0 {
+		max = sorted[n-1]
+	}
+	logger.Info("delivery lag", "samples", len(sorted), "p50", p50.Round(time.Millisecond),
+		"p99", p99.Round(time.Millisecond), "max", max.Round(time.Millisecond))
+	if *maxP99 > 0 && p99 > *maxP99 {
+		logger.Error("soak FAILED: p99 delivery lag over budget", "p99", p99, "budget", *maxP99)
+		os.Exit(1)
+	}
 	logger.Info("soak PASSED", "sessions", connects.Load(), "refreshes", refreshes.Load(),
 		"transacts", transacts.Load())
 }
@@ -186,6 +226,7 @@ func runSession(ctx context.Context, _ *slog.Logger, rawURL, appID string, id in
 		mu            sync.Mutex
 		lastRefreshAt = time.Now()
 		lastRefreshCt int64
+		lastTxAt      time.Time // last transact send; sampled on next refresh
 	)
 
 	initOK := make(chan struct{})
@@ -230,6 +271,10 @@ func runSession(ctx context.Context, _ *slog.Logger, rawURL, appID string, id in
 				gotSnapshot = true
 				lastRefreshAt = time.Now()
 				lastRefreshCt++
+				if !lastTxAt.IsZero() {
+					recordLag(time.Since(lastTxAt))
+					lastTxAt = time.Time{}
+				}
 				mu.Unlock()
 				refreshes.Add(1)
 			}
@@ -304,6 +349,9 @@ func runSession(ctx context.Context, _ *slog.Logger, rawURL, appID string, id in
 			}); err != nil {
 				return err
 			}
+			mu.Lock()
+			lastTxAt = time.Now()
+			mu.Unlock()
 			transacts.Add(1)
 		}
 	}

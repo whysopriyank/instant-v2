@@ -4,32 +4,115 @@ on:
     branches: [main]
   pull_request:
 
+# NOTE: service containers (`services:`) do not support arbitrary container
+# commands, and waltail needs `postgres -c wal_level=logical` for logical
+# slots. Postgres therefore runs via explicit `docker run` steps below —
+# full arg control, health-checked, per-job. (GitHub Actions also ignores
+# YAML anchors, so each job carries its own block.)
+
 jobs:
   check:
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_USER: instant
-          POSTGRES_PASSWORD: instant
-          POSTGRES_DB: instant_v2_test
-        ports:
-          - "5432:5432"
-        options: >-
-          --health-cmd "pg_isready -U instant"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-        cmd: ["postgres", "-c", "wal_level=logical"]
+    timeout-minutes: 20
+    env:
+      DATABASE_URL: postgres://instant:instant@localhost:5432/instant_v2_test?sslmode=disable
+      PGPASSWORD: instant
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      # Live-PG suites skip silently when DATABASE_URL is unset — providing
+      # the DB here keeps them honest (docs/10 §skeptical review). Packages
+      # reset the shared public schema, so tests MUST run sequentially (-p 1).
+      - name: Start postgres (wal_level=logical)
+        run: |
+          docker rm -f ci-pg 2>/dev/null || true
+          docker run -d --name ci-pg \
+            -e POSTGRES_USER=instant -e POSTGRES_PASSWORD=instant \
+            -e POSTGRES_DB=instant_v2_test -p 5432:5432 postgres:17 \
+            -c wal_level=logical
+          for i in $(seq 1 30); do
+            ok=$(docker exec ci-pg pg_isready -U instant || true)
+            echo "$ok"
+            case "$ok" in *"accepting connections") break;; esac
+            sleep 1
+          done
       - name: Vet
         run: go vet ./...
-      - name: Test
-        env:
-          DATABASE_URL: postgres://instant:instant@localhost:5432/instant_v2_test?sslmode=disable
+      - name: Lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+      - name: Test (live PG, sequential packages)
         run: go test ./... -race -count=1 -short -p 1
+
+  # Soak-as-gate (docs/01 §6-B follow-up): correctness gate under sustained
+  # load. tools/soak exits 1 on ANY dropped refresh or protocol violation;
+  # the lag + RSS budgets guard delivery latency and unbounded growth at CI
+  # scale. Budgets are deliberately generous — gates regressions, not perf.
+  soak-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DATABASE_URL: postgres://instant:instant@localhost:5432/instant_v2_soak?sslmode=disable
+      PGPASSWORD: instant
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Start postgres
+        run: |
+          docker rm -f soak-pg 2>/dev/null || true
+          docker run -d --name soak-pg \
+            -e POSTGRES_USER=instant -e POSTGRES_PASSWORD=instant -e POSTGRES_DB=instant_v2_soak \
+            -p 5432:5432 postgres:17
+          for i in $(seq 1 30); do
+            ok=$(docker exec soak-pg pg_isready -U instant || true)
+            case "$ok" in *"accepting connections") break;; esac
+            sleep 1
+          done
+      - name: Build server + harness
+        run: |
+          go build -o instantd ./cmd/instantd
+          go build -o soaksetup ./tools/soaksetup
+          go build -o soak ./tools/soak
+      - name: Seed app + attr
+        run: |
+          OUT=$(./soaksetup)
+          echo "SOAK_APP=$(echo "$OUT" | grep '^APP=' | cut -d= -f2)" >> "$GITHUB_ENV"
+          echo "SOAK_ATTR=$(echo "$OUT" | grep '^ATTR=' | cut -d= -f2)" >> "$GITHUB_ENV"
+      - name: Start instantd
+        env:
+          INSTANT_V2_HTTP_ADDR: "127.0.0.1:8888"
+          INSTANT_V2_INSECURE_DEV_SECRETS: "1"
+        run: |
+          ./instantd > instantd.log 2>&1 &
+          echo $! > server.pid
+          for i in $(seq 1 60); do
+            curl -s -o /dev/null http://127.0.0.1:8888/runtime/sse && exit 0
+            sleep 1
+          done
+          echo "instantd did not become ready"; tail -50 instantd.log; exit 1
+      - name: Soak (150 sessions, 90s hold — writes start at ramp+30s)
+        timeout-minutes: 6
+        run: |
+          ./soak \
+            -url ws://127.0.0.1:8888/runtime/session \
+            -app "$SOAK_APP" -attr "$SOAK_ATTR" \
+            -sessions 150 -ramp 10s -duration 90s \
+            -global-tx-rate 8 -tx-interval 2s \
+            -max-p99-lag 10s
+      - name: RSS ceiling (1 GiB)
+        if: always()
+        run: |
+          PID=$(cat server.pid)
+          RSS_KB=$(ps -o rss= -p "$PID" | tr -d ' ')
+          echo "instantd RSS: $((RSS_KB / 1024)) MiB"
+          if [ "$RSS_KB" -gt 1048576 ]; then
+            echo "RSS budget exceeded"; exit 1
+          fi
+      - name: Dump server log on failure
+        if: failure()
+        run: tail -100 instantd.log
