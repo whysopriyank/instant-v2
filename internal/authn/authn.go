@@ -23,12 +23,14 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/instant-v2/instant-v2/internal/perms"
 	"github.com/instant-v2/instant-v2/internal/platform"
 	"github.com/instant-v2/instant-v2/internal/storage"
 	"github.com/instant-v2/instant-v2/internal/triple"
@@ -43,7 +45,27 @@ var (
 	ErrExpiredCode  = errors.New("authn: expired magic code")
 	ErrBadToken     = errors.New("authn: unknown refresh token")
 	ErrSignupDenied = errors.New("authn: signup denied by permissions")
+	// ErrLocked is returned while an (app,email) pair is cooling down after
+	// repeated failed magic-code verifications. Callers surface it as 429.
+	ErrLocked = errors.New("authn: too many failed attempts; try later")
 )
+
+// Magic-code brute-force resistance. Codes are 6 digits with a 24h TTL, so
+// unlimited verification attempts would be trivially grindable. Failed
+// verifications per (app,email) accrue; crossing the threshold locks the
+// pair for the cooldown window. State is process-local (single-node honest;
+// multi-node deployments get per-node limits until shared state lands).
+const (
+	maxMagicCodeFails = 5
+	magicLockout      = 15 * time.Minute
+	minResendInterval = 60 * time.Second
+)
+
+type attemptRecord struct {
+	fails       int
+	lockedUntil time.Time
+	lastSent    time.Time
+}
 
 // User is an app-level user record ($users entity projection).
 type User struct {
@@ -73,7 +95,7 @@ func (u User) Full(refreshToken string, created bool) map[string]any {
 
 // RulesFunc optionally resolves the app's permission RuleDoc for the $users
 // create gate. Nil or unresolvable rules → v1 default-open behavior.
-type RulesFunc func(ctx context.Context, appID [16]byte) (*permsRuleDoc, error)
+type RulesFunc func(ctx context.Context, appID [16]byte) (*perms.RuleDoc, error)
 
 // Service is one process's authn facade.
 type Service struct {
@@ -86,10 +108,12 @@ type Service struct {
 	// CodeTTL overrides DefaultMagicCodeTTL (tests); per-app override pending
 	// apps.magic_code_expiry_minutes column (Phase 5).
 	CodeTTL    time.Duration
-	RulesForFn func(ctx context.Context, appID [16]byte) (permsRuleDoc, error)
+	RulesForFn func(ctx context.Context, appID [16]byte) (*perms.RuleDoc, error)
 
 	mu       sync.Mutex
 	attrByID map[[16]byte]systemAttrs // keyed by appID
+	attempts map[string]*attemptRecord
+	nowFn    func() time.Time // swappable for tests
 
 	// Providers overrides the builtin oauth registry (tests; custom OIDC
 	// clients land with apps.rules persistence in Phase 5).
@@ -97,16 +121,16 @@ type Service struct {
 	// Apple signs client-secret assertions when configured (.p8 material).
 	Apple *AppleSigner
 
+	// NowFunc overrides time.Now for lockout/throttle state (tests). nil →
+	// time.Now.
+	NowFunc func() time.Time
+
 	jwks jwksCache
 }
 
 // Mailer delivers magic codes; self-hosted installs may no-op.
 type Mailer interface {
 	SendMagicCode(ctx context.Context, email, code string) error
-}
-
-type permsRuleDoc interface {
-	ResolveExpr(etype, action string) string
 }
 
 // systemAttrs resolves (and memoizes) the fixed auth attr ids for an app.
@@ -202,6 +226,57 @@ func (s *Service) logger() *slog.Logger {
 	return slog.Default()
 }
 
+func (s *Service) now() time.Time {
+	if s.NowFunc != nil {
+		return s.NowFunc()
+	}
+	return time.Now()
+}
+
+// attemptKey namespaces brute-force state per app and email.
+func attemptKey(appID [16]byte, email string) string {
+	return platform.UUIDToStr(appID) + "\x00" + strings.ToLower(strings.TrimSpace(email))
+}
+
+func (s *Service) recordLocked(appID [16]byte, email string) bool {
+	key := attemptKey(appID, email)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.attempts == nil {
+		s.attempts = map[string]*attemptRecord{}
+	}
+	rec := s.attempts[key]
+	return rec != nil && s.now().Before(rec.lockedUntil)
+}
+
+// noteFailure bumps the failure counter and locks on threshold.
+func (s *Service) noteFailure(appID [16]byte, email string) {
+	key := attemptKey(appID, email)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.attempts == nil {
+		s.attempts = map[string]*attemptRecord{}
+	}
+	rec := s.attempts[key]
+	if rec == nil {
+		rec = &attemptRecord{}
+		s.attempts[key] = rec
+	}
+	rec.fails++
+	if rec.fails >= maxMagicCodeFails {
+		rec.lockedUntil = s.now().Add(magicLockout)
+		rec.fails = 0 // fresh count after cooldown
+	}
+}
+
+// clearFailures resets state after a successful verification.
+func (s *Service) clearFailures(appID [16]byte, email string) {
+	key := attemptKey(appID, email)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.attempts, key)
+}
+
 // HashToken ports app-user-refresh-token-model/hash-token:
 // sha256 of the canonical uuid text, hex-encoded.
 func HashToken(tokenUUID string) string {
@@ -240,6 +315,27 @@ func be16(b []byte) uint16 { return uint16(b[0])<<8 | uint16(b[1]) }
 // SendMagicCode creates a one-time code for email and hands it to the Mailer.
 // HTTP contract: POST /runtime/auth/send_magic_code → {sent: true}.
 func (s *Service) SendMagicCode(ctx context.Context, appID [16]byte, email string) error {
+	// Resend throttle: silently honor requests inside the cooldown window
+	// (the previously issued code remains valid) so clients see the same
+	// contract while mail-bombing stays impossible. No enumeration signal.
+	key := attemptKey(appID, email)
+	s.mu.Lock()
+	if s.attempts == nil {
+		s.attempts = map[string]*attemptRecord{}
+	}
+	rec := s.attempts[key]
+	now := s.now()
+	if rec != nil && now.Sub(rec.lastSent) < minResendInterval {
+		s.mu.Unlock()
+		return nil
+	}
+	if rec == nil {
+		rec = &attemptRecord{}
+		s.attempts[key] = rec
+	}
+	rec.lastSent = now
+	s.mu.Unlock()
+
 	a, err := s.attrs(ctx, appID)
 	if err != nil {
 		return err
@@ -389,6 +485,10 @@ func (s *Service) VerifyMagicCode(ctx context.Context, appID [16]byte,
 	email, code string, guestRefreshToken string, extraFields map[string]any,
 	admin bool,
 ) (map[string]any, error) {
+	// Brute-force gate: locked pairs are refused before any code check.
+	if s.recordLocked(appID, email) {
+		return nil, ErrLocked
+	}
 	a, err := s.attrs(ctx, appID)
 	if err != nil {
 		return nil, err
@@ -426,11 +526,14 @@ func (s *Service) VerifyMagicCode(ctx context.Context, appID [16]byte,
 			}
 		}
 		if err := s.consumeCode(ctx, appID, a, email, code); err != nil {
+			s.noteFailure(appID, email)
 			return nil, err
 		}
 	} else if err := s.consumeCode(ctx, appID, a, email, code); err != nil {
+		s.noteFailure(appID, email)
 		return nil, err
 	}
+	s.clearFailures(appID, email)
 
 	var userID [16]byte
 	switch {
@@ -521,25 +624,32 @@ func (s *Service) SignInGuest(ctx context.Context, appID [16]byte, extraFields m
 	return user.Full(refreshToken, true), nil
 }
 
-// checkCreatePerm runs the $users create rule through the CEL engine without
-// writing (assert-signup!). No rules configured → allowed (v1 default-open).
+// checkCreatePerm runs the $users create rule through the CEL engine with an
+// auth binding (assert-signup!). No rules configured → allowed (v1
+// default-open). Resolution or evaluation failures FAIL CLOSED — a broken
+// rule must never widen signup access.
 func (s *Service) checkCreatePerm(ctx context.Context, appID [16]byte, email string) error {
 	if s.RulesForFn == nil {
 		return nil
 	}
 	doc, err := s.RulesForFn(ctx, appID)
-	if err != nil || doc == nil {
-		return err // resolution failure fails closed; nil doc = no rules
+	if err != nil {
+		return fmt.Errorf("authn: signup rules unavailable: %w", err)
 	}
-	expr := doc.ResolveExpr("$users", "create")
-	switch expr {
-	case "", "true":
-		return nil
-	case "false":
+	if doc == nil {
+		return nil // no rules configured → default open
+	}
+	auth := map[string]any{}
+	if email != "" {
+		auth["email"] = email
+	}
+	allow, err := perms.Check("$users", "create", doc, perms.Bindings{Auth: auth})
+	if err != nil {
+		return fmt.Errorf("authn: signup rule eval: %w", err)
+	}
+	if !allow {
 		return ErrSignupDenied
 	}
-	// Non-literal expressions need the full CEL env; wired in Phase 5 when
-	// apps.rules lands. Until then only literal rules are enforced here.
 	return nil
 }
 

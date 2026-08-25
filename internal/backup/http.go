@@ -94,7 +94,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "":
 		h.handleExport(w, r, appStr, appID)
 	case "restore":
-		counts, ierr := Import(ctx, h.Pool, r.Body)
+		counts, ierr := Import(ctx, h.Pool, r.Body, appID)
 		if ierr != nil {
 			h.writeImportError(w, ierr)
 			return
@@ -199,7 +199,7 @@ func (h *Handler) handleRestoreObject(w http.ResponseWriter, r *http.Request, ap
 		return
 	}
 	defer func() { _ = rc.Close() }()
-	counts, ierr := Import(r.Context(), h.Pool, rc)
+	counts, ierr := Import(r.Context(), h.Pool, rc, appID)
 	if ierr != nil {
 		h.writeImportError(w, ierr)
 		return
@@ -274,6 +274,10 @@ func (h *Handler) writeImportError(w http.ResponseWriter, err error) {
 	msg := err.Error()
 	if errors.Is(err, ErrAppNotFound) {
 		status = http.StatusNotFound
+	}
+	if errors.Is(err, ErrAppMismatch) {
+		status = http.StatusForbidden
+		h.logger().Warn("backup: cross-app restore rejected", "err", err)
 	}
 	writeErr(w, status, msg)
 }

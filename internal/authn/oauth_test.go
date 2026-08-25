@@ -15,6 +15,51 @@ import (
 	"github.com/instant-v2/instant-v2/internal/platform"
 )
 
+// TestOAuthRedirectOriginGate pins the redirect allowlist: an unregistered
+// origin is refused at start (fail-closed, empty allowlist included), and a
+// registered origin passes. This closes the phishing chain where an attacker
+// starts the flow with their own redirect_uri and harvests the minted code.
+func TestOAuthRedirectOriginGate(t *testing.T) {
+	_, h, appID, cleanup := env(t)
+	defer cleanup()
+	appStr := platform.UUIDToStr(appID)
+
+	start := func(redirect string) int {
+		req := httptest.NewRequest("GET",
+			"/runtime/oauth/start?app_id="+appStr+"&client_name=google&redirect_uri="+url.QueryEscape(redirect), nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	// env registers http://app — evil origins must be refused.
+	if code := start("http://evil.example/cb"); code != 400 {
+		t.Fatalf("unregistered origin must be refused at start, got %d", code)
+	}
+	// Same host, wrong scheme → still refused (origin = scheme://host).
+	if code := start("https://app/cb"); code != 400 {
+		t.Fatalf("scheme mismatch must be refused, got %d", code)
+	}
+	// Registered origin → proceeds to provider 302.
+	if code := start("http://app/other-path?x=1"); code != 302 {
+		t.Fatalf("registered origin should pass, got %d", code)
+	}
+
+	// Service-level: empty allowlist permits nothing.
+	svc2, _, appB, cleanup2 := env(t)
+	defer cleanup2()
+	if _, err := svc2.Pool.Exec(context.Background(),
+		`UPDATE apps SET redirect_origins='[]'::jsonb WHERE id=$1`, appB); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := svc2.OAuthStart(context.Background(), authn.OAuthStartParams{
+		AppID: appB, ClientName: "google", RedirectURI: "http://app/cb",
+	})
+	if err == nil || !strings.Contains(err.Error(), "not registered") {
+		t.Fatalf("empty allowlist must deny all redirects, got: %v", err)
+	}
+}
+
 // TestOAuthFullFlow runs the complete start → callback → token dance against
 // a stub OAuth provider, proving PKCE (S256), state+cookie binding, one-time
 // code burn, and refresh-token minting.

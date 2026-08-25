@@ -271,7 +271,7 @@ func (h *Handler) handleQuery(w http.ResponseWriter, r *http.Request, a *authedR
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	ex := &instaql.Executor{DB: h.Pool} // admin bypasses perms
+	ex := &instaql.Executor{DB: h.Pool, Admin: true} // admin bypasses perms
 	res, err := ex.Run(r.Context(), q, a.cat, a.appID)
 	if err != nil {
 		h.logger().Error("adminapi: query", "err", err)
@@ -499,7 +499,7 @@ func (h *Handler) handleQueryPermsCheck(w http.ResponseWriter, r *http.Request, 
 		}
 		checks = append(checks, entry)
 	}
-	res, err := (&instaql.Executor{DB: h.Pool}).Run(r.Context(), q, a.cat, a.appID)
+	res, err := (&instaql.Executor{DB: h.Pool, Admin: true}).Run(r.Context(), q, a.cat, a.appID)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -695,6 +695,8 @@ func (h *Handler) handleVerifyMagicCode(w http.ResponseWriter, r *http.Request, 
 		writeErr(w, http.StatusUnauthorized, "invalid or expired magic code")
 	case errors.Is(err, authn.ErrSignupDenied):
 		writeErr(w, http.StatusForbidden, "signup denied by permissions")
+	case errors.Is(err, authn.ErrLocked):
+		writeErr(w, http.StatusTooManyRequests, "too many failed attempts")
 	case err != nil:
 		h.logger().Error("adminapi: verify magic code", "err", err)
 		writeErr(w, http.StatusInternalServerError, "verify failed")

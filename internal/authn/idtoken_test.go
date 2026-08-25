@@ -66,10 +66,9 @@ func TestIDTokenVerification(t *testing.T) {
 	svc.Providers = map[string]*authn.ResolvedProvider{
 		"google": {
 			ClientID: "cid", Issuer: jwksSrv.URL,
-			JWKSURL:               jwksSrv.URL + "/certs",
-			TokenURL:              "http://unused/token",
-			UserInfo:              "",
-			TrustUnsignedFallback: false,
+			JWKSURL:  jwksSrv.URL + "/certs",
+			TokenURL: "http://unused/token",
+			UserInfo: "",
 		},
 	}
 
@@ -140,6 +139,39 @@ func TestIDTokenVerification(t *testing.T) {
 		map[string]any{"app-id": appStr, "client_name": "google", "id_token": signToken(expired, false)})
 	if code != http.StatusUnauthorized {
 		t.Fatalf("expired token must be rejected, got %d", code)
+	}
+
+	// Missing exp rejected — exp is mandatory now (previously optional).
+	noExp := map[string]any{}
+	for k, v := range goodClaims {
+		if k != "exp" {
+			noExp[k] = v
+		}
+	}
+	code, _ = post(t, h, "/runtime/oauth/id_token",
+		map[string]any{"app-id": appStr, "client_name": "google", "id_token": signToken(noExp, false)})
+	if code != http.StatusUnauthorized {
+		t.Fatalf("missing exp must be rejected, got %d", code)
+	}
+
+	// Array-form aud containing the client id → accepted (OIDC §3.1.3.7).
+	arrayAud := map[string]any{}
+	for k, v := range goodClaims {
+		arrayAud[k] = v
+	}
+	arrayAud["aud"] = []any{"other-party", "cid"}
+	code, respArr := post(t, h, "/runtime/oauth/id_token",
+		map[string]any{"app-id": appStr, "client_name": "google", "id_token": signToken(arrayAud, false)})
+	if code != 200 {
+		t.Fatalf("array aud containing cid must be accepted, got %d %v", code, respArr)
+	}
+
+	// Array-form aud WITHOUT the client id → rejected.
+	arrayAud["aud"] = []any{"other-party"}
+	code, _ = post(t, h, "/runtime/oauth/id_token",
+		map[string]any{"app-id": appStr, "client_name": "google", "id_token": signToken(arrayAud, false)})
+	if code != http.StatusUnauthorized {
+		t.Fatalf("array aud without cid must be rejected, got %d", code)
 	}
 }
 

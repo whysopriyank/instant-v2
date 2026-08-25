@@ -26,6 +26,7 @@
 package storageapi
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -39,9 +40,11 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/instant-v2/instant-v2/internal/platform"
 	"github.com/instant-v2/instant-v2/internal/storage"
@@ -81,25 +84,71 @@ const (
 // Handler serves the /storage/* routes. Store and Secret are required;
 // Triples and Catalogs are optional — when both are set, a completed upload
 // links $files entity triples exactly as v1's app-file-model/create! does.
+//
+// Authorization model:
+//   - DELETE /storage/files and GET /storage/signed-download-url are
+//     ADMIN-ONLY: they require AdminTokenCheck against the app. A nil
+//     checker disables them entirely (fail-closed).
+//   - POST /storage/signed-upload-url + PUT /storage/upload/{id} remain
+//     runtime-open for client SDK compatibility, bounded by MaxUploadBytes.
 type Handler struct {
 	Store    ObjectStore
 	Secret   []byte
 	Triples  *storage.DB
 	Catalogs *platform.CatalogCache
+	// AdminTokenCheck authorizes destructive/admin operations (wired from
+	// CatalogCache.CheckAdminToken in cmd). Required for upload-url,
+	// delete, and download-url control routes; nil → those routes 503.
+	AdminTokenCheck func(ctx context.Context, appID, token string) (bool, error)
+	// MaxUploadBytes bounds one upload body; <= 0 means the handler default
+	// (512 MiB) applies.
+	MaxUploadBytes int64
+
+	maxUpload atomic.Int64
+}
+
+// ErrFilenameTaken is returned when a completed upload's $files.path
+// collides with an existing unique path (duplicate filename).
+var ErrFilenameTaken = errors.New("storageapi: a file with this path already exists")
+
+// ErrTooLarge is returned when an upload exceeds MaxUploadBytes.
+var ErrTooLarge = errors.New("storageapi: upload exceeds the configured maximum size")
+
+func (h *Handler) uploadLimit() int64 {
+	if v := h.maxUpload.Load(); v > 0 {
+		return v
+	}
+	limit := h.MaxUploadBytes
+	if limit <= 0 {
+		limit = 512 << 20
+	}
+	h.maxUpload.Store(limit)
+	return limit
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/storage")
 	switch {
 	case path == "/signed-upload-url" && r.Method == http.MethodPost:
+		// Presigning mints write access into an app's $files namespace; it
+		// requires admin credentials like every other control route.
+		if !h.requireAdmin(w, r) {
+			return
+		}
 		h.signedUploadURL(w, r)
 	case strings.HasPrefix(path, "/upload/") && r.Method == http.MethodPut:
 		h.uploadPut(w, r, strings.TrimPrefix(path, "/upload/"))
 	case strings.HasPrefix(path, "/files/") && r.Method == http.MethodGet:
 		h.fileGet(w, r, strings.TrimPrefix(path, "/files/"))
 	case path == "/files" && r.Method == http.MethodDelete:
+		if !h.requireAdmin(w, r) {
+			return
+		}
 		h.filesDelete(w, r)
 	case path == "/signed-download-url" && r.Method == http.MethodGet:
+		if !h.requireAdmin(w, r) {
+			return
+		}
 		h.signedDownloadURL(w, r)
 	default:
 		http.NotFound(w, r)
@@ -180,6 +229,70 @@ func (h *Handler) signedUploadURL(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// requireAdmin authorizes a destructive/admin storage operation via the
+// injected token checker. Fail-closed: no checker → 503; bad token → 401.
+// The app id may arrive in the header, query, or JSON body (bulk delete);
+// body bytes are buffered and restored for downstream handlers.
+func (h *Handler) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
+	if h.AdminTokenCheck == nil {
+		httpError(w, http.StatusServiceUnavailable, errors.New("storageapi: admin operations not configured"))
+		return false
+	}
+	token := bearerOrXToken(r)
+	appIDStr := r.Header.Get("app-id")
+	if appIDStr == "" {
+		appIDStr = firstQuery(r, "app-id", "app_id")
+	}
+	if appIDStr == "" && r.Body != nil {
+		raw, err := io.ReadAll(r.Body)
+		if err == nil {
+			r.Body = io.NopCloser(bytes.NewReader(raw))
+			var body map[string]any
+			if json.Unmarshal(raw, &body) == nil {
+				for _, k := range []string{"app-id", "app_id"} {
+					if s, ok := body[k].(string); ok && s != "" {
+						appIDStr = s
+						break
+					}
+				}
+			}
+		}
+	}
+	id, err := platform.ScanUUIDErr(appIDStr)
+	if err != nil || token == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"message": "invalid admin credentials"})
+		return false
+	}
+	ok, err := h.AdminTokenCheck(r.Context(), platform.UUIDToStr(id), token)
+	if err != nil || !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"message": "invalid admin credentials"})
+		return false
+	}
+	return true
+}
+
+// bearerOrXToken extracts the caller credential (Authorization: Bearer or
+// X-admin-token), mirroring the admin/backup planes.
+func bearerOrXToken(r *http.Request) string {
+	authz := r.Header.Get("Authorization")
+	if len(authz) >= 7 && strings.EqualFold(authz[:7], "bearer ") {
+		if t := strings.TrimSpace(authz[7:]); t != "" {
+			return t
+		}
+	}
+	return r.Header.Get("X-admin-token")
+}
+
+func firstQuery(r *http.Request, keys ...string) string {
+	q := r.URL.Query()
+	for _, k := range keys {
+		if v := q.Get(k); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 // uploadPut ports consume-upload-url-put: stream the body into the backing
 // store at the signed location, then link $files triples if wired (v1 defers
 // record creation until the bytes actually land).
@@ -194,9 +307,23 @@ func (h *Handler) uploadPut(w http.ResponseWriter, r *http.Request, id string) {
 		httpError(w, http.StatusForbidden, err)
 		return
 	}
+	// Hard cap on one upload. The countingReader tracks exact bytes so an
+	// over-cap body is REJECTED (never silently truncated), and the partial
+	// object is removed.
+	limit := h.uploadLimit()
 	cr := &countingReader{r: r.Body}
-	if err := h.Store.Put(appIDStr+"/"+id, cr); err != nil {
-		httpError(w, http.StatusInternalServerError, err)
+	putErr := h.Store.Put(appIDStr+"/"+id, cr)
+	if putErr == nil && cr.n > limit {
+		putErr = ErrTooLarge
+		// Roll back the bytes that landed before the cap tripped.
+		_ = h.Store.Delete([]string{appIDStr + "/" + id})
+	}
+	if putErr != nil {
+		if errors.Is(putErr, ErrTooLarge) {
+			httpError(w, http.StatusRequestEntityTooLarge, putErr)
+			return
+		}
+		httpError(w, http.StatusInternalServerError, putErr)
 		return
 	}
 	// Unsigned advisory params carrying the $files metadata (v1 carried these
@@ -204,6 +331,10 @@ func (h *Handler) uploadPut(w http.ResponseWriter, r *http.Request, id string) {
 	filename := r.URL.Query().Get("filename")
 	if h.Triples != nil && h.Catalogs != nil {
 		if err := h.linkFileTriple(r.Context(), appID, id, filename, r.Header.Get("Content-Type"), cr.n); err != nil {
+			if errors.Is(err, ErrFilenameTaken) {
+				httpError(w, http.StatusConflict, err)
+				return
+			}
 			httpError(w, http.StatusInternalServerError, err)
 			return
 		}
@@ -374,6 +505,11 @@ func (h *Handler) linkFileTriple(ctx context.Context, appID [16]byte, id, filena
 		return h.Triples.SetTx(ctx, tx, appID, cat, ts, true)
 	})
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			// Unique $files.path collision (same filename uploaded twice).
+			return ErrFilenameTaken
+		}
 		return err
 	}
 	h.Catalogs.Invalidate(platform.UUIDToStr(appID))

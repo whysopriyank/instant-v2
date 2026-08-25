@@ -116,6 +116,8 @@ func (h *Handler) verifyMagicCode(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusForbidden
 		case ErrExpiredCode:
 			status = http.StatusUnauthorized
+		case ErrLocked:
+			status = http.StatusTooManyRequests
 		}
 		writeJSON(w, status, map[string]any{"message": err.Error()})
 		return
@@ -204,11 +206,17 @@ func (h *Handler) oauthStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 400)
 		return
 	}
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     oauthCookieName,
 		Value:    cookieValue,
 		Path:     "/runtime/oauth",
 		HttpOnly: true,
+		Secure:   scheme == "https",
+		SameSite: http.SameSiteLaxMode,
 		MaxAge:   3600, // v1: 1h
 	})
 	http.Redirect(w, r, authURL, http.StatusFound)

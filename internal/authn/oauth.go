@@ -208,9 +208,33 @@ type OAuthStartParams struct {
 	State               string
 }
 
+// validateRedirectOrigin ensures the caller-supplied redirect_uri is
+// registered on the app. An empty allowlist permits nothing (fail-closed):
+// this is what stops the phishing chain where an attacker starts an OAuth
+// flow with their own redirect target and harvests the minted instant code.
+func (s *Service) validateRedirectOrigin(ctx context.Context, appID [16]byte, redirectURI string) error {
+	origin, ok := platform.OriginOf(redirectURI)
+	if !ok {
+		return fmt.Errorf("authn: invalid redirect_uri %q", redirectURI)
+	}
+	allowed, err := platform.RedirectOrigins(ctx, s.Catalogs.RowQ, appID)
+	if err != nil {
+		return fmt.Errorf("authn: redirect origins load: %w", err)
+	}
+	for _, a := range allowed {
+		if a == origin {
+			return nil
+		}
+	}
+	return fmt.Errorf("authn: redirect_uri origin %q is not registered for this app", origin)
+}
+
 // OAuthStart performs start: persists the redirect record, returns the
 // provider authorize URL and the cookie value to set (http-only, 1h).
 func (s *Service) OAuthStart(ctx context.Context, p OAuthStartParams) (authorizeURL, cookieValue string, err error) {
+	if err := s.validateRedirectOrigin(ctx, p.AppID, p.RedirectURI); err != nil {
+		return "", "", err
+	}
 	if p.State == "" {
 		p.State = randToken()
 	}
@@ -286,6 +310,11 @@ func (s *Service) OAuthCallback(ctx context.Context, appID [16]byte,
 
 	prov, err := s.resolveProvider(ctx, appID, clientName)
 	if err != nil {
+		return "", err
+	}
+	// Defense in depth: the stored redirectURI was validated at start; the
+	// origin check runs again before anything is redirected there.
+	if err := s.validateRedirectOrigin(ctx, appID, redirectURI); err != nil {
 		return "", err
 	}
 	userInfo, err := exchangeUserInfo(ctx, prov, providerCode, redirectURI)
@@ -449,9 +478,6 @@ type ResolvedProvider struct {
 	UserInfo     string
 	Issuer       string // OIDC issuer for id_token verification
 	JWKSURL      string // JWKS discovery URL
-	// TrustUnsignedFallback allows id_tokens when JWKS is unreachable —
-	// NEVER set in production; test convenience only.
-	TrustUnsignedFallback bool
 
 	authURL   string
 	scope     string

@@ -249,14 +249,21 @@ func streamSection(ctx context.Context, conn *pgxpool.Conn, rw *recordWriter, sq
 
 var errBadHeader = errors.New("backup: invalid dump header")
 
+// ErrAppMismatch is returned when a dump's header app_id does not match the
+// app the caller authenticated for. Restore must never write across tenant
+// boundaries on header data alone.
+var ErrAppMismatch = errors.New("backup: dump app_id does not match the authenticated app")
+
 // Import consumes a v2 NDJSON dump from r into the database inside a single
-// transaction. It is idempotent: re-importing a dump over a DB already
-// holding its rows is a no-op (uuid-PK upserts / ON CONFLICT DO NOTHING).
-// The trailing checksum is verified against everything consumed before it;
-// any mismatch aborts the transaction. Unknown apps are created on the fly
-// (with a synthetic creator user when needed), so a fresh schema accepts a
-// dump directly.
-func Import(ctx context.Context, pool *pgxpool.Pool, r io.Reader) (Counts, error) {
+// transaction. routeAppID is the app the caller authenticated against — the
+// dump header MUST carry the same id or the import aborts with
+// ErrAppMismatch before any row is written. It is idempotent: re-importing a
+// dump over a DB already holding its rows is a no-op (uuid-PK upserts /
+// ON CONFLICT DO NOTHING). The trailing checksum is verified against
+// everything consumed before it; any mismatch aborts the transaction.
+// Unknown apps are created on the fly (with a synthetic creator user when
+// needed), so a fresh schema accepts a dump directly.
+func Import(ctx context.Context, pool *pgxpool.Pool, r io.Reader, routeAppID [16]byte) (Counts, error) {
 	var counts Counts
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -289,6 +296,9 @@ func Import(ctx context.Context, pool *pgxpool.Pool, r io.Reader) (Counts, error
 	appID, err := platform.ScanUUIDErr(hdr.AppID)
 	if err != nil {
 		return counts, fmt.Errorf("%w: bad app_id: %v", errBadHeader, err)
+	}
+	if appID != routeAppID {
+		return counts, ErrAppMismatch
 	}
 	creator := appID // deterministic fallback when header lacks creator_id
 	if hdr.CreatorID != "" {
@@ -478,6 +488,16 @@ func importAttr(ctx context.Context, tx pgx.Tx, appID [16]byte, body json.RawMes
 	id, err := platform.ScanUUIDErr(a.ID)
 	if err != nil {
 		return fmt.Errorf("bad attr id %q: %v", a.ID, err)
+	}
+	// Tenant guard: an attr uuid may already exist under ANOTHER app (attr ids
+	// are public — clients see them in init-ok). Never let a dump mutate or
+	// re-scope rows it does not own.
+	var owner [16]byte
+	rowErr := tx.QueryRow(ctx, `SELECT app_id FROM attrs WHERE id=$1`, id).Scan(&owner)
+	if rowErr == nil && owner != appID {
+		return fmt.Errorf("attr %s belongs to a different app", a.ID)
+	} else if rowErr != nil && !errors.Is(rowErr, pgx.ErrNoRows) {
+		return rowErr
 	}
 	fwd, err := platform.ScanUUIDErr(a.ForwardIdent)
 	if err != nil {

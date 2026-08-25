@@ -90,13 +90,13 @@ Identical workload via `tools/soak` against both servers on the same machine
 
 Notes, stated plainly:
 
-- v1's local boot never pushed a single live refresh to any subscriber
-  despite its invalidator/aggregator replication slots streaming WAL
-  normally (verified `pg_replication_slots.active`, sketches advancing).
-  Refresh machinery demonstrably works only for its internally-bootstrapped
-  config app traffic. Whether this is a sunset-era regression or a missing
-  local-config piece was not determined; the numbers above are labeled
-  accordingly rather than presented as v1's production fanout capability.
+- RESOLVED (2026-08-25): the "inert local fanout" above was environmental, not a
+  sunset regression. Postgres 17.11 gates logical-decoding output plugins behind
+  `output_plugin_libraries`; v1's `wal2json` slot creation failed with
+  `library "wal2json" may not be used as an output plugin` until
+  `ALTER SYSTEM SET output_plugin_libraries = 'wal2json'` + reload. After that,
+  v1's live fanout works locally (full delivery verified in a 4-session probe).
+  The pre-T1.1 v1 column above therefore understates healthy-v1 fanout behavior.
 - v2's CPU cost is the price of actually doing the fanout: every write
   invalidates the match-all query held by all 2000 sessions, each getting a
   full recompute + ~460 KB envelope. Coalescing bounds it to ~124 refreshes/s
@@ -132,3 +132,28 @@ costs ONE recompute shared by all subscribers — the drain keeps up, and
 clients finally receive the live updates they subscribed for (~857 per
 client over the run vs ~32 before). Lower CPU, lower memory, and strictly
 more correct delivery.
+
+### Head-to-head smoke soak (2026-08-25, both servers fully functional)
+
+Same machine (M4 Pro), same Postgres 17 (`wal_level=logical`,
+`output_plugin_libraries=wal2json`), separate databases, identical workload
+shape via `tools/soak`: 300 WS sessions · 15 s ramp · 3.5 min hold · 8 tx/s
+global · match-all live query per session · empty start state.
+Three runs per side; every run PASSED with 300/300 sessions held and durably
+committed writes of 1,319 of 1,319 sent (SQL-verified).
+
+| metric (write phase, 165 s) | v1 @ a4d2ef33 | v2 @ b276627 |
+|---|---|---|
+| live refreshes delivered    | ~281k–291k (~72% of ideal 396k; aggregator coalesces waves) | **396,000 / 396,000 (100%, all runs)** |
+| steady refresh rate         | ~1,500–2,200/s, uneven | **2,400/s metronomic (= 8 × 300)** |
+| avg server CPU under load   | **4.16 cores** | **0.11 cores** |
+| peak server RSS             | **~5.2 GB** (ZGC JVM) | **50 MB** |
+| cold start to serving       | ~30 s | **~2 s** |
+
+Caveat: v1's lower delivery count is its aggregator coalescing invalidation
+waves by design (clients still converge); it is not dropped data. Per-delivery
+CPU cost nonetheless differs ~48× (v2 ≈0.3 ms-core vs v1 ≈14.3 ms-core).
+Interop note: provisioning a plain blob attr with reverse_etype/reverse_label
+set (as v2's `GetOrCreateAttr` parity shape does) makes v1 classify the value
+slot as a link and reject string writes — keep reverse columns NULL for blobs
+when seeding v1 databases.

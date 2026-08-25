@@ -144,9 +144,9 @@ func TestFieldSpellings(t *testing.T) {
 		"POST /runtime/auth/verify_magic_code":    {"email", "code", "app-id", "extra-fields", "refresh-token"},
 		"POST /runtime/auth/sign_in_guest":        {"app-id", "extra-fields"},
 		"POST /runtime/auth/verify_refresh_token": {"refresh-token", "app-id"},
-		"POST /runtime/auth/sign_out":             {"app_id", "refresh_token"}, // snake_case quirk
+		"POST /runtime/auth/sign_out":             {"app_id", "refresh_token"},  // snake_case quirk
 		"POST /runtime/auth/refresh_tokens":       {"refresh_tokens", "app-id"}, // PLURAL list
-		"POST /runtime/signout":                   {"app_id", "refresh_token"}, // snake_case quirk
+		"POST /runtime/signout":                   {"app_id", "refresh_token"},  // snake_case quirk
 		"POST /runtime/framework/query":           {"query", "refresh-token", "header:app-id", "query-param:app_id"},
 		"GET  /runtime/openid-configuration":      {"path:app_id", "header:app-id", "query-param:app_id"},
 	}

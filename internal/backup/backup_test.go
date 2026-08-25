@@ -5,8 +5,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -263,7 +265,7 @@ func TestExportImportRoundTrip(t *testing.T) {
 
 	pool = remigrateSchema(t, ctx, pool)
 
-	imported, err := backup.Import(ctx, pool, bytes.NewReader(dump))
+	imported, err := backup.Import(ctx, pool, bytes.NewReader(dump), appID)
 	if err != nil {
 		t.Fatalf("import: %v", err)
 	}
@@ -277,7 +279,7 @@ func TestExportImportRoundTrip(t *testing.T) {
 	}
 
 	// Idempotency: re-importing the same dump succeeds as a no-op.
-	reimported, err := backup.Import(ctx, pool, bytes.NewReader(dump))
+	reimported, err := backup.Import(ctx, pool, bytes.NewReader(dump), appID)
 	if err != nil {
 		t.Fatalf("re-import: %v", err)
 	}
@@ -315,13 +317,118 @@ func TestChecksumCorruption(t *testing.T) {
 		t.Fatal("corruption was a no-op")
 	}
 
-	_, err := backup.Import(ctx, pool, bytes.NewReader(corrupt))
+	_, err := backup.Import(ctx, pool, bytes.NewReader(corrupt), appID)
 	if err == nil {
 		t.Fatal("expected import to fail on corrupted dump")
 	}
 	if !strings.Contains(err.Error(), "checksum") && !strings.Contains(err.Error(), "malformed") {
 		t.Fatalf("expected checksum error, got: %v", err)
 	}
+}
+
+// TestImportRejectsCrossAppDump pins the tenant boundary on restore: a dump
+// whose header carries app B's id must be refused when imported through an
+// authenticated session for app A, with zero rows written for B.
+func TestImportRejectsCrossAppDump(t *testing.T) {
+	ctx := context.Background()
+	pool, appA, cleanup := env(t)
+	defer cleanup()
+
+	seedTodoApp(t, ctx, pool, appA, 2)
+	dump, _ := exportApp(t, ctx, pool, appA, backup.ExportOptions{})
+
+	appB := newUUID()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := platform.CreateApp(ctx, tx, creatorID(t, ctx, pool), appB, "victim"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = backup.Import(ctx, pool, bytes.NewReader(dump), appB)
+	if !errors.Is(err, backup.ErrAppMismatch) {
+		t.Fatalf("expected ErrAppMismatch, got: %v", err)
+	}
+
+	var triples, attrs int
+	if err := pool.QueryRow(ctx,
+		`SELECT (SELECT count(*) FROM triples WHERE app_id=$1),
+		        (SELECT count(*) FROM attrs   WHERE app_id=$1)`, appB).Scan(&triples, &attrs); err != nil {
+		t.Fatal(err)
+	}
+	if triples != 0 || attrs != 0 {
+		t.Fatalf("cross-app restore wrote rows into the target app: triples=%d attrs=%d", triples, attrs)
+	}
+}
+
+// TestImportRejectsForeignAttr pins the attr-id tenant guard: attr ids are
+// public (clients receive them in init-ok), so a dump must never mutate an
+// attr row owned by a different app even when the header matches the route.
+func TestImportRejectsForeignAttr(t *testing.T) {
+	ctx := context.Background()
+	pool, appA, cleanup := env(t)
+	defer cleanup()
+
+	// App B owns an indexed attr whose id leaks publicly in normal operation.
+	appB := newUUID()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := platform.CreateApp(ctx, tx, creatorID(t, ctx, pool), appB, "other"); err != nil {
+		t.Fatal(err)
+	}
+	foreign, err := platform.GetOrCreateAttr(ctx, tx, appB, "secret", "body", "blob", "one", false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Hand-build a minimal valid dump FOR APP A that redefines B's attr with
+	// flipped flags (the mutation an attacker would attempt).
+	header := fmt.Sprintf(`{"kind":"header","format":%q,"version":1,"app_id":%q,"title":"x","creator_id":%q}`,
+		"instant-v2-backup", uuidStr(appA), uuidStr(appA))
+	attrLine := fmt.Sprintf(
+		`{"kind":"attr","id":%q,"etype":"secret","label":"body","reverse_etype":null,"reverse_label":null,`+
+			`"value_type":"blob","cardinality":"many","is_unique":true,"is_indexed":false,`+
+			`"forward_ident":%q,"reverse_ident":null,"checked_data_type":null,`+
+			`"checking_data_type":null,"deletion_marked_at":null}`,
+		uuidStr(foreign.ID), uuidStr(foreign.ForwardIdent))
+	hash := sha256.New()
+	hash.Write([]byte(header + "\n"))
+	hash.Write([]byte(attrLine + "\n"))
+	dump := []byte(header + "\n" + attrLine + "\n" +
+		fmt.Sprintf(`{"kind":"checksum","sha256":"%x","records":1}`, hash.Sum(nil)) + "\n")
+
+	_, err = backup.Import(ctx, pool, bytes.NewReader(dump), appA)
+	if err == nil || !strings.Contains(err.Error(), "different app") {
+		t.Fatalf("expected foreign-attr rejection, got: %v", err)
+	}
+
+	// App B's row must be untouched.
+	var indexed, unique bool
+	if err := pool.QueryRow(ctx,
+		`SELECT is_indexed, is_unique FROM attrs WHERE id=$1`, foreign.ID).Scan(&indexed, &unique); err != nil {
+		t.Fatal(err)
+	}
+	if indexed != true || unique != false {
+		t.Fatalf("foreign attr was mutated: indexed=%v unique=%v", indexed, unique)
+	}
+}
+
+func creatorID(t *testing.T, ctx context.Context, pool *pgxpool.Pool) [16]byte {
+	t.Helper()
+	var id [16]byte
+	if err := pool.QueryRow(ctx, `SELECT id FROM instant_users LIMIT 1`).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	return id
 }
 
 // TestV1DumpImport hand-crafts a v1-shaped export zip (config.json first,
@@ -443,7 +550,7 @@ func TestExportResumeOffset(t *testing.T) {
 	// Import of the partial dump fails cleanly (triples reference missing
 	// attrs) but its checksum still validates ordering-wise; assert the
 	// failure is about unknown attrs, not checksum.
-	_, err := backup.Import(ctx, pool, bytes.NewReader(partial))
+	_, err := backup.Import(ctx, pool, bytes.NewReader(partial), appID)
 	if err == nil || !strings.Contains(err.Error(), "unknown attrs") {
 		t.Fatalf("expected unknown-attr error for partial dump, got: %v", err)
 	}
@@ -459,7 +566,7 @@ func TestExportResumeOffset(t *testing.T) {
 		t.Fatalf("tail counts unexpected: %+v", tailCounts)
 	}
 	pool2 = remigrateSchema(t, ctx, pool2)
-	if _, err := backup.Import(ctx, pool2, bytes.NewReader(tail)); err != nil {
+	if _, err := backup.Import(ctx, pool2, bytes.NewReader(tail), appID2); err != nil {
 		t.Fatalf("tail-only import failed: %v", err)
 	}
 }

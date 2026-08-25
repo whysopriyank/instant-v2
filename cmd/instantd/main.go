@@ -24,6 +24,7 @@ import (
 	"github.com/instant-v2/instant-v2/internal/instaql"
 	"github.com/instant-v2/instant-v2/internal/metrics"
 	"github.com/instant-v2/instant-v2/internal/platform"
+	"github.com/instant-v2/instant-v2/internal/ratelimit"
 	"github.com/instant-v2/instant-v2/internal/reactive"
 	"github.com/instant-v2/instant-v2/internal/runtimeapi"
 	"github.com/instant-v2/instant-v2/internal/storage"
@@ -35,6 +36,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
+	"strings"
 	"syscall"
 )
 
@@ -77,8 +79,12 @@ func run(logger *slog.Logger) error {
 	}
 
 	mux := http.NewServeMux()
+
+	// Shared per-app traffic budgets (docs/03 §9): the HTTP middleware and
+	// the WS/SSE frame gates draw from one token-bucket set.
+	limiter := ratelimit.New(ratelimit.Config{})
 	if db == nil {
-		mux.HandleFunc("GET /health", health(nil, nil, cfg))
+		mux.HandleFunc("GET /health", health(nil, nil))
 	}
 
 	var (
@@ -111,6 +117,7 @@ func run(logger *slog.Logger) error {
 		} else if writeCfg.MaxConns < 32 {
 			writeCfg.MaxConns = 32 // reactive refreshes + transacts share the writer budget
 		}
+		storage.ApplyStatementLimits(writeCfg, cfg.PGStatementTimeout, cfg.PGLockTimeout, cfg.PGIdleTxTimeout)
 		writePool, err := pgxpool.NewWithConfig(ctx, writeCfg)
 		if err != nil {
 			return err
@@ -130,6 +137,7 @@ func run(logger *slog.Logger) error {
 		} else if readCfg.MaxConns < 32 {
 			readCfg.MaxConns = 32
 		}
+		storage.ApplyStatementLimits(readCfg, cfg.PGStatementTimeout, cfg.PGLockTimeout, cfg.PGIdleTxTimeout)
 		readPool, err := pgxpool.NewWithConfig(ctx, readCfg)
 		if err != nil {
 			return err
@@ -141,6 +149,7 @@ func run(logger *slog.Logger) error {
 		st := storage.New(pool)
 		cats := platform.NewCatalogCache(pool, pool)
 		store = reactive.NewStore()
+		store.MaxSubsPerApp = cfg.MaxSubsPerApp
 		ex := &instaql.Executor{DB: readPool} // hot read plane (docs/09 §T2.3)
 		notifier = &reactive.Notifier{
 			Store:   store,
@@ -255,12 +264,16 @@ func run(logger *slog.Logger) error {
 			Catalogs: cats,
 			Logger:   logger,
 		}
+		// Shared per-app traffic budgets (docs/03 §9): HTTP middleware and the
+		// WS/SSE frame gates draw from one token-bucket set.
 		mgr := syncpkg.NewManager(syncpkg.Deps{
 			DB:              st,
 			Catalogs:        cats,
 			Store:           store,
 			Rooms:           syncpkg.NewRoomHub(),
 			Auth:            authSvc,
+			Rules:           cats.RuleDocFor,
+			Limiter:         limiterAdapter{limiter},
 			OnCommit:        invalidate, // set below once notifier + bus exist
 			OnCommitChanges: invalidateChanges,
 			// Overload gate (docs/09 §T2.1): shed transacts when the
@@ -272,6 +285,7 @@ func run(logger *slog.Logger) error {
 			Manager:     mgr,
 			Store:       store,
 			Compression: cfg.WSCompression,
+			MaxConns:    cfg.MaxWSConns,
 			Refresh: func(ctx context.Context, sub *reactive.Subscription) (json.RawMessage, error) {
 				q, err := instaql.Coerce(rawToMap(sub.Query))
 				if err != nil {
@@ -285,7 +299,12 @@ func run(logger *slog.Logger) error {
 				if err != nil {
 					return nil, err
 				}
-				res, err := ex.Run(ctx, q, cat, appID)
+				runner := ex
+				if gate, ok := sub.AttachCtx.(*syncpkg.QueryGate); ok && gate != nil {
+					// Reproduce the visibility the group was admitted under.
+					runner = &instaql.Executor{DB: readPool, Rules: gate.Rules, Admin: gate.Admin}
+				}
+				res, err := runner.Run(ctx, q, cat, appID)
 				if err != nil {
 					return nil, err
 				}
@@ -293,9 +312,10 @@ func run(logger *slog.Logger) error {
 			},
 		}
 		sseH := &syncpkg.SSEHandler{
-			Manager: mgr,
-			Store:   store,
-			Refresh: refreshFor(ex, cats),
+			Manager:  mgr,
+			Store:    store,
+			Refresh:  refreshFor(ex, cats),
+			MaxConns: cfg.MaxSSEConns,
 		}
 		sseH.AdminAuth = func(ctx context.Context, appID, token string) bool {
 			ok, err := cats.CheckAdminToken(ctx, appID, token)
@@ -336,15 +356,17 @@ func run(logger *slog.Logger) error {
 			},
 		})
 
-		storeSecret := []byte(os.Getenv("INSTANT_V2_STORAGE_SECRET"))
-		if len(storeSecret) == 0 {
-			storeSecret = []byte(cfg.DatabaseURL) // deterministic dev fallback
+		storeSecret := []byte(cfg.StorageSecret)
+		if len(storeSecret) == 0 && cfg.InsecureDevMode {
+			storeSecret = []byte(cfg.DatabaseURL) // deterministic dev fallback (insecure; dev only)
 		}
 		mux.Handle("/storage/", &storageapi.Handler{
-			Store:    storageapi.NewDiskBackend(os.TempDir()+"/instantv2-files", storeSecret),
-			Secret:   storeSecret,
-			Triples:  st,
-			Catalogs: cats,
+			Store:           storageapi.NewDiskBackend(os.TempDir()+"/instantv2-files", storeSecret),
+			Secret:          storeSecret,
+			Triples:         st,
+			Catalogs:        cats,
+			AdminTokenCheck: cats.CheckAdminToken,
+			MaxUploadBytes:  cfg.MaxUploadBytes,
 		})
 
 		// Backup/restore surface (docs/07 §backup). Every route re-checks
@@ -357,8 +379,8 @@ func run(logger *slog.Logger) error {
 		})
 
 		gate := gateFor(notifier, cfg.MaxQueueDepth)
-		mux.Handle("POST /runtime/transact", transactHandler(st, cats, invalidate, invalidateChanges, gate))
-		mux.HandleFunc("GET /health", health(db, notifier, cfg))
+		mux.Handle("POST /runtime/transact", transactHandler(st, cats, invalidate, invalidateChanges, gate, logger))
+		mux.HandleFunc("GET /health", health(db, notifier))
 
 		// Scrape-time gauges over live state (no polling goroutines).
 		metrics.RegisterGauge("instant_notifier_queue_depth",
@@ -384,8 +406,9 @@ func run(logger *slog.Logger) error {
 
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           mux,
+		Handler:           assembleMiddleware(mux, cfg, logger, limiter),
 		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()
@@ -429,10 +452,108 @@ func run(logger *slog.Logger) error {
 	}
 }
 
+// limiterAdapter adapts the ratelimit token buckets to the sync package's
+// structural interface (string classes keep sync decoupled from ratelimit).
+type limiterAdapter struct{ l *ratelimit.Limiter }
+
+func (a limiterAdapter) Allow(appID string, class string) (bool, time.Duration) {
+	return a.l.Allow(appID, ratelimit.Class(class))
+}
+
+// classifyRoute maps a request to its (rate-limit key, class). Admin and
+// backup planes are already token-authenticated and skip limiting; runtime
+// routes are keyed by app id when present, else by client IP.
+func classifyRoute(r *http.Request) (string, ratelimit.Class) {
+	path := r.URL.Path
+	switch {
+	case strings.HasPrefix(path, "/runtime/auth/"):
+		return routeKey(r), ratelimit.ClassAuth
+	case path == "/runtime/transact":
+		return routeKey(r), ratelimit.ClassTransact
+	case strings.HasPrefix(path, "/storage/"):
+		return routeKey(r), ratelimit.ClassStorage
+	case strings.HasPrefix(path, "/runtime/"):
+		return routeKey(r), ratelimit.ClassWS
+	default:
+		return "", "" // admin/backup/health: token-gated or inert
+	}
+}
+
+func routeKey(r *http.Request) string {
+	for _, k := range []string{"app-id", "X-app-id"} {
+		if v := r.Header.Get(k); v != "" {
+			return v
+		}
+	}
+	q := r.URL.Query()
+	if v := q.Get("app-id"); v != "" {
+		return v
+	}
+	if v := q.Get("app_id"); v != "" {
+		return v
+	}
+	host := r.RemoteAddr
+	if i := strings.LastIndex(host, ":"); i > 0 {
+		host = host[:i]
+	}
+	return "ip:" + host
+}
+
+// bodyLimitFor picks the request-body ceiling for a route. Streaming routes
+// (uploads, restores) get their own generous caps; everything else is small.
+func bodyLimitFor(path string, cfg config.Config, method string) int64 {
+	const (
+		mib = 1 << 20
+		kib = 1 << 10
+	)
+	switch {
+	case strings.HasPrefix(path, "/backup/") && method == http.MethodPost:
+		return cfg.MaxBackupBytes
+	case strings.HasPrefix(path, "/storage/upload/") && method == http.MethodPut:
+		return cfg.MaxUploadBytes + (1 << 20) // headroom for query metadata
+	case path == "/runtime/transact" || path == "/admin/transact":
+		return 64 << 20 // tx batches ride the WS read limit
+	case strings.HasPrefix(path, "/admin/query"):
+		return 16 << 20
+	case path == "/runtime/sse" && method == http.MethodPost:
+		return 4 << 20
+	case path == "/storage/signed-upload-url":
+		return 64 * kib
+	default:
+		return 1 << 20
+	}
+}
+
+// assembleMiddleware layers request-body ceilings and per-app rate limiting
+// over the route mux. Order: body limit first so oversized bodies are cut
+// before any handler reads them; then rate limiting.
+func assembleMiddleware(next http.Handler, cfg config.Config, logger *slog.Logger, limiter *ratelimit.Limiter) http.Handler {
+	limited := ratelimit.HTTPMiddleware(next, limiter, func(r *http.Request) (string, ratelimit.Class) {
+		return classifyRoute(r)
+	})
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		limit := bodyLimitFor(r.URL.Path, cfg, r.Method)
+		if limit > 0 && r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
+		}
+		limited.ServeHTTP(w, r)
+	})
+}
+
+// writeJSONError emits a safely-encoded {"error": ...} body. Never build
+// error JSON by string concatenation — messages contain client input and
+// provider strings that must not break the envelope.
+func writeJSONError(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+// transactHandler runs one runtime transaction batch.
 func transactHandler(st *storage.DB, cats *platform.CatalogCache,
 	invalidate func(ctx context.Context, appID string, attrIDs []string, txID int64),
 	invalidateChanges func(ctx context.Context, appID string, changes []reactive.Change, txID int64),
-	gate func(appID string) error) http.HandlerFunc {
+	gate func(appID string) error, logger *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := otel.GetTextMapPropagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header))
 		ctx, span := tracing.Tracer.Start(ctx, "transact.runtime")
@@ -462,7 +583,7 @@ func transactHandler(st *storage.DB, cats *platform.CatalogCache,
 		}
 		parsed, err := transact.ParseSteps(req.Steps)
 		if err != nil {
-			http.Error(w, `{"error":"`+err.Error()+`"}`, 400)
+			writeJSONError(w, 400, err.Error())
 			return
 		}
 		cat, err := cats.For(r.Context(), req.AppID)
@@ -475,11 +596,18 @@ func transactHandler(st *storage.DB, cats *platform.CatalogCache,
 			http.Error(w, `{"error":"bad app id"}`, 400)
 			return
 		}
+		doc, derr := cats.RuleDocFor(r.Context(), req.AppID)
+		if derr != nil {
+			// Fail closed: an unloadable rule doc must never widen access.
+			logger.Error("transact: rules load failed", "app", req.AppID, "err", derr)
+			writeJSONError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
 		started := time.Now()
-		res, err := transact.Transact(ctx, st, cat, appID, parsed, transact.Options{}, nil)
+		res, err := transact.Transact(ctx, st, cat, appID, parsed, transact.Options{}, doc)
 		metrics.TransactDuration.WithLabelValues("runtime").Observe(time.Since(started).Seconds())
 		if err != nil {
-			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusForbidden)
+			writeJSONError(w, http.StatusForbidden, err.Error())
 			return
 		}
 		if res.AttrsChanged {
@@ -555,7 +683,13 @@ func refreshFor(ex *instaql.Executor, cats *platform.CatalogCache) func(ctx cont
 		if err != nil {
 			return nil, err
 		}
-		res, err := ex.Run(ctx, q, cat, appID)
+		runner := ex
+		if gate, ok := sub.AttachCtx.(*syncpkg.QueryGate); ok && gate != nil {
+			// Reproduce the visibility the group was admitted under: closed
+			// view rules render empty; dynamic ones were rejected pre-attach.
+			runner = &instaql.Executor{DB: ex.DB, Rules: gate.Rules, Admin: gate.Admin}
+		}
+		res, err := runner.Run(ctx, q, cat, appID)
 		if err != nil {
 			return nil, err
 		}
@@ -572,7 +706,7 @@ func rawToMap(raw json.RawMessage) map[string]any {
 // health reports liveness plus the overload gauges operators (and LBs) need:
 // notifier queue depth and, when shedding is enabled, its configured ceiling
 // (docs/09-tier2-architecture.md §T2.1).
-func health(db *sql.DB, n *reactive.Notifier, cfg config.Config) http.HandlerFunc {
+func health(db *sql.DB, n *reactive.Notifier) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if db == nil {
@@ -586,13 +720,12 @@ func health(db *sql.DB, n *reactive.Notifier, cfg config.Config) http.HandlerFun
 			return
 		}
 		w.WriteHeader(http.StatusOK)
+		// Deliberately minimal: operational internals (node id, queue depth,
+		// bus mode) live on the loopback metrics listener, not a public
+		// endpoint. Load balancers only need liveness + db reachability.
 		body := map[string]any{
-			"ok":          true,
-			"db":          true,
-			"node":        cfg.NodeName(),
-			"queue-depth": 0,
-			"queue-max":   cfg.MaxQueueDepth,
-			"bus":         cfg.InvalidationBus,
+			"ok": true,
+			"db": true,
 		}
 		if n != nil {
 			body["queue-depth"] = n.QueueDepth()

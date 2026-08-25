@@ -7,6 +7,26 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    services:
+      # Live-PG suites skip silently when DATABASE_URL is unset — providing
+      # the service here keeps them honest (docs/10 §skeptical review).
+      # Packages reset the shared public schema at test start, so the test
+      # step MUST run sequentially (-p 1).
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: instant
+          POSTGRES_PASSWORD: instant
+          POSTGRES_DB: instant_v2_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U instant"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+        # wal_level=logical lets internal/waltail exercise real slots.
+        cmd: ["postgres", "-c", "wal_level=logical"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -18,5 +38,7 @@ jobs:
         uses: golangci/golangci-lint-action@v6
         with:
           version: latest
-      - name: Test
-        run: go test ./... -race -count=1
+      - name: Test (live PG, sequential packages)
+        env:
+          DATABASE_URL: postgres://instant:instant@localhost:5432/instant_v2_test?sslmode=disable
+        run: go test ./... -race -count=1 -short -p 1

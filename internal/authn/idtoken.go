@@ -46,21 +46,23 @@ type jwksCache struct {
 	fetch time.Time
 }
 
-func (c *jwksCache) get(ctx context.Context, url string, force bool) ([]jwksKey, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if !force && c.keys != nil && time.Since(c.fetch) < time.Hour {
-		return c.keys, nil
-	}
+// jwksHTTPClient bounds JWKS discovery so a slow issuer cannot stall sign-in
+// requests indefinitely.
+var jwksHTTPClient = &http.Client{Timeout: 10 * time.Second}
+
+func fetchJWKS(ctx context.Context, url string) ([]jwksKey, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := jwksHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("authn: jwks fetch status %d", resp.StatusCode)
+	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, err
@@ -103,9 +105,38 @@ func (c *jwksCache) get(ctx context.Context, url string, force bool) ([]jwksKey,
 		}
 		out = append(out, jk)
 	}
-	c.keys = out
-	c.fetch = time.Now()
 	return out, nil
+}
+
+// get returns cached keys or refreshes them. The network call happens OUTSIDE
+// the mutex (double-check) so a slow issuer blocks one refresh, not every
+// concurrent verification.
+func (c *jwksCache) get(ctx context.Context, url string, force bool) ([]jwksKey, error) {
+	c.mu.Lock()
+	if !force && c.keys != nil && time.Since(c.fetch) < time.Hour {
+		keys := c.keys
+		c.mu.Unlock()
+		return keys, nil
+	}
+	c.mu.Unlock()
+
+	keys, err := fetchJWKS(ctx, url)
+	if err != nil && !force && c.keys != nil {
+		// Serve stale keys on transient refresh failures; only a cold cache
+		// propagates the error (verification fails closed without keys).
+		c.mu.Lock()
+		stale := c.keys
+		c.mu.Unlock()
+		return stale, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	c.keys = keys
+	c.fetch = time.Now()
+	c.mu.Unlock()
+	return keys, nil
 }
 
 // b64 segments use padded-or-raw tolerance; providers vary.
@@ -117,8 +148,15 @@ func b64(s string) ([]byte, error) {
 }
 
 // VerifyIDToken validates a third-party OIDC id_token against the issuer's
-// JWKS and returns its claims. Checks signature, kid, exp, iss, aud.
+// JWKS and returns its claims. Signature + kid + exp + iss + aud are ALL
+// mandatory: a JWKS fetch failure fails closed (there is no unsigned
+// acceptance path), exp must be present and live (60s leeway), the issuer is
+// compared against the configured provider issuer, and the audience must
+// contain the provider client id (string or array form).
 func (s *Service) VerifyIDToken(ctx context.Context, p *ResolvedProvider, idToken, nonce string) (map[string]any, error) {
+	if p.Issuer == "" || p.ClientID == "" {
+		return nil, errors.New("authn: provider lacks issuer/client-id; refusing unverifiable tokens")
+	}
 	parts := strings.Split(idToken, ".")
 	if len(parts) != 3 {
 		return nil, errors.New("authn: malformed id_token")
@@ -141,55 +179,46 @@ func (s *Service) VerifyIDToken(ctx context.Context, p *ResolvedProvider, idToke
 	}
 
 	keys, kerr := s.jwks.get(ctx, p.JWKSURL, false)
-	if kerr == nil && len(keys) > 0 {
-		var match *jwksKey
-		for i := range keys {
-			if keys[i].KID == header.KID {
-				match = &keys[i]
-				break
-			}
-		}
-		if match == nil {
-			// Unknown kid → refresh once (rotation).
-			keys, kerr = s.jwks.get(ctx, p.JWKSURL, true)
-			if kerr == nil {
-				for i := range keys {
-					if keys[i].KID == header.KID {
-						match = &keys[i]
-						break
-					}
-				}
-			}
-		}
-		if match == nil {
-			return nil, errors.New("authn: no JWKS key for kid")
-		}
-		sig, serr := b64(parts[2])
-		if serr != nil {
-			return nil, serr
-		}
-		signingInput := idToken[:len(parts[0])+1+len(parts[1])]
-		digest := sha256.Sum256([]byte(signingInput))
-		ok := false
-		switch {
-		case header.Alg == "RS256" && match.RSA != nil:
-			err = rsa.VerifyPKCS1v15(match.RSA, crypto.SHA256, digest[:], sig)
-			ok = err == nil
-		case header.Alg == "ES256" && match.EC != nil:
-			if len(sig) == 64 {
-				r := new(big.Int).SetBytes(sig[:32])
-				sv := new(big.Int).SetBytes(sig[32:])
-				ok = ecdsa.Verify(match.EC, digest[:], r, sv)
-			}
-		}
-		if !ok {
-			if err != nil {
-				return nil, fmt.Errorf("authn: signature: %w", err)
-			}
-			return nil, errors.New("authn: signature verification failed")
-		}
-	} else if !p.TrustUnsignedFallback {
+	if kerr != nil && header.KID != "" {
+		// Unknown-kid / cold-cache rotation retry.
+		keys, kerr = s.jwks.get(ctx, p.JWKSURL, true)
+	}
+	if kerr != nil {
 		return nil, fmt.Errorf("authn: jwks fetch: %w", kerr)
+	}
+	var match *jwksKey
+	for i := range keys {
+		if keys[i].KID == header.KID {
+			match = &keys[i]
+			break
+		}
+	}
+	if match == nil {
+		return nil, errors.New("authn: no JWKS key for kid")
+	}
+	sig, serr := b64(parts[2])
+	if serr != nil {
+		return nil, serr
+	}
+	signingInput := idToken[:len(parts[0])+1+len(parts[1])]
+	digest := sha256.Sum256([]byte(signingInput))
+	ok := false
+	switch {
+	case header.Alg == "RS256" && match.RSA != nil:
+		err = rsa.VerifyPKCS1v15(match.RSA, crypto.SHA256, digest[:], sig)
+		ok = err == nil
+	case header.Alg == "ES256" && match.EC != nil:
+		if len(sig) == 64 {
+			r := new(big.Int).SetBytes(sig[:32])
+			sv := new(big.Int).SetBytes(sig[32:])
+			ok = ecdsa.Verify(match.EC, digest[:], r, sv)
+		}
+	}
+	if !ok {
+		if err != nil {
+			return nil, fmt.Errorf("authn: signature: %w", err)
+		}
+		return nil, errors.New("authn: signature verification failed")
 	}
 
 	payloadRaw, err := b64(parts[1])
@@ -200,15 +229,26 @@ func (s *Service) VerifyIDToken(ctx context.Context, p *ResolvedProvider, idToke
 	if err := json.Unmarshal(payloadRaw, &claims); err != nil {
 		return nil, err
 	}
-	if exp, ok := claims["exp"].(float64); ok && time.Now().After(time.Unix(int64(exp), 0)) {
+
+	// exp: REQUIRED.
+	exp, ok := claims["exp"].(float64)
+	if !ok {
+		return nil, errors.New("authn: id_token missing exp")
+	}
+	if time.Now().Add(-60 * time.Second).After(time.Unix(int64(exp), 0)) {
 		return nil, errors.New("authn: id_token expired")
 	}
-	if iss, ok := claims["iss"].(string); ok && p.Issuer != "" && iss != p.Issuer {
-		return nil, fmt.Errorf("authn: issuer mismatch %q", iss)
+
+	// iss: REQUIRED and must equal the configured provider issuer.
+	if iss, _ := claims["iss"].(string); iss == "" || iss != p.Issuer {
+		return nil, fmt.Errorf("authn: issuer mismatch %q", claims["iss"])
 	}
-	if aud, ok := claims["aud"].(string); ok && p.ClientID != "" && aud != p.ClientID {
+
+	// aud: REQUIRED; string or array form must contain the client id.
+	if !audContains(claims["aud"], p.ClientID) {
 		return nil, errors.New("authn: audience mismatch")
 	}
+
 	if nonce != "" {
 		got, _ := claims["nonce"].(string)
 		// v1 quirks preserved: Google omits nonce, Apple sends sha256(nonce).
@@ -222,6 +262,25 @@ func (s *Service) VerifyIDToken(ctx context.Context, p *ResolvedProvider, idToke
 		}
 	}
 	return claims, nil
+}
+
+// audContains reports whether the aud claim (string, [string], or mixed
+// JSON array) contains want. Non-string entries are ignored per OIDC core
+// §3.1.3.7 (aud arrays may carry authorized-party values).
+func audContains(aud any, want string) bool {
+	switch v := aud.(type) {
+	case string:
+		return v == want
+	case []any:
+		for _, el := range v {
+			if s, ok := el.(string); ok && s == want {
+				return true
+			}
+		}
+		return false
+	default:
+		return false
+	}
 }
 
 // IDTokenSignIn ports oauth-id-token-callback: verify the third-party token,

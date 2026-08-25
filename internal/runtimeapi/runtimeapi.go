@@ -17,6 +17,7 @@ package runtimeapi
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -186,8 +187,9 @@ func (h *Handler) signout(w http.ResponseWriter, r *http.Request) {
 //
 // The optional refresh-token resolves the caller like v1's
 // get-by-refresh-token (non-bang): an unknown token degrades to anonymous —
-// it never fails the request. Rule-scoped filtering lands with perms wiring;
-// today the executor runs the query unfiltered.
+// it never fails the request. The app's view rules gate execution: closed
+// etypes return empty results; dynamic rules are refused until rule-where
+// pushdown exists (fail-closed — never serve unfiltered).
 func (h *Handler) frameworkQuery(w http.ResponseWriter, r *http.Request) {
 	m := readBody(r)
 	query, _ := m["query"].(map[string]any)
@@ -204,9 +206,26 @@ func (h *Handler) frameworkQuery(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"message": "missing or invalid app-id"})
 		return
 	}
+	var authUser map[string]any
 	if tok := str(m, "refresh-token"); tok != "" {
 		// Anonymous-on-failure mirrors v1's non-bang get-by-refresh-token.
-		_, _ = h.Auth.VerifyRefreshToken(r.Context(), appID, tok)
+		if user, verr := h.Auth.VerifyRefreshToken(r.Context(), appID, tok); verr == nil && user != nil {
+			authUser = map[string]any{"id": user.ID}
+			if user.Email != "" {
+				authUser["email"] = user.Email
+			}
+			if user.Type != "" {
+				authUser["type"] = user.Type
+			}
+			for k, v := range user.Extra {
+				authUser[k] = v
+			}
+		}
+	}
+	doc, derr := h.Catalogs.RuleDocFor(r.Context(), platform.UUIDToStr(appID))
+	if derr != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"message": "internal error"})
+		return
 	}
 	cat, err := h.Catalogs.For(r.Context(), platform.UUIDToStr(appID))
 	if err != nil {
@@ -218,9 +237,14 @@ func (h *Handler) frameworkQuery(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"message": err.Error()})
 		return
 	}
-	ex := &instaql.Executor{DB: h.Pool}
+	ex := &instaql.Executor{DB: h.Pool, Rules: doc, Auth: authUser}
 	res, err := ex.Run(r.Context(), q, cat, appID)
 	if err != nil {
+		var unsupported *instaql.ErrRuleFilterUnsupported
+		if errors.As(err, &unsupported) {
+			writeJSON(w, http.StatusForbidden, map[string]any{"message": err.Error()})
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"message": err.Error()})
 		return
 	}
@@ -229,7 +253,9 @@ func (h *Handler) frameworkQuery(w http.ResponseWriter, r *http.Request) {
 
 // openIDConfiguration ports openid-configuration-get (routes.clj L718-724):
 // {"authorization_endpoint": "<origin>/runtime/<app>/oauth/start",
-//  "token_endpoint":         "<origin>/runtime/<app>/oauth/token"}.
+//
+//	"token_endpoint":         "<origin>/runtime/<app>/oauth/token"}.
+//
 // Origin comes from the Host header over http (self-hosted/local installs);
 // appID may arrive in the path (:app_id) or, for the alias route, the
 // app-id header / app_id query parameter.
@@ -245,7 +271,19 @@ func (h *Handler) openIDConfiguration(w http.ResponseWriter, r *http.Request, ap
 		writeJSON(w, http.StatusBadRequest, map[string]any{"message": "missing or invalid app-id"})
 		return
 	}
-	origin := "http://" + r.Host
+	// Sanitize the reflected host: only scheme-less authority material with
+	// sane characters may ride into discovery URLs (defends naive proxies
+	// against Host-header poisoning of OAuth endpoint discovery).
+	host := r.Host
+	if _, ok := platform.OriginOf("http://" + host); !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"message": "invalid Host header"})
+		return
+	}
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	origin := scheme + "://" + host
 	writeJSON(w, http.StatusOK, map[string]any{
 		"authorization_endpoint": origin + "/runtime/" + appStr + "/oauth/start",
 		"token_endpoint":         origin + "/runtime/" + appStr + "/oauth/token",

@@ -41,19 +41,36 @@ func newServer(t *testing.T) (*httptest.Server, string) {
 	return srv, platform.UUIDToStr(newUUIDStr())
 }
 
+// testAdminToken is accepted by the stub AdminTokenCheck wired into every
+// test handler.
+const testAdminToken = "0f0e0d0c-0b0a-4938-8271-665544332211"
+
 func newHandler(t *testing.T) *Handler {
 	t.Helper()
 	secret := make([]byte, 32)
 	if _, err := rand.Read(secret); err != nil {
 		t.Fatal(err)
 	}
-	return &Handler{Store: NewDiskBackend(t.TempDir(), secret), Secret: secret}
+	return &Handler{
+		Store:           NewDiskBackend(t.TempDir(), secret),
+		Secret:          secret,
+		AdminTokenCheck: func(_ context.Context, _, tok string) (bool, error) { return tok == testAdminToken, nil },
+	}
 }
 
 func postJSON(t *testing.T, srv *httptest.Server, path string, body map[string]any) (int, map[string]any) {
 	t.Helper()
 	b, _ := json.Marshal(body)
-	resp, err := http.Post(srv.URL+path, "application/json", bytes.NewReader(b))
+	// Control routes (presigning included) require admin credentials since
+	// TestStorageAdminGate pinned the gate; tests exercise round-trip
+	// mechanics with the valid test token.
+	req, err := http.NewRequest(http.MethodPost, srv.URL+path, bytes.NewReader(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-admin-token", testAdminToken)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +108,13 @@ func presignUpload(t *testing.T, srv *httptest.Server, appID, filename string) (
 
 func downloadURLFor(t *testing.T, srv *httptest.Server, appID, id string) string {
 	t.Helper()
-	resp, err := http.Get(srv.URL + "/storage/signed-download-url?app-id=" + url.QueryEscape(appID) + "&id=" + id)
+	req, err := http.NewRequest(http.MethodGet,
+		srv.URL+"/storage/signed-download-url?app-id="+url.QueryEscape(appID)+"&id="+id, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-admin-token", testAdminToken)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,11 +259,18 @@ func putBody(t *testing.T, urlStr string, body []byte) (int, map[string]any) {
 }
 
 func deleteJSON(t *testing.T, srv *httptest.Server, path string, body map[string]any) (int, map[string]any) {
+	return deleteJSONAuthed(t, srv, path, body, "")
+}
+
+func deleteJSONAuthed(t *testing.T, srv *httptest.Server, path string, body map[string]any, token string) (int, map[string]any) {
 	t.Helper()
 	b, _ := json.Marshal(body)
 	req, err := http.NewRequest(http.MethodDelete, srv.URL+path, bytes.NewReader(b))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if token != "" {
+		req.Header.Set("X-admin-token", token)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -253,6 +283,103 @@ func deleteJSON(t *testing.T, srv *httptest.Server, path string, body map[string
 	return resp.StatusCode, out
 }
 
+// TestStorageAdminGate pins the destructive-route authorization: without a
+// configured checker the admin routes answer 503 (fail-closed); with one,
+// bad tokens are 401 and the valid token passes. Uploads stay runtime-open.
+func TestStorageAdminGate(t *testing.T) {
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		t.Fatal(err)
+	}
+	appID := platform.UUIDToStr(newUUIDStr())
+
+	// No checker wired → 503 on delete + download-url.
+	bare := &Handler{Store: NewDiskBackend(t.TempDir(), secret), Secret: secret}
+	srvBare := httptest.NewServer(bare)
+	t.Cleanup(srvBare.Close)
+	status, _ := deleteJSONAuthed(t, srvBare, "/storage/files", map[string]any{"app-id": appID, "ids": []string{uuidStrOf(newUUIDStr())}}, testAdminToken)
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf("delete without checker must 503, got %d", status)
+	}
+	dlReq, _ := http.NewRequest(http.MethodGet,
+		srvBare.URL+"/storage/signed-download-url?app-id="+appID+"&id="+uuidStrOf(newUUIDStr()), nil)
+	dlResp, err := http.DefaultClient.Do(dlReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = dlResp.Body.Close()
+	if dlResp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("download-url without checker must 503, got %d", dlResp.StatusCode)
+	}
+
+	// With a checker: bad token 401, good token 200.
+	h := newHandler(t)
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+
+	status, _ = deleteJSONAuthed(t, srv, "/storage/files",
+		map[string]any{"app-id": appID, "ids": []string{uuidStrOf(newUUIDStr())}}, "wrong-token")
+	if status != http.StatusUnauthorized {
+		t.Fatalf("bad admin token must 401, got %d", status)
+	}
+	status, _ = deleteJSONAuthed(t, srv, "/storage/files",
+		map[string]any{"app-id": appID, "ids": []string{uuidStrOf(newUUIDStr())}}, testAdminToken)
+	if status != 200 {
+		t.Fatalf("valid admin token must pass, got %d", status)
+	}
+
+	// signed-upload-url mints write access into the app's $files namespace —
+	// it is a control route and must be gated identically. Bare handler
+	// (no checker) → 503; bad token → 401; valid token → 200.
+	upBody := map[string]any{"app-id": appID, "path": "docs/readme.txt"}
+	postStatus := func(h *Handler, token string) int {
+		s := httptest.NewServer(h)
+		t.Cleanup(s.Close)
+		b, _ := json.Marshal(upBody)
+		req, err := http.NewRequest(http.MethodPost, s.URL+"/storage/signed-upload-url", bytes.NewReader(b))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("app-id", appID)
+		if token != "" {
+			req.Header.Set("X-admin-token", token)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+	if got := postStatus(bare, ""); got != http.StatusServiceUnavailable {
+		t.Fatalf("upload-url without checker must 503, got %d", got)
+	}
+	if got := postStatus(newHandler(t), "wrong-token"); got != http.StatusUnauthorized {
+		t.Fatalf("upload-url with bad admin token must 401, got %d", got)
+	}
+	if got := postStatus(newHandler(t), testAdminToken); got != 200 {
+		t.Fatalf("upload-url with valid admin token must pass, got %d", got)
+	}
+}
+
+func uuidStrOf(u [16]byte) string { return platform.UUIDToStr(u) }
+
+// TestUploadSizeCap proves MaxUploadBytes truncates oversized uploads with
+// 413 instead of streaming unbounded bytes to disk.
+func TestUploadSizeCap(t *testing.T) {
+	h := newHandler(t)
+	h.MaxUploadBytes = 8
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	appID := platform.UUIDToStr(newUUIDStr())
+
+	uploadURL, _, _ := presignUpload(t, srv, appID, "big.bin")
+	mustStatus(t, doReq(t, http.MethodPut, uploadURL, []byte("0123456789ABCDEF")), http.StatusRequestEntityTooLarge)
+	// Under the cap still succeeds.
+	mustStatus(t, doReq(t, http.MethodPut, uploadURL, []byte("tiny")), 200)
+}
+
 // TestDeleteFiles proves the bulk delete route removes objects such that a
 // subsequent signed download is a 404, plus the single-file variant.
 func TestDeleteFiles(t *testing.T) {
@@ -263,8 +390,8 @@ func TestDeleteFiles(t *testing.T) {
 	mustStatus(t, doReq(t, http.MethodPut, url1, []byte("aaa")), 200)
 	mustStatus(t, doReq(t, http.MethodPut, url2, []byte("bbb")), 200)
 
-	// Bulk delete by ids.
-	status, del := deleteJSON(t, srv, "/storage/files", map[string]any{"app-id": appID, "ids": []string{id1, id2}})
+	// Bulk delete by ids (admin-gated).
+	status, del := deleteJSONAuthed(t, srv, "/storage/files", map[string]any{"app-id": appID, "ids": []string{id1, id2}}, testAdminToken)
 	if status != 200 {
 		t.Fatalf("bulk delete: %d %v", status, del)
 	}
@@ -283,10 +410,11 @@ func TestDeleteFiles(t *testing.T) {
 		mustStatus(t, doReq(t, http.MethodGet, dlURL, nil), http.StatusNotFound)
 	}
 
-	// Single delete variant still works.
+	// Single delete variant still works (admin-gated).
 	url3, id3, _ := presignUpload(t, srv, appID, "c.txt")
 	mustStatus(t, doReq(t, http.MethodPut, url3, []byte("ccc")), 200)
 	req, _ := http.NewRequest(http.MethodDelete, srv.URL+"/storage/files?id="+id3+"&app-id="+url.QueryEscape(appID), nil)
+	req.Header.Set("X-admin-token", testAdminToken)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -339,7 +467,8 @@ func dbEnv(t *testing.T) (*httptest.Server, *Handler, *pgxpool.Pool, [16]byte) {
 	if _, err := rand.Read(secret); err != nil {
 		t.Fatal(err)
 	}
-	h := &Handler{Store: NewDiskBackend(t.TempDir(), secret), Secret: secret, Triples: st, Catalogs: cats}
+	h := &Handler{Store: NewDiskBackend(t.TempDir(), secret), Secret: secret, Triples: st, Catalogs: cats,
+		AdminTokenCheck: func(_ context.Context, _, tok string) (bool, error) { return tok == testAdminToken, nil }}
 	srv := httptest.NewServer(h)
 	t.Cleanup(func() { srv.Close(); pool.Close(); _ = sqldb.Close() })
 	return srv, h, pool, appUUID
@@ -348,6 +477,34 @@ func dbEnv(t *testing.T) (*httptest.Server, *Handler, *pgxpool.Pool, [16]byte) {
 // TestFilesTriples proves a completed upload links $files entity triples
 // exactly as v1's app-file-model/create! does (path, id, size, content-type,
 // location-id, key-version).
+// TestDuplicateFilename409 pins the M11 fix: a second upload reusing a
+// $files.path that already exists must answer 409 Conflict, not leak a raw
+// Postgres unique-violation as 500.
+func TestDuplicateFilename409(t *testing.T) {
+	srv, _, _, appUUID := dbEnv(t)
+	appID := platform.UUIDToStr(appUUID)
+
+	uploadURL1, _, _ := presignUpload(t, srv, appID, "dup.txt")
+	req1, _ := http.NewRequest(http.MethodPut, uploadURL1+"&filename=dup.txt", bytes.NewReader([]byte("first")))
+	resp1, err := http.DefaultClient.Do(req1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustStatus(t, resp1, 200)
+
+	uploadURL2, _, _ := presignUpload(t, srv, appID, "other.bin")
+	req2, _ := http.NewRequest(http.MethodPut, uploadURL2+"&filename=dup.txt", bytes.NewReader([]byte("second")))
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp2.Body.Close() }()
+	b, _ := io.ReadAll(resp2.Body)
+	if resp2.StatusCode != http.StatusConflict {
+		t.Fatalf("duplicate filename must be 409, got %d (%s)", resp2.StatusCode, b)
+	}
+}
+
 func TestFilesTriples(t *testing.T) {
 	srv, h, pool, appUUID := dbEnv(t)
 	appID := platform.UUIDToStr(appUUID)

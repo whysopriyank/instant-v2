@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"time"
 )
 
 // Config is the full runtime configuration for instantd.
@@ -42,6 +43,26 @@ type Config struct {
 	// disables the listener entirely. Loopback default so a bare
 	// `instantd` is observable without widening the network surface.
 	MetricsAddr string // INSTANT_V2_METRICS_ADDR, default "127.0.0.1:9465"
+
+	// Storage presigning secret (HMAC over op|app-id|id|exp). REQUIRED:
+	// startup fails without it unless INSTANT_V2_INSECURE_DEV_SECRETS=1,
+	// which restores the legacy DATABASE_URL-derived dev fallback.
+	StorageSecret   string // INSTANT_V2_STORAGE_SECRET
+	InsecureDevMode bool   // INSTANT_V2_INSECURE_DEV_SECRETS
+
+	// Resource bounds. Zero values below fall back to the documented defaults.
+	MaxSubsPerApp  int   // INSTANT_V2_MAX_SUBS_PER_APP, default 2000
+	MaxWSConns     int   // INSTANT_V2_MAX_WS_CONNS, default 20000
+	MaxSSEConns    int   // INSTANT_V2_MAX_SSE_CONNS, default 10000
+	MaxUploadBytes int64 // INSTANT_V2_MAX_UPLOAD_BYTES, default 512MiB
+	MaxBackupBytes int64 // INSTANT_V2_MAX_BACKUP_BYTES, default 32GiB
+
+	// Postgres per-connection ceilings applied to both pools via
+	// RuntimeParams. Zero disables that ceiling. Migrations are exempt
+	// (separate connection).
+	PGStatementTimeout time.Duration // INSTANT_V2_PG_STATEMENT_TIMEOUT, default 30s
+	PGLockTimeout      time.Duration // INSTANT_V2_PG_LOCK_TIMEOUT, default 5s
+	PGIdleTxTimeout    time.Duration // INSTANT_V2_PG_IDLE_TX_TIMEOUT, default 30s
 }
 
 func (c Config) String() string {
@@ -102,8 +123,92 @@ func Load() (Config, error) {
 	if cfg.HTTPAddr == "" {
 		return cfg, errors.New("INSTANT_V2_HTTP_ADDR must not be empty")
 	}
+
+	cfg.StorageSecret = os.Getenv("INSTANT_V2_STORAGE_SECRET")
+	switch os.Getenv("INSTANT_V2_INSECURE_DEV_SECRETS") {
+	case "", "0", "false":
+	default:
+		cfg.InsecureDevMode = true
+	}
+	if cfg.StorageSecret == "" && !cfg.InsecureDevMode {
+		return cfg, errors.New("INSTANT_V2_STORAGE_SECRET is required (set INSTANT_V2_INSECURE_DEV_SECRETS=1 only for local development)")
+	}
+	if cfg.MaxSubsPerApp, err = envInt("INSTANT_V2_MAX_SUBS_PER_APP", 2000); err != nil {
+		return cfg, err
+	}
+	if cfg.MaxWSConns, err = envInt("INSTANT_V2_MAX_WS_CONNS", 20000); err != nil {
+		return cfg, err
+	}
+	if cfg.MaxSSEConns, err = envInt("INSTANT_V2_MAX_SSE_CONNS", 10000); err != nil {
+		return cfg, err
+	}
+	if cfg.MaxUploadBytes, err = envInt64Default("INSTANT_V2_MAX_UPLOAD_BYTES", 512<<20); err != nil {
+		return cfg, err
+	}
+	if cfg.MaxBackupBytes, err = envInt64Default("INSTANT_V2_MAX_BACKUP_BYTES", 32<<30); err != nil {
+		return cfg, err
+	}
+	// Postgres statement/lock/idle-in-tx ceilings (docs/10 §verification):
+	// one pathological query must not pin a pool connection forever. "0"
+	// disables a ceiling explicitly; unset takes the default. Migrations run
+	// on their own database/sql connection and are never bounded by these.
+	if cfg.PGStatementTimeout, err = envDuration("INSTANT_V2_PG_STATEMENT_TIMEOUT", 30*time.Second); err != nil {
+		return cfg, err
+	}
+	if cfg.PGLockTimeout, err = envDuration("INSTANT_V2_PG_LOCK_TIMEOUT", 5*time.Second); err != nil {
+		return cfg, err
+	}
+	if cfg.PGIdleTxTimeout, err = envDuration("INSTANT_V2_PG_IDLE_TX_TIMEOUT", 30*time.Second); err != nil {
+		return cfg, err
+	}
 	return cfg, nil
 }
+
+func envInt(key string, def int) (int, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		return 0, fmt.Errorf("%s %q: want positive integer", key, v)
+	}
+	return n, nil
+}
+
+// envDuration parses a Go duration ("30s", "1m") or "0" (explicit disable).
+// Empty takes the default. Negative values are rejected.
+func envDuration(key string, def time.Duration) (time.Duration, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return def, nil
+	}
+	if v == "0" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 0 {
+		return 0, fmt.Errorf("%s %q: want duration (e.g. 30s) or 0", key, v)
+	}
+	return d, nil
+}
+
+func envInt64Default(key string, def int64) (int64, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return def, nil
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n < 1 {
+		return 0, fmt.Errorf("%s %q: want positive integer", key, v)
+	}
+	return n, nil
+}
+
+// StorageSecretIsSet reports whether an explicit presigning secret was
+// configured. The insecure dev fallback (DATABASE_URL-derived) does NOT
+// count — operators must see the difference in diagnostics.
+func (c Config) StorageSecretIsSet() bool { return c.StorageSecret != "" }
 
 // NodeName resolves the node id used in logs and health output.
 func (c Config) NodeName() string {
