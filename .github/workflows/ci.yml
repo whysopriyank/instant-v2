@@ -7,6 +7,21 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: instant
+          POSTGRES_PASSWORD: instant
+          POSTGRES_DB: instant_v2_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U instant"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+        cmd: ["postgres", "-c", "wal_level=logical"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
