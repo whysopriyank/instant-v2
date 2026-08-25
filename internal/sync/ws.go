@@ -83,6 +83,46 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		sess    *Session
 		writeMu sync.Mutex
 	)
+	// Session teardown must happen on EVERY exit path once a session exists
+	// (send failures after add-query attached groups, close-session,
+	// enrichment errors), not only on read errors — leaked memberships keep
+	// subscriptions refreshing, presence ghosts alive, and app-cap slots
+	// consumed forever. The deferred hook below is idempotent-safe: DetachAll
+	// and LeaveAll are no-ops on empty state.
+	defer func() {
+		if sess != nil {
+			h.Manager.DetachAll(sess)
+			h.Manager.Deps.Rooms.LeaveAll(sess)
+		}
+	}()
+
+	// Keepalive: half-open TCP connections (laptop sleep, NAT drop, SIGKILLed
+	// client) never surface as Read errors, so sessions would otherwise
+	// linger as ghosts until process restart. Ping periodically; a failed
+	// ping cancels the read context, which surfaces as a Read error and runs
+	// the normal teardown path.
+	pingCtx, cancelPing := context.WithCancel(ctx)
+	defer cancelPing()
+	readCtx, cancelRead := context.WithCancel(ctx)
+	defer cancelRead()
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-pingCtx.Done():
+				return
+			case <-ticker.C:
+				writeMu.Lock()
+				err := conn.Ping(pingCtx)
+				writeMu.Unlock()
+				if err != nil {
+					cancelRead()
+					return
+				}
+			}
+		}
+	}()
 	send := func(f Frame) error {
 		b, err := f.Encode()
 		if err != nil {
@@ -97,13 +137,9 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for {
-		_, data, err := conn.Read(ctx)
+		_, data, err := conn.Read(readCtx)
 		if err != nil {
-			// Tear down this session's group memberships and rooms.
-			if sess != nil {
-				h.Manager.DetachAll(sess)
-				h.Manager.Deps.Rooms.LeaveAll(sess)
-			}
+			// Teardown (memberships + rooms) runs via the deferred hook.
 			return
 		}
 		f, err := ParseFrame(data)
