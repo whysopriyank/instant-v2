@@ -182,37 +182,38 @@ func run(logger *slog.Logger) error {
 			defer pubConn.Release()
 			publisher = &pgPublisher{pg: pubConn.Conn()}
 
-			listenConn, lerr := dedicatedConn(ctx, writePool)
-			if lerr != nil {
-				return fmt.Errorf("bus listener conn: %w", lerr)
-			}
-			defer listenConn.Release()
-			go func() {
-				err := bus.RunWithLogger(ctx, listenConn.Conn(), func(inv bus.Invalidation) {
-					// APPLY ONLY — never republish. Routing received
-					// events through the invalidate closures would echo
-					// every event back onto the bus from every node: an
-					// infinite amplify loop that starves the listeners
-					// (observed live as pgx "conn busy" storms).
-					// Entity-annotated events let peers splice too
-					// (docs/09 §T2.5); degraded payloads carry attr ids
-					// only and take the topic-wide path.
-					if len(inv.Changes) > 0 {
-						changes := make([]reactive.Change, 0, len(inv.Changes))
-						for _, c := range inv.Changes {
-							changes = append(changes, reactive.Change{
-								Etype: c.Etype, EntityID: c.EntityID, AttrIDs: c.AttrIDs,
-							})
-						}
-						notifier.NotifyChanges(ctx, inv.AppID, changes, inv.TxID)
-						return
-					}
-					notifier.Notify(ctx, inv.AppID, inv.AttrIDs, inv.TxID)
-				}, logger)
-				if err != nil && ctx.Err() == nil {
-					logger.Error("invalidation bus stopped", "err", err)
+			// Supervised listener: a Postgres restart must not end
+			// cross-node invalidation for the process lifetime. The
+			// supervisor re-acquires a dedicated conn and re-LISTENs with
+			// bounded backoff; each attempt owns its conn's release.
+			acquireListener := func(cctx context.Context) (bus.Conn, func(), error) {
+				c, cerr := dedicatedConn(cctx, writePool)
+				if cerr != nil {
+					return nil, nil, cerr
 				}
-			}()
+				return c.Conn(), c.Release, nil
+			}
+			go bus.RunSupervised(ctx, acquireListener, func(inv bus.Invalidation) {
+				// APPLY ONLY — never republish. Routing received
+				// events through the invalidate closures would echo
+				// every event back onto the bus from every node: an
+				// infinite amplify loop that starves the listeners
+				// (observed live as pgx "conn busy" storms).
+				// Entity-annotated events let peers splice too
+				// (docs/09 §T2.5); degraded payloads carry attr ids
+				// only and take the topic-wide path.
+				if len(inv.Changes) > 0 {
+					changes := make([]reactive.Change, 0, len(inv.Changes))
+					for _, c := range inv.Changes {
+						changes = append(changes, reactive.Change{
+							Etype: c.Etype, EntityID: c.EntityID, AttrIDs: c.AttrIDs,
+						})
+					}
+					notifier.NotifyChanges(ctx, inv.AppID, changes, inv.TxID)
+					return
+				}
+				notifier.Notify(ctx, inv.AppID, inv.AttrIDs, inv.TxID)
+			}, logger)
 			logger.Info("invalidation bus enabled", "channel", bus.Channel, "node", cfg.NodeName())
 		}
 		invalidate = func(ctx context.Context, appID string, attrIDs []string, txID int64) {

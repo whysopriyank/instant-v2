@@ -24,6 +24,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"time"
 
 	"github.com/instant-v2/instant-v2/internal/metrics"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -71,6 +72,58 @@ type Publisher interface {
 type Conn interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 	WaitForNotification(ctx context.Context) (*pgconn.Notification, error)
+}
+
+// Reconnect backoff bounds for RunSupervised.
+const (
+	reconnectInitial = time.Second
+	reconnectMax     = 30 * time.Second
+	// A connection that stayed up this long is considered stable; the next
+	// loss restarts from the initial backoff instead of the cap.
+	stableConnFor = time.Minute
+)
+
+// AcquireConn produces one dedicated LISTEN connection per attempt plus a
+// release func the supervisor calls when that connection's run ends.
+type AcquireConn func(ctx context.Context) (Conn, func(), error)
+
+// RunSupervised keeps cross-node invalidation alive across transient Postgres
+// failures. RunWithLogger returns permanently on any WaitForNotification or
+// LISTEN error; without supervision, a single Postgres restart silently ends
+// bus delivery for the process lifetime (nodes stop learning about each
+// other's writes until restart). Cancellation remains via ctx: once ctx is
+// done, RunSupervised returns without retrying.
+func RunSupervised(ctx context.Context, acquire AcquireConn, onEvent func(Invalidation), logger *slog.Logger) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	backoff := reconnectInitial
+	for ctx.Err() == nil {
+		conn, release, err := acquire(ctx)
+		var ran time.Duration
+		if err == nil {
+			start := time.Now()
+			err = RunWithLogger(ctx, conn, onEvent, logger)
+			ran = time.Since(start)
+			release()
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		logger.Error("bus: listener lost; reconnecting", "err", err, "retry_in", backoff, "uptime", ran.Round(time.Second))
+		if ran > stableConnFor {
+			backoff = reconnectInitial
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+		if backoff > reconnectMax {
+			backoff = reconnectMax
+		}
+	}
 }
 
 // Encode marshals inv to JSON for NOTIFY. Postgres caps NOTIFY payloads at

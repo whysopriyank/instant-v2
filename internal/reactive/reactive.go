@@ -380,6 +380,15 @@ func (n *Notifier) refreshOne(ctx context.Context, log *slog.Logger, id string, 
 	result, err := n.refreshResult(ctx, id, sub)
 	if err != nil {
 		log.Error("reactive: refresh failed", "sub", id, "err", err)
+		// Re-arm the invalidation: this batch already left `pending`, so
+		// without re-enqueue a transient read-pool/query error would leave
+		// every subscriber of this sub stale until an unrelated commit
+		// happened to re-dirty it. Re-enqueue with the SAME txID — watermark
+		// dedupe makes it a no-op if a newer commit already won, and retries
+		// only fire when fresh commits wake the drain (no hot spin on a
+		// persistent failure). Change knowledge degrades to unknown (nil),
+		// which is correct: the retry takes the full-refresh path anyway.
+		n.enqueue(sub.AppID, []string{id}, txID, nil)
 		return
 	}
 

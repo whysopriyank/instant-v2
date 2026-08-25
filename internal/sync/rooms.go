@@ -128,19 +128,30 @@ func (h *RoomHub) SetPresence(ctx context.Context, sess *Session, f Frame) ([]Fr
 	roomID, _ := f.String("room-id")
 	k := key(sess.AppID, roomID)
 	h.mu.RLock()
-	mem := h.rooms[k][sess.ID]
+	cur := h.rooms[k][sess.ID]
 	h.mu.RUnlock()
-	if mem == nil {
+	if cur == nil {
 		return []Frame{ErrFrame(400, "not-in-room", "set-presence requires join-room first")}, nil
 	}
+	// Rebuild-and-swap under the write lock: mutating cur.data/cur.peer in
+	// place raced against roomDataJSON's RLock readers (torn map[string]any).
+	h.mu.Lock()
+	latest := h.rooms[k][sess.ID]
+	if latest == nil { // left the room concurrently
+		h.mu.Unlock()
+		return []Frame{ErrFrame(400, "not-in-room", "set-presence requires join-room first")}, nil
+	}
+	nm := *latest // preserve sessionID/userID/sess
 	if raw, ok := f["data"]; ok {
 		var d map[string]any
 		_ = json.Unmarshal(raw, &d)
-		mem.data = d
+		nm.data = d
 	}
 	if p := strOr(f, "peer-id", ""); p != "" {
-		mem.peer = p
+		nm.peer = p
 	}
+	h.rooms[k][sess.ID] = &nm
+	h.mu.Unlock()
 	go h.broadcastPresence(k)
 	return []Frame{roomField(f, "set-presence-ok", "room-id", roomID)}, nil
 }
