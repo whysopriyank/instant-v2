@@ -61,6 +61,27 @@ const enhancedRowsCTE = `
 		  JOIN attrs a ON a.id = i.attr_id AND a.deletion_marked_at IS NULL
 	)`
 
+// ErrUniqueViolation wraps Postgres 23505 raised by triple writes — e.g. a
+// second entity claiming the same value on an is_unique attr via the
+// av_ignore_nulls_index expression index. Callers surface it as a clean 4xx
+// ("unique constraint violated") instead of raw PG boilerplate; match with
+// errors.Is.
+var ErrUniqueViolation = errors.New("unique constraint violated")
+
+func wrapUnique(err error) error {
+	if err == nil {
+		return nil
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		// Chain the ORIGINAL error too: callers map violations by
+		// errors.As(*pgconn.PgError) (storageapi 409 path), which would
+		// break if only the sentinel were wrapped.
+		return fmt.Errorf("%w (%s) [%w]", ErrUniqueViolation, pgErr.ConstraintName, err)
+	}
+	return err
+}
+
 const insertCols = `app_id, entity_id, attr_id, value, value_md5,
 	ea, eav, av, ave, vae, checked_data_type`
 
@@ -133,7 +154,7 @@ ON CONFLICT (app_id, entity_id, attr_id) WHERE ea DO UPDATE ` + setClause
 
 	eaTag, err := tx.Exec(ctx, eaSQL, apps, ents, attrs, vals, idxs)
 	if err != nil {
-		return res, fmt.Errorf("ea upsert: %w", err)
+		return res, fmt.Errorf("ea upsert: %w", wrapUnique(err))
 	}
 	res.Upserted = eaTag.RowsAffected()
 
@@ -148,7 +169,7 @@ ON CONFLICT (app_id, entity_id, attr_id) WHERE ea DO UPDATE ` + setClause
 
 	remTag, err := tx.Exec(ctx, remSQL, apps, ents, attrs, vals, idxs)
 	if err != nil {
-		return res, fmt.Errorf("remaining insert: %w", err)
+		return res, fmt.Errorf("remaining insert: %w", wrapUnique(err))
 	}
 	res.Inserted = remTag.RowsAffected()
 	return res, nil

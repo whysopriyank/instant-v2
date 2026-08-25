@@ -474,3 +474,45 @@ func TestRecordTransactionMonotonic(t *testing.T) {
 }
 
 var _ = fmt.Sprintf // retained for fixture debugging
+
+// TestUniqueAttrViolationMapped pins the friendly unique-violation mapping:
+// a second entity claiming an is_unique attr's value trips
+// av_ignore_nulls_index (23505), which must surface as errors.Is
+// ErrUniqueViolation instead of raw pgconn error text.
+func TestUniqueAttrViolationMapped(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	appID, _, ids := seedCatalog(t, db)
+
+	slugID := rand16()
+	tx := mustTx(t, db, ctx)
+	sp := func(s string) *string { return &s }
+	if err := platform.CreateAttrWithID(ctx, tx, appID, platform.Attr{
+		ID: slugID, Etype: sp("post"), Label: sp("slug"), ValueType: "string",
+		Cardinality: "many", IsUnique: true, ForwardIdent: rand16(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	cat, err := platform.LoadAttrCatalog(ctx, db.Pool, appID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = ids
+
+	e1, e2 := rand16(), rand16()
+	if _, err := db.InsertTriples(ctx, appID, cat, []triple.Triple{
+		{E: e1, A: slugID, V: "taken"},
+	}, false); err != nil {
+		t.Fatalf("first claim: %v", err)
+	}
+
+	_, err = db.InsertTriples(ctx, appID, cat, []triple.Triple{
+		{E: e2, A: slugID, V: "taken"},
+	}, false)
+	if !errors.Is(err, ErrUniqueViolation) {
+		t.Fatalf("second claim err = %v, want ErrUniqueViolation", err)
+	}
+}

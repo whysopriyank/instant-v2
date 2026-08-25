@@ -89,7 +89,7 @@ func (d *DB) CopyTriples(ctx context.Context, appID [16]byte, cat *platform.Attr
 			ON CONFLICT (app_id, entity_id, attr_id) WHERE ea DO UPDATE
 			SET value = EXCLUDED.value, value_md5 = EXCLUDED.value_md5`, appID)
 		if err != nil {
-			return fmt.Errorf("ea insert: %w", err)
+			return fmt.Errorf("ea insert: %w", wrapUnique(err))
 		}
 		n = tag.RowsAffected()
 		tag2, err := tx.Exec(ctx, `
@@ -111,7 +111,7 @@ func (d *DB) CopyTriples(ctx context.Context, appID [16]byte, cat *platform.Attr
 			  FROM enhanced WHERE NOT ea
 			ON CONFLICT (app_id, entity_id, attr_id, value_md5) DO NOTHING`, appID)
 		if err != nil {
-			return fmt.Errorf("remaining insert: %w", err)
+			return fmt.Errorf("remaining insert: %w", wrapUnique(err))
 		}
 		n += tag2.RowsAffected()
 		return nil
