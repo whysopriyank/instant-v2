@@ -278,8 +278,20 @@ func run(logger *slog.Logger) error {
 			Logger:   logger,
 		}
 		// Keep auth_throttle bounded (audit follow-up): prune idle rows at
-		// boot and hourly; 24h covers lockout + resend horizons.
-		authSvc.PruneThrottle(ctx, 24*time.Hour)
+		// boot and hourly; 24h covers lockout + resend horizons. The same
+		// tick sweeps TTL-expired transient auth entities ($magicCodes /
+		// $oauthRedirects / $oauthCodes): their expiry otherwise applies
+		// lazily-at-consume only, letting anonymous send_magic_code traffic
+		// grow the triple store forever (2026-08-27 follow-up audit MED-1).
+		maintenance := func() {
+			authSvc.PruneThrottle(ctx, 24*time.Hour)
+			if n, err := authSvc.SweepExpiredAuthEntities(ctx); err != nil {
+				logger.Warn("expired auth artifact sweep failed", "err", err)
+			} else if n > 0 {
+				logger.Info("expired auth artifacts swept", "triples", n)
+			}
+		}
+		maintenance()
 		go func() {
 			t := time.NewTicker(time.Hour)
 			defer t.Stop()
@@ -288,7 +300,7 @@ func run(logger *slog.Logger) error {
 				case <-ctx.Done():
 					return
 				case <-t.C:
-					authSvc.PruneThrottle(ctx, 24*time.Hour)
+					maintenance()
 				}
 			}
 		}()
@@ -462,6 +474,7 @@ func run(logger *slog.Logger) error {
 			Addr:              cfg.MetricsAddr,
 			Handler:           metrics.Handler(),
 			ReadHeaderTimeout: 5 * time.Second,
+			IdleTimeout:       120 * time.Second, // bounded keep-alives; docs/11 §LOW claims this knob
 		}
 		go func() {
 			if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

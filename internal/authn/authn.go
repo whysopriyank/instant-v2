@@ -96,7 +96,7 @@ type Service struct {
 	DB       *storage.DB
 	Pool     *pgxpool.Pool
 	Catalogs *platform.CatalogCache
-	Mailer   Mailer // nil → codes logged only (dev/self-host default)
+	Mailer   Mailer // nil → NO delivery and no code logging; only a no-mailer notice fires (dev/self-host default)
 	Logger   *slog.Logger
 
 	// CodeTTL overrides DefaultMagicCodeTTL (tests); per-app override pending

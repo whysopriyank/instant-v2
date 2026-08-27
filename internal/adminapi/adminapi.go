@@ -658,8 +658,9 @@ func (m captureMailer) SendMagicCode(_ context.Context, _ string, code string) e
 // handleMagicCode ports magic-code-post and send-magic-code-post →
 // {"code": "..."} (identical envelopes in v1). DEVIATION: v1 send_magic_code
 // additionally emails through the configured provider; here delivery is the
-// Mailer hook's job (nil Mailer → code logged by authn), and we capture it
-// purely to preserve the response shape.
+// Mailer hook's job, and a nil Mailer means NO delivery anywhere — authn logs
+// only an app-id/email notice, never the code itself. The captureMailer below
+// recovers the generated code purely so the response envelope matches v1.
 func (h *Handler) handleMagicCode(w http.ResponseWriter, r *http.Request, a *authedReq) {
 	email := strField(a.body, "email")
 	if email == "" {

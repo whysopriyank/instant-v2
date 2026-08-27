@@ -4,6 +4,12 @@ on:
     branches: [main]
   pull_request:
 
+# Least privilege (2026-08-27 audit MED-2): jobs only checkout the repo, so
+# the token needs no scopes beyond read. Overriding here guards against
+# org/repo-level defaults granting more than intended.
+permissions:
+  contents: read
+
 # NOTE: service containers (`services:`) do not support arbitrary container
 # commands, and waltail needs `postgres -c wal_level=logical` for logical
 # slots. Postgres therefore runs via explicit `docker run` steps below —

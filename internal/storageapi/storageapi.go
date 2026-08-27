@@ -86,11 +86,13 @@ const (
 // links $files entity triples exactly as v1's app-file-model/create! does.
 //
 // Authorization model:
-//   - DELETE /storage/files and GET /storage/signed-download-url are
-//     ADMIN-ONLY: they require AdminTokenCheck against the app. A nil
-//     checker disables them entirely (fail-closed).
-//   - POST /storage/signed-upload-url + PUT /storage/upload/{id} remain
-//     runtime-open for client SDK compatibility, bounded by MaxUploadBytes.
+//   - POST /storage/signed-upload-url mints write access into an app's
+//     $files namespace, so it is ADMIN-ONLY like every control route
+//     (ServeHTTP gates it behind requireAdmin; fail-closed at 503 when no
+//     checker is wired).
+//   - PUT /storage/upload/{id} and GET /storage/files/{id} stay presign-
+//     gated: HMAC-SHA256 over op|app-id|id|exp minted by the routes above,
+//     bounded by MaxUploadBytes.
 type Handler struct {
 	Store    ObjectStore
 	Secret   []byte

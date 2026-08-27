@@ -8,11 +8,14 @@ package authn
 // app client — the full authorization-code dance with PKCE (S256/plain),
 // one-time $oauthCodes burn, http-only state cookie, and refresh-token minting.
 //
-// Deferred to Phase 6 hardening (documented deviation):
-//   - Apple client-secret JWT assertion minting
-//   - JWKS id_token verification path (POST /runtime/oauth/id_token)
-// Both require external crypto material unavailable offline; the userinfo
-// exchange covers every provider that exposes one (all supported ones do).
+// Former deviations, corrected as of the 2026-08-27 drift pass:
+//   - JWKS id_token verification (POST /runtime/oauth/id_token) IS implemented
+//     in idtoken.go: hand-rolled RS256/ES256 against provider JWKS, alg-pinned,
+//     sig-before-claims, mandatory iss/aud/exp/nonce handling.
+//   - Apple ES256 assertion signing material ships (AppleSigner/.p8 loading in
+//     idtoken.go), but end-to-end Apple token-exchange wiring remains deferred
+//     — resolveProvider has no Apple client_assertion plumbing yet; Google/
+//     GitHub/custom-OIDC run through the userinfo exchange today.
 
 import (
 	"context"

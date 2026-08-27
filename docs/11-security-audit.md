@@ -84,3 +84,41 @@ against the fixed behavior plus line-cited inspection. Full ring at close:
 `go vet ./...`, golangci-lint v2.13.1 (0 issues), `go test ./... -race
 -count=1 -short -p 1` — all packages green (waltail requires logical
 replication locally; enforced in CI).
+
+## Follow-up audit (2026-08-27)
+
+Independent re-audit of every remediation above plus surfaces outside the
+original three tracks (backup/restore zip pipeline, presign math, runtimeapi,
+rate-limiter internals, CI/release plumbing, workspace hygiene). Verdict: all
+remediated items re-verified in code at their call sites; tree green
+(`go vet ./...`, `golangci-lint run`, full `-short -race -p 1` suite under live PG).
+
+### Fixed this wave
+
+| ID | Severity | Finding | Fix |
+|----|----------|---------|-----|
+| F1 | MED | Transient auth artifacts never expired on disk: TTL enforcement existed only lazily-at-consume, so anonymous `POST /runtime/auth/send_magic_code` traffic (plus abandoned OAuth starts) grew the shared triple store indefinitely per public app-id | `authn.SweepExpiredAuthEntities` deletes dead `$magicCodes` / `$oauthRedirects` / `$oauthCodes` entities past (TTL + 1h grace) via whole-entity CTE deletes across all apps; wired at boot + hourly beside `PruneThrottle`; pinned by `TestSweepExpiredAuthEntities` (expired artifact removed, fresh artifact + `$users`/`$userRefreshTokens` survive) |
+| F2 | MED | `ci.yml` inherited default GITHUB_TOKEN scopes (no top-level `permissions:` block) | Workflow-wide `permissions: contents: read` |
+
+### Corrected drift (documentation/comment-only, zero behavior change)
+
+- `storageapi` package header described signed-upload-url minting as
+  runtime-open; the implementation has been admin-gated (`requireAdmin`)
+  all along — the comment understated the shipped control.
+- `oauth.go` header still listed the JWKS id_token path as "deferred";
+  `idtoken.go` implements it (RS256/ES256 pinned). Only Apple's
+  end-to-end token exchange remains unwired; its .p8 signing material ships.
+- `adminapi.handleMagicCode` claimed nil-Mailer codes are "logged by
+  authn" — verified false; the no-mailer branch logs app-id/email only.
+- The metrics server lacked the `IdleTimeout` this document claims was
+  landed in the previous LOW tranche; added (120s), making the claim true.
+
+### New residual / notes
+
+- Trusted-proxy rate-limit keying (behind an L7 proxy every caller shares
+  the proxy's IP bucket) is tracked as LOW until multi-node limiter work;
+  reading spoofable XFF headers today would be strictly worse than the
+  conservative collapse. No action taken.
+- Workspace hygiene: `.omo/` agent-session artifacts are gitignored as of
+  this wave (they previously sat untracked-but-unignored next to the
+  tracked tree).

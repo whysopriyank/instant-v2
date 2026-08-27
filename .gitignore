@@ -7,6 +7,9 @@ tmp/
 corpus/.tmp
 tools/corpusctl/corpusctl
 tools/schemagen/schemagen
-instantd
-chaos
+# Anchored: unqualified names also shadowed source dirs like cmd/instantd/.
+/instantd
+/chaos
 /tools/chaos/chaos
+.om/
+.omo/
