@@ -157,3 +157,29 @@ Interop note: provisioning a plain blob attr with reverse_etype/reverse_label
 set (as v2's `GetOrCreateAttr` parity shape does) makes v1 classify the value
 slot as a link and reject string writes — keep reverse columns NULL for blobs
 when seeding v1 databases.
+
+### Head-to-head smoke soak II (2026-08-25, v2 @ f23bb78, broader scope)
+
+Same methodology as above, two workload shapes, one paired run each side.
+New in this pass: `tools/soak` now reports write→refresh **delivery lag**
+(p50/p99/max) and fails on a p99 budget (`-max-p99-lag`). All runs PASSED;
+all 1,319 writes per run SQL-verified durable on both sides.
+
+| metric | Workload A: 300 sess · 8 tx/s · 3.5 min | Workload B: 1000 sess · 8 tx/s · 3.5 min |
+|---|---|---|
+| v2 refreshes / ideal            | **396,000 / 396,000 (100%)** | **1,320,000 / 1,320,000 (100%)** |
+| v1 refreshes / ideal            | 319,377 (80.6%)              | 428,732 (**32.5%**) |
+| v2 refresh rate                 | 2,400/s metronomic           | 8,000/s metronomic |
+| v1 refresh rate                 | ~1,700–1,800/s uneven        | ~2,850/s uneven |
+| v2 CPU under load / peak RSS    | 0.11 cores / 53 MB           | 0.31 cores / 100 MB |
+| v1 CPU under load / peak RSS    | 3.72 cores / 5.4 GB          | 4.33 cores / 5.8 GB |
+| v2 lag p50 / p99 / max          | 12 / 34 / 161 ms             | 26 / 71 / 84 ms |
+| v1 lag p50 / p99 / max          | 81 / 369 / 671 ms            | 190 / 1,108 / 1,713 ms |
+
+Findings: (1) The 18 commits b276627..f23bb78 (stability waves 2–4, perms
+enforcement, cross-node catalog invalidation, keepalives) cost nothing on the
+hot path — v2's delivery profile is byte-for-byte identical to the previous
+audit and latency is now measured, not inferred. (2) v1's effective delivery
+share *falls* as watcher count grows (80% → 32%) while its lag triples; v2
+holds 100% with p99 <100 ms at both scales. (3) Per-delivered-update CPU at
+the 1000-session scale: v2 ≈0.23 ms-core vs v1 ≈10.1 ms-core (~44×).
