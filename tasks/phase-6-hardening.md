@@ -5,6 +5,15 @@
 Everything in this phase is additive; the Phase 4 invariants stay green with every change.
 Each workstream may run independently — none shares a package with another.
 
+## Current status (2026-08-28)
+
+Partial. Delta refresh, backup/restore, rate limits, resource caps, chaos
+checks, security hardening, examples, and release tooling have landed in the
+current tree. Performance evidence includes named historical smoke/soak runs
+and microbenchmarks, but the comparative capacity gate is intentionally open:
+Wave 4 must first establish the benchmark contract and Wave 6 must execute a
+paired, reproducible v1/V2 measurement.
+
 ## 6A — Delta sync (largest user-visible win)
 
 - [x] Design additive feature flag `delta-refresh` (≥0.23.0; old SDKs fall back to full node-list envelopes) (negotiated like `patch-presence`/`batch-messages`; old SDKs fall back to full envelopes).
@@ -26,7 +35,7 @@ Each workstream may run independently — none shares a package with another.
 - [x] Connection + per-app rate-limit policy (`internal/ratelimit`, token buckets per app+class, 429+Retry-After) (Bucket4j-equivalent, local-first; interface stub from Phase 2 made concrete).
 - [x] Resource limits: per-app subscription cap (+429 close) and invalidator queue-depth gauge, WAL backpressure signal when invalidator queue depth grows.
 - [x] Chaos harness: PG bounce mid-stream (`tools/chaos`; 8/8 reconnect, LSN checkpoint resume, zero phantom reads, journal-exact final state) → sessions reconnect, LSN resumes without phantom reads; `replay --target v2` still diffs 0 post-chaos.
-- [x] Capacity target — MEASURED-V2-ONLY (comparative claim withdrawn): v2 numbers from Phase 4 soak stand (5000 sessions × 30 min, 13.4k tx @ 8/s sustained, 60k refreshes delivered, 0 drops; delta-refresh benchmark ~4285× wire savings on single-row mutation of 10k entities). No v1 baseline exists because no Java/Clojure environment was stood up; standing one up remains the only way to publish a v1-vs-v2 comparison.
+- [x] Capacity target — MEASURED-V2-ONLY (comparative claim withdrawn): v2 numbers from Phase 4 soak stand (5000 sessions × 30 min, 13.4k tx @ 8/s sustained, 60k refreshes delivered, 0 drops; delta-refresh benchmark ~4285× wire savings on single-row mutation of 10k entities). Later paired V1/V2 smoke runs are retained as historical observations, but their raw artifacts and methodology do not satisfy `docs/13-benchmark-contract.md`; Wave 6 remains the only path to a publishable comparison.
 - [x] Browser examples replay — vite-vanilla ported with self-host URI overrides; exact browser surface driven via frozen @instantdb/core 1.0.65 from the example's node_modules (subscribeQuery snapshot on enriched ack, transact add/toggle/delete, live push each mutation). Visual browser verification NOT performed (no working browser device in session); found+fixed app-status 'ok'→'active' conformance bug during replay.
 - [x] Corpus fixture regeneration — 00-smoke rewritten to real v1 shapes (init-ok auth/app-status:'active', enriched add-query-ok); canonicalizer normalizes volatile session-id; replay green; chaos corpus step green.
 - [x] S3 backup backend — ObjectStore interface + minio-go S3Store; /object export-download + restore-object routes; fake-S3 tests under -race.

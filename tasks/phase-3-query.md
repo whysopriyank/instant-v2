@@ -8,6 +8,13 @@ Agents `planner` and `instaql` run in parallel across the IR boundary. The first
 phase (main orchestrator) adds the `datalog.Pattern/Plan` types; after that, neither agent
 needs to renegotiate — they type-check.
 
+## Current status (2026-08-28)
+
+Partial. Datalog planning, InstaQL coercion/evaluation, pagination, indexing,
+and real-Postgres query tests exist. The broad v1 corpus gate, JS optimistic
+evaluation harness, and EXPLAIN coverage across every index family remain to
+be completed.
+
 ## 3A — `internal/datalog` (owner: `planner`)
 
 - [ ] `pattern.go` — `Specifier` (entity/attr/value) shapes; `IndexKind ∈ {ea,eav,av,ave,vae}`;

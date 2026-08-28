@@ -8,6 +8,17 @@ Three packages run in parallel on disjoint paths: `waltail` / `reactive` / `sync
 `authn` runs alongside on `internal/authn`. The main orchestrator owns the
 `cmd/instantd` wire-up that composes them (so agents don't contend on `main.go`).
 
+## Current status (2026-08-28)
+
+Partial. WS/SSE sessions, query groups, invalidation, delta/incremental
+refresh, room/presence fan-out, and optional peer invalidation are implemented.
+Magic-code/guest auth, injected-provider/direct id-token paths, JWKS, and Apple
+signer tests exist. The logical-decoding package and checkpoint behavior have
+live PG17 verification, but production assembly currently uses post-commit
+notify; full-session corpus replay, the 5k×30-minute release soak, stream
+subprotocols, builtin auth-code provider configuration/nonce handling, Apple
+end-to-end OAuth, and cross-node write ordering remain open.
+
 ## 4A — `internal/waltail` (owner: `waltail`)
 
 Replaces `jdbc/wal.clj` (959 LOC) + the 8 Java files at `server/src/java/instant/jdbc/`
@@ -75,11 +86,16 @@ Replaces `reactive/session.clj` (1,584 LOC op dispatcher) + `lib/ring/websocket`
 ## 4D — `internal/authn` (owner: `authn`, no shared files with 4A–4C)
 
 - [~] No user JWTs exist in v1 (scout finding): credentials are opaque bearer UUIDs.
-      Third-party id_token JWKS verify deferred to Phase 6.
+      Direct/injected-provider id_token JWKS verification is implemented and
+      tested; builtin auth-code provider configuration and nonce handling remain
+      deferred.
 - [x] `magiccode.go` — opaque hashed refresh-tokens looked up by InstaQL query on `$userRefreshTokens.hashedToken`
       (`model/app_user.clj:155-176`), magic-code email flows, guest sign-in.
-- [x] `oauth.go` — google/github/custom authorization-code + PKCE S256/plain, state cookie,
-      one-time codes. Deferred: Apple assertion minting, JWKS id_token path.
+- [~] `oauth.go` — authorization-code scaffolding and PKCE/state/one-time-code
+      helpers are present, with injected-provider test coverage. The main
+      assembly does not configure builtin Google/GitHub/custom provider token
+      or userinfo URLs; auth-code nonce generation/validation and Apple’s
+      end-to-end exchange remain deferred.
 - [x] `admin_token.go` (CatalogCache.CheckAdminToken) — `__admin-token` bypass (skips all permission checks on WS `init`).
 
 ## Phase 4 final assembly (main orchestrator; no sub-agent writes `cmd/instantd`)

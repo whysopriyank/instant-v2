@@ -14,13 +14,30 @@ match-all queries.
 Non-goals: wire-format changes visible to frozen SDKs; Postgres physical
 layout changes (partitioning stays behind an ADR — see T2.5).
 
+## Reconciled implementation status (2026-08-28)
+
+The Tier 2 mechanisms listed here are now present in the current checkout:
+
+| Item | Status | Evidence / boundary |
+|---|---|---|
+| T2.1 backpressure | Implemented | `Notifier.Gate`, transact/HTTP wiring, queue-depth health, and gate tests. |
+| T2.2 WebSocket compression | Implemented | Configurable compression modes and handshake tests; default remains disabled. |
+| T2.3 read/write pools | Implemented | `cmd/instantd` separates pools; defaults are 32 max per pool and 8 warm per pool, so one DSN can account for 64 max / 16 warm connections. |
+| T2.4 invalidation bus | Partial | `internal/bus` LISTEN/NOTIFY publisher, supervised listener, payload degradation, and raw bus tests exist; the two-Store end-to-end peer-refresh acceptance test is still missing. |
+| T2.5 incremental maintenance | Implemented for bounded scope | Top-level eligible queries splice known changes; uncertain/nested/paginated/aggregate cases fall back to full refresh; randomized and live-DB differential tests exist. |
+
+These are implementation statuses, not capacity claims. The optional bus
+replicates invalidations, not writes, ordering, rooms, or presence. Comparative performance
+figures elsewhere in this document are historical smoke/soak evidence and
+must be replaced or confirmed by the Wave 4 contract and Wave 6 paired run.
+
 ---
 
 ## T2.1 Backpressure enforcement
 
-### Problem
+### Problem (resolved in the current implementation)
 
-`Notifier.QueueDepth()` exists but nothing consumes it. One pathological
+Historically, `Notifier.QueueDepth()` existed but nothing consumed it. One pathological
 publisher (1000 tx/s into a 2000-member query) melts the drain loop before
 the per-class rate limiter notices — the limiter counts requests, not
 outstanding refresh work.
@@ -50,7 +67,7 @@ drain below low-water → gate reopens. Health JSON shows depth.
 
 ## T2.2 Wire compression
 
-### Problem
+### Problem (resolved in the current implementation)
 
 Refresh envelopes are large repeated-structure JSON (460 KB match-all shape).
 Per-frame gzip would help; WebSocket permessage-deflate with context takeover
@@ -75,7 +92,7 @@ negotiates it.
 
 ## T2.3 Read/write plane separation
 
-### Problem
+### Problem (resolved in the current implementation)
 
 Instaql reads and the transactor share one pool (`main.go`, MaxConns≥32).
 Soak evidence: snapshot queries queue behind invalidation-driven refreshes;
@@ -92,10 +109,12 @@ Two pgx pools in assembly:
 - **Read pool** (`INSTANT_V2_READ_URL`, defaulting to `DATABASE_URL`):
   instaql Executor refreshes — the hot read plane.
 
-Pool sizes: `INSTANT_V2_WRITE_POOL_MAXCONNS` / `INSTANT_V2_READ_POOL_MAXCONNS`
-(defaults 32/32; combined default matches today's 32-floor semantics when
-both point at one instance — operators raising both should size
-`max_connections` accordingly).
+Pool sizes: `INSTANT_V2_WRITE_POOL_MAXCONNS` /
+`INSTANT_V2_READ_POOL_MAXCONNS` default to 32 each. `INSTANT_V2_POOL_MINCONNS`
+defaults to 8 for each pool. With both URLs pointing at one Postgres, the
+defaults therefore permit up to 64 pooled connections and warm up to 16;
+operators must size `max_connections` for the combined total (plus migrations,
+LISTEN, and other clients).
 
 With `INSTANT_V2_READ_URL` unset this changes nothing except pool accounting;
 with a replica DSN it routes reads off the writer immediately.
@@ -112,7 +131,7 @@ Assembly test/config unit tests; soak unchanged with knobs defaulted.
 
 ## T2.4 Horizontal scale-out via invalidation bus
 
-### Problem
+### Problem (implementation present; acceptance incomplete)
 
 v2 is single-node by construction: post-commit notifier notifies *its own*
 store only. A second node serving the same app never hears about writes
@@ -125,15 +144,20 @@ That design assumes WAL-slot-based invalidation; v2's production path is the
 direct post-commit notifier (the tailer is not wired into main), and sessions
 are self-contained by deliberate design (02 §5.3). Given those facts:
 
-- **Correctness does not require ownership.** Per-app write serialization
-  already lives in Postgres (invariant 02 §5.1); any node may accept a write.
+- **Write correctness remains an explicit boundary.** Postgres allocates
+  transaction identities and enforces row constraints, but the current code
+  does not provide an app-specific distributed mutex or ordering protocol.
+  LISTEN/NOTIFY only propagates invalidation events; it cannot make arbitrary
+  node writes equivalent to serialized writes.
 - **Fanout scales symmetrically**: each node refreshes only its local
   subscriptions; cost per node is proportional to local members.
-- Lease fencing adds crash/fencing failure modes without removing Postgres as
-  the serializer.
+- A future app-level lock/lease may provide ordering, but needs fencing and
+  crash-recovery tests before it can be used as a correctness claim.
 
-So v1 of scale-out is a **symmetric invalidation bus**: every node carries
-every app; stickiness is an LB optimization, not a correctness requirement.
+So the current scale-out mechanism is a **symmetric invalidation bus**: every
+node may carry local subscriptions for every app, but the bus is only an event
+transport. Stickiness is useful operationally; it is not a correctness proof
+for cross-node writes.
 Lease-based shard ownership becomes interesting only if/when the WAL-tailer
 path replaces direct notify (it dedupes replay work across nodes); recorded
 as follow-up, not built now.
@@ -163,9 +187,11 @@ Config: `INSTANT_V2_INVALIDATION_BUS=none|postgres` (default none),
 
 ### Acceptance
 
-Integration test (skips without TEST_DATABASE_URL, same pattern as waltail):
-two Stores over one DB, commit on A → B's subscriber refreshes within bound;
-payload-truncation fallback covered by unit test.
+Raw payload and truncation behavior are covered by unit tests. The planned
+integration test (skips without TEST_DATABASE_URL, same pattern as waltail)
+would use two Stores over one DB and prove commit on A → B subscriber refresh;
+that two-Store peer-refresh acceptance test is not present yet. Even after it
+lands, it would prove event delivery, not cross-node write serialization.
 
 ---
 
@@ -226,7 +252,7 @@ groups fanout benchmark.
 | T2.1 | Backpressure gate + health gauge | ~1 d | Overload survival |
 | T2.2 | permessage-deflate knob | ~½ d | ~10× wire on big envelopes |
 | T2.3 | Read/write pools (+replica URL) | ~1 d | Writes isolated from read storms |
-| T2.4 | Invalidation bus (LISTEN/NOTIFY) | ~2–3 d | Linear session scale-out |
+| T2.4 | Invalidation bus (LISTEN/NOTIFY) | ~2–3 d | Cross-node invalidation propagation; write ordering remains open |
 | T2.5 | Incremental maintenance | 2–3 wk | O(change) refresh cost |
 
 ## T3 — Production readiness (landed this phase)

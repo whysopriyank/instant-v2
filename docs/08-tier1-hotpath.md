@@ -9,6 +9,21 @@ Non-goals: multi-node sharding (Tier 2), incremental result maintenance
 (Tier 2), wire-format changes visible to frozen SDKs (none of this changes any
 byte on the wire for existing clients).
 
+## Reconciled implementation status (2026-08-28)
+
+Tier 1 is substantially implemented, but this design document is not itself a
+benchmark result. Query-group dedupe, parallel notifier draining, the empty
+store short-circuit, checkpoint coalescing, queue gates, and incremental/delta
+refresh have focused tests in the current tree. The planned easyjson codegen
+workstream was not adopted. The live logical-decoding component is verified
+against an isolated PostgreSQL 17 cluster, while the production assembly uses
+post-commit notification (and optional LISTEN/NOTIFY for peers).
+
+The numeric baseline and target reductions below are retained as dated design
+inputs. They are not a hardened v1-versus-v2 claim: run order, warm-up,
+environment, raw artifacts, and convergence criteria must be pinned by Wave 4
+before Wave 6 publishes a comparison.
+
 ---
 
 ## T1.1 Query-group registry (subscription dedupe)
@@ -161,7 +176,10 @@ adopt if ≥20% end-to-end render improvement, else drop (no sunk cost).
 
 ## T1.4 Backpressure enforcement (wiring, new logic minimal)
 
-The queue-depth gauge exists (`Notifier.QueueDepth()`); nothing consumes it.
+The queue-depth gauge exists (`Notifier.QueueDepth()`), and the current
+assembly consumes it through the T2.1 transact gate and health endpoint.
+This section records the original Tier 1 design problem; its implementation
+landed with the Tier 2 backpressure work.
 
 - Expose depth on `/runtime` health output.
 - New knob `INSTANT_V2_MAX_QUEUE_DEPTH` (default: unlimited, preserving today's

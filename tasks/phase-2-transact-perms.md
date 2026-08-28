@@ -5,6 +5,14 @@
 
 Agents `transact` and `permissions` run in parallel on disjoint packages behind the Phase 0 schema.
 
+## Current status (2026-08-28)
+
+Partial. Tx-step validation, lookup/cascade handling, CEL checks, rate-limit
+hooks, admin bypass, and required-attribute persistence/validation are covered
+by focused tests. Rules persistence is present as a schema/table but is not
+yet wired through every transact plane, and broad v1 corpus verification is
+still open.
+
 ## 2A — `internal/transact` (owner: `transact`)
 
 - [ ] `txstep.go` — spec for every op: `add-triple`/`deep-merge-triple`/`retract-triple`,

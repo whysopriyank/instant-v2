@@ -30,6 +30,7 @@ Single-binary, self-host-first realtime backend providing:
 | [`docs/03-protocol.md`](docs/03-protocol.md) | Frozen wire protocol contract (WS ops, tx-steps, REST surface) |
 | [`docs/04-roadmap.md`](docs/04-roadmap.md) | Phased roadmap with milestones and acceptance criteria |
 | [`docs/05-conformance.md`](docs/05-conformance.md) | Cross-verification strategy against v1 (golden corpus, differential testing) |
+| [`docs/13-benchmark-contract.md`](docs/13-benchmark-contract.md) | Accepted Wave 4 benchmark contract for the Wave 5 harness and Wave 6 measurement |
 | [`docs/06-agent-orchestration.md`](docs/06-agent-orchestration.md) | Sub-agent architecture: ownership map, contracts, escalation gates |
 | [`tasks/`](tasks/) | Per-phase task backlogs consumed by agents |
 
@@ -47,6 +48,27 @@ Single-binary, self-host-first realtime backend providing:
 Performance thesis is **not** raw speed (the workload is Postgres-bound); it is memory density,
 sub-second cold start, single-binary deploy, and architectural wins (delta sync, no cluster mesh).
 
-## Status
+## Status (2026-08-28)
 
-Planning complete; implementation not started. Start at `docs/04-roadmap.md` Phase 0.
+Implementation is well beyond the planning stage. The current repository is a
+working, testable single-node service with optional Postgres LISTEN/NOTIFY
+invalidation for peers. The status below is deliberately conservative: a
+phase is only “complete” when its implementation and stated verification are
+present; missing corpus breadth or a hardened comparative benchmark keeps it
+partial.
+
+| Area | Status | Evidence / remaining boundary |
+|---|---|---|
+| Foundations, protocol schema, migrations | Partial | `internal/protocol`, embedded migrations, and corpus tooling exist; the checked-in corpus is still a small smoke/transact set, not the original ≥50-scenario gate. |
+| Storage, catalog, triple CRUD | Complete for the implemented surface | Real-Postgres storage tests, typed value encoding, catalog flags, batching, limits, and migrations are covered. |
+| Transactions and permissions | Partial | Tx-step, CEL, cascades, required attributes, and admin bypass are implemented and tested; rules persistence is not wired into every write plane. |
+| Query engine | Partial | InstaQL, pagination, indexes, local evaluation, and differential fixtures exist; broad v1 corpus and JS-harness coverage remain incomplete. |
+| Reactive sync / SSE / WAL | Partial | WS/SSE, query grouping, invalidation, delta fallback, incremental refresh, and live logical-decoding verification exist; the production assembly uses post-commit notification, while the WAL tailer remains an independently verified component. |
+| Platform APIs and backups | Partial | Admin/runtime/storage routes and v1/v2 backup import/export are implemented; HTTP corpus coverage and some platform parity scenarios remain open. |
+| Hardening | Partial | Rate limits, queue gates, resource caps, security fixes, chaos checks, and race validation are present; Wave 4 benchmark methodology and Wave 6 hardened v1 comparison are still pending. |
+
+Start with [`docs/04-roadmap.md`](docs/04-roadmap.md) for the reconciled
+roadmap and [`docs/05-conformance.md`](docs/05-conformance.md) for the actual
+corpus and verification limits. Performance numbers in the historical audit
+sections are evidence from named runs, not a current v1-versus-v2 claim until
+the Wave 4/5 harness and Wave 6 paired measurement are complete.

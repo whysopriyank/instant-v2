@@ -8,6 +8,26 @@ phase leaves working, corpus-tested code.
 Each phase lists: entry gate, owned packages (which sub-agents may touch those packages in
 parallel), key tasks, and the **exit gate** that blocks the next phase.
 
+## Reconciled status (2026-08-28)
+
+The original checklists remain the intended work breakdown. Their current
+state is summarized here so an unchecked item is not mistaken for an absent
+implementation, and a historical measurement is not mistaken for a release
+gate.
+
+| Phase | Status | Evidence and open boundary |
+|---|---|---|
+| 0 — foundations/corpus | Partial | Go module, schema, migrations, a WebSocket corpus replayer, and two checked-in scenarios exist; `record` is future work, and the planned ≥50-scenario live-v1 corpus gate is not complete. |
+| 1 — storage | Complete for implemented scope | Catalog, value codec, storage CRUD/COPY, journal, limits, and real-Postgres tests are present. |
+| 2 — transactor/perms | Partial | Tx-step validation, CEL checks, cascades, required attributes, and admin bypass are covered; rules persistence is not wired through every write plane. |
+| 3 — query | Partial | InstaQL, datalog plans, pagination, local evaluation, and index-oriented tests exist; broad v1/JS differential coverage remains open. |
+| 4 — reactive sync | Partial | WS/SSE, groups, incremental/delta refresh, direct post-commit invalidation, optional peer bus, and isolated pgoutput tests exist; full-session corpus, 5k×30-minute soak, production WAL-tail assembly, and cross-node write ordering are not all complete. |
+| 5 — platform | Partial | Admin/runtime/storage APIs, injected-provider/direct id-token tests, JWKS, backups, and S3-compatible routes exist; builtin auth-code provider configuration, nonce handling, HTTP corpus breadth, admin presence projection, and Apple end-to-end exchange remain open. |
+| 6 — hardening/release | Partial | Security, rate limits, queue gates, chaos, and race checks landed; the accepted Wave 4 contract (`docs/13-benchmark-contract.md`) still needs its Wave 5 harness implementation and paired v1/V2 Wave 6 measurement. |
+
+“Complete for implemented scope” means the code and focused tests cover the
+current contract; it does not waive the broader corpus or release gates below.
+
 ---
 
 ## Phase 0 — Foundations + golden corpus (must finish before any port)
@@ -33,10 +53,10 @@ exercises v1 and will exercise every later phase.
    envelopes. Commit the JSON Schema at `internal/protocol/schema/`.
 4. **`schemagen` codegen**: generate Go wire types + TS `.d.ts` from the schema.
    Both sides compile; schema is the single source through v6.
-5. **`corpusctl` recorder**: proxy that sits between the published `@instantdb/core` SDK
-   and a running v1 checkout (`/Users/priyank/Developer/sideproj/instant`), captures
-   every WS frame + HTTP call deterministically, plus seed fixtures that mirror
-   `server/test`. Output: `corpus/*.ndjson` with envelope checksums.
+5. **`corpusctl` recorder (planned)**: a future proxy between the published
+   `@instantdb/core` SDK and a running v1 checkout. The current `corpusctl`
+   only replays checked-in frames against an explicitly supplied WebSocket URL;
+   it does not capture WS/HTTP traffic or clone/boot v1.
 6. **Smoke fixture run**: spin v1's self-hosting `docker-compose.local.yml` against the
    corpus, prove deterministic replay without v2 yet.
 
@@ -47,7 +67,7 @@ exercises v1 and will exercise every later phase.
 [ ] schemagen output compiles (Go + d.ts) and is committed
 [ ] corpus/ contains ≥ 50 scenarios covering: auth flows, permissioned reads+transacts,
     pagination cursors, aggregates, $files, presence/rooms, storage signed URLs
-[ ] corpusctl replay against live v1 is byte-stable (canonicalized JSON diff == 0)
+[ ] a future live-v1 recorder/replay workflow is byte-stable (canonicalized JSON diff == 0)
 ```
 
 *No human review of protocol drift may pass after this gate without an ADR.*
@@ -175,9 +195,11 @@ a dual-impl harness (server and JS optimistic path must agree).
 ### Tasks
 
 1. **WAL tailer** (`waltail`): `pglogrepl` replication slot lifecycle, `pgoutput` record decode
-   (Relation/Insert/Update/Delete/Truncate), LSN acknowledgement (only after downstream
-   refresh acknowledged — invariant 02 §5.2), singleton + aggregator roles simplified to
-   one-consumer, checkpoint persistence.
+   (Relation/Insert/Update/Delete/Truncate), checkpoint persistence, and focused live-PG
+   verification. The current production assembly uses post-commit notification;
+   a tailer-driven client-ack path remains a future integration, so the
+   downstream-acknowledgement requirement is a design constraint, not a claim
+   about the current assembly.
 2. **Subscription store + invalidator** (`reactive`): per-app map of
    `subscription.id → {query, cachedResult, topics, lastTxId}`, topic index over attrs/etypes,
    novelty computation, coalesced refresh scheduling, `batch-messages` envelope when negotiated.
@@ -186,8 +208,11 @@ a dual-impl harness (server and JS optimistic path must agree).
    `client-event-id` correlation, pending-handler RPC bookkeeping, SSE transport mirroring WS
    semantics, presence/rooms fan-out (no Hazelcast pubsub — in-process fan-out + optional
    redis/nats interface stub).
-4. **Authn** (`authn`): JWT verify (JWKS), OIDC/GitHub OAuth flows, magic-code email,
-   hashed opaque refresh-token lifecycle, Apple client-secret minting.
+4. **Authn** (`authn`): direct JWT verify (JWKS), injected-provider test paths,
+   magic-code email, hashed opaque refresh-token lifecycle, and Apple signer
+   support. The main assembly does not configure builtin OIDC/GitHub/Google
+   auth-code exchanges; nonce handling and Apple end-to-end token exchange
+   remain deferred.
 
 ### Exit gate (the service is shippable here)
 
@@ -215,7 +240,7 @@ Post-exit: tag `v0.1.0-alpha`, publish self-host compose (derived from `self-hos
 
 ### Tasks
 
-1. **Admin API**: `POST /admin/{query,transact,query_perms_check,transact_perms_check,subscribe-query,sse}`,
+1. **Admin API**: `POST /admin/{query,transact,query_perms_check,transact_perms_check,subscribe-query}`,
    `/admin/users`, `/admin/schema`, `/admin/rooms/presence`, token auth.
 2. **Runtime REST**: `/runtime/{auth/*, framework/query, signout, oauth/*, openid-configuration}`,
    HTTP query path parity with WS query engine.
@@ -267,8 +292,8 @@ Post-exit: tag `v0.1.0-alpha`, publish self-host compose (derived from `self-hos
 
 Shipped after the Tier 1 hot-path wins (docs/08): backpressure gate (T2.1),
 permessage-deflate knob (T2.2), read/write pool split with optional replica
-DSN (T2.3), Postgres LISTEN/NOTIFY invalidation bus for symmetric multi-node
-operation (T2.4), and incremental result maintenance behind the Refresh seam
+DSN (T2.3), Postgres LISTEN/NOTIFY invalidation bus for cross-node invalidation
+(not cross-node write serialization) (T2.4), and incremental result maintenance behind the Refresh seam
 with full-refresh oracle fuzzing (T2.5). Partitioning stays behind an ADR;
 lease-based shard ownership is a follow-up only if the WAL-tailer path
 replaces direct notify.

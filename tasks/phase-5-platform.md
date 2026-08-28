@@ -5,6 +5,16 @@
 Three packages ship in parallel on disjoint paths. None may touch the protocol schema
 (that stayed frozen since Phase 0) or the Phase 4 invariants.
 
+## Current status (2026-08-28)
+
+Partial. Admin/runtime/storage routes, injected-provider/direct id-token tests,
+JWKS, backup import/export, and S3-compatible storage components are
+implemented and tested. The main assembly does not configure builtin
+Google/GitHub/custom OIDC auth-code exchanges; their token/userinfo URLs and
+auth-code nonce generation/validation remain deferred. The HTTP corpus is
+smaller than the planned matrix, the admin presence projection is still `{}`,
+and Apple’s end-to-end token exchange remains deferred.
+
 ## 5A — `internal/adminapi` (owner: `adminapi`)
 
 Admin is keyed by `__admin-token` or PAT and **bypasses all permission checks**
@@ -28,8 +38,11 @@ Runtime is the end-user REST plane (every call couples to `authAPI.ts` field spe
       — spelling bridge between kebab-over-WS and snake/kebab-over-HTTP
       (`refresh-token` vs `refresh_token`, `code_verifier`, `extra_fields`) asserted by corpus.
 - [ ] `POST /runtime/framework/query` — HTTP query path using the same `instaql→datalog` engine (no second query impl).
-- [ ] `POST /runtime/signout`, `GET /runtime/oauth/{start,callback,token,id_token}`,
-      `GET /runtime/openid-configuration` (per-app discovery URL passthrough), Apple/Signing flows.
+- [~] `POST /runtime/signout`, `GET /runtime/oauth/{start,callback,token,id_token}`,
+      `GET /runtime/openid-configuration` (per-app discovery URL passthrough).
+      Direct id-token/JWKS and Apple signer paths are tested; builtin
+      auth-code provider configuration, nonce handling, and Apple token
+      exchange remain deferred.
 - [ ] `GET /runtime/session` (WS upgrade) and `GET /runtime/sse` delegating to `internal/sync` — no duplicate session state.
 - [ ] Tests: corpus HTTP suites `corpus/http/runtime-*.ndjson`; WireMock-style record/restore of JWKS endpoints.
 

@@ -2,6 +2,14 @@
 
 **Read first**: `docs/04-roadmap.md` Phase 0 + `docs/05-conformance.md` §2.
 
+## Current status (2026-08-28)
+
+Partial. The Go scaffold, protocol schema/generator, embedded migrations, and
+WebSocket corpus replayer exist. The checked-in corpus is still limited to
+smoke and transact/refresh scenarios. `corpusctl record` is future work, its
+v1 flags are advisory, and the planned ≥50-scenario live-v1 recorder/replay
+exit gate remains open.
+
 ## 0.1  Repo scaffold
 
 - [ ] `go.mod` pinned to Go `^1.24` with real `require` entries (first `go mod tidy` green)
@@ -42,19 +50,21 @@ See `docs/03-protocol.md` for the full contract.
 
 ## 0.4  corpusctl (the oracle)
 
-- [ ] `tools/corpusctl/` — `record`/`replay`/`differential` entrypoint; see 05 §2.2.
+- [~] `tools/corpusctl/` — `replay`/`differential` WebSocket entrypoints exist;
+      `record` requires a future SDK proxy and live-v1 workflow (see 05 §2.2).
 - [ ] Fixture seeding: ports of `server/test` fixtures + `examples/*` app seeds.
 - [ ] SDK pinning: `@instantdb/core` at ≥ 4 versions including `<0.17.5` and `<0.20.4`.
 - [ ] Canonicalization rules per 05 §5 baked into diffing.
 - [ ] **≥ 50 scenarios** before the exit gate (distribution in 05 §2.3). Each NDJSON
       carries `meta: {sdkVersion, seedFixture, featureGates}` header.
-- [ ] `make corpus` / `make corpus-check` / `make replay TARGET=v1` wired and green.
+- [ ] `make corpus` / `make corpus-check` / `make replay TARGET=ws://...` wired and green;
+      live-v1 discovery/boot is future work.
 
 ## Phase 0 exit gate (blocks everything)
 
 ```
 go test ./... -race
-corpusctl replay --target v1   (100% of corpus)
+future live-v1 corpusctl replay against an explicit WebSocket URL   (100% of corpus)
 schemagen output compiles (Go + d.ts) and is committed
 ```
 

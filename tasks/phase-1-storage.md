@@ -5,6 +5,13 @@
 
 This phase may run two agents in parallel — `data` and `platform` — behind the Phase 0 schema.
 
+## Current status (2026-08-28)
+
+Complete for the implemented surface. Catalog/attribute flags (including
+requiredness), typed values, triple CRUD/COPY, transaction journaling, limits,
+and real-Postgres tests are present. Full corpus-scale storage parity remains
+dependent on the incomplete Phase 0 corpus.
+
 ## Context for every Phase 1 dispatch
 
 ```

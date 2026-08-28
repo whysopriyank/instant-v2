@@ -27,8 +27,12 @@ One static binary (`instantd`), one Postgres, optional S3-compatible blob store.
                                + wal_logs, app_users, rules)
 ```
 
-Goroutine-per-WebSocket-session mirrors v1's core.async per-session worker. A single
-WAL-tailer goroutine feeds a topic router; fan-out uses per-app subscriber lists.
+Goroutine-per-WebSocket-session mirrors v1's core.async per-session worker. The
+production write path publishes a post-commit invalidation directly to the
+local notifier; when enabled, Postgres LISTEN/NOTIFY carries the same event to
+peer nodes. The `internal/waltail` tailer remains the logical-decoding path for
+durable LSN/checkpoint behavior and isolated integration verification, but is
+not the production notifier assembly today.
 
 ## 2. Package layout (Go module `github.com/<you>/instant-v2`)
 
@@ -51,7 +55,7 @@ internal/
   storageapi/            /storage/* signed upload/download routes
   platform/              apps/attrs catalog, idents, system-catalog ops
 tools/
-  corpusctl/             corpus recorder+replayer (drives v1 or v2; see 05)
+  corpusctl/             corpus replay CLI; live recording remains planned (see 05)
   schemagen/             protocol schema → Go types + TS d.ts emitter
 migrations/              goose-embedded SQL, starting from re-derived 01_bootstrap
 ```
@@ -121,12 +125,21 @@ type Subscription interface {
 
 ## 5. Concurrency invariants
 
-1. Per-app serialization of writes (monotonic `processed-tx-id` per app/session).
-2. A `transact-ok{tx-id,isn}` is only enqueued **after** the local tailer has observed the
-   commit — otherwise refresh ordering breaks (v1 guarantees this by tailing its own writes).
+1. A transaction journal allocates a globally monotonic transaction identity,
+   but the current code does not establish an app-specific mutex or distributed
+   write serializer. `processed-tx-id` is a session watermark, not proof that
+   concurrent writers were serialized.
+2. A `transact-ok{tx-id,isn}` is emitted only after the database transaction has
+   committed and the local post-commit invalidation has been enqueued. This is
+   the current assembly contract. A future tailer-driven assembly must preserve
+   the stronger v1 ordering (acknowledge the WAL record only after downstream
+   refresh handling); the standalone tailer/checkpoint tests cover that seam,
+   but the running service does not currently gate the client ack on it.
 3. Session state is plain memory (map of subscription-id → last result + watermark), not
    a Datalog DB. Simpler and sufficient; don't reintroduce DataScript.
-4. Single WAL consumer with durable LSN checkpoint; restarts replay from confirmed LSN.
+4. When the WAL tailer is enabled, it is a single consumer with a durable LSN
+   checkpoint and restarts replay from the confirmed LSN. The current main
+   assembly uses direct post-commit notification instead.
 5. CEL programs cached per `(app, rule-version)`.
 
 ## 6. Configuration and ops
@@ -144,19 +157,37 @@ Go `^1.24`, `jackc/pgx/v5`, `jackc/pglogrepl`, `github.com/cel-go/cel-go` (refer
 
 ## 8. Multi-node operation (Tier 2)
 
-v2 scales out symmetrically (docs/09-tier2-architecture.md §T2.4). Sessions
-remain node-local; Postgres remains the only shared state and the per-app
-write serializer (§5 invariant 1).
+v2 can propagate invalidations symmetrically when the optional bus is enabled
+(`docs/09-tier2-architecture.md` §T2.4). Sessions, query caches, and rooms
+remain node-local. Postgres is shared, but the current service has no explicit
+per-app distributed write serializer (§5 invariant 1). The bus carries
+invalidation hints only; it does not establish cross-node ordering or make
+arbitrary-node writes safe for semantics that require serialization.
 
 - **Invalidation bus**: with `INSTANT_V2_INVALIDATION_BUS=postgres`, every
   committed write is published on the `instant_v2_invalidate` NOTIFY channel
   and applied by each peer's local notifier (`internal/bus`). Delivery is
   idempotent — refreshes dedupe on the subscription watermark.
-- **No ownership leases**: any node may accept writes for any app. The
-  audit's advisory-lock shard-ownership sketch buys replay dedup only if the
-  WAL-tailer path replaces direct notify; recorded as follow-up, not built.
-- **Stickiness**: LB app-id affinity is an optimization (connection reuse,
-  cache warmth), never a correctness requirement.
+- **Write-order boundary**: the bus does not serialize writes. Until an
+  app-level lock/lease or equivalent ordering protocol is implemented and
+  tested, deployments requiring ordered cross-node writes must route an app's
+  writes through one writer or accept that ordering is not guaranteed.
+- **Stickiness**: LB app-id affinity helps connection reuse and cache warmth,
+  but it is not a substitute for a write serializer and must not be described
+  as arbitrary-node write safety.
 - **Known limitation**: rooms/presence fan-out is in-process. Participants in
-  one room must land on one node — keep sticky routing for room-heavy apps
-  until ephemeral state gets a bus channel of its own.
+  one room must land on one node; the invalidation bus does not replicate
+  ephemeral room state. Keep sticky routing for room-heavy apps until a
+  dedicated ephemeral-state channel exists.
+
+## 9. Reconciled implementation status (2026-08-28)
+
+| Contract | Current implementation | Boundary |
+|---|---|---|
+| Local invalidation | `cmd/instantd/main.go` calls `reactive.Notifier.Notify` or `NotifyChanges` from post-commit hooks for WS, runtime, and admin writes. | It is not driven by `waltail.Tailer` in the main assembly. |
+| Peer invalidation | `internal/bus` uses a dedicated LISTEN connection and optional `INSTANT_V2_INVALIDATION_BUS=postgres`; raw events are idempotent and degrade safely when payloads are large. | The two-Store end-to-end peer-refresh test is still missing; delivery depends on Postgres availability, and there is no NATS/Redis transport. |
+| WAL/checkpoint | `internal/waltail` decodes pgoutput, checks `wal_level`, and coalesces durable checkpoint writes. | Live PG17 logical-decoding tests exist; production wiring and pcap corpus remain follow-up work. |
+| Rooms/presence | `internal/sync.RoomHub` provides bounded, full-snapshot in-process fan-out. | Cross-node rooms are unsupported; sticky routing is an operational requirement for multi-node room use. |
+| Admin presence | `/admin/rooms/presence` is authenticated but returns an empty object because `adminapi` cannot import `sync.RoomHub`. | Wiring a read-only presence projection is still open. |
+| Auth | Magic code/guest flows plus injected-provider and direct id-token test paths are covered; JWKS verification and Apple ES256 signer loading are tested. | The main assembly does not configure builtin Google/GitHub/custom OIDC auth-code exchange; builtin token/userinfo URLs are absent from runtime configuration, and auth-code nonce generation/validation is deferred. |
+| Required attributes | Catalog persistence, wire `required?`, tx validation, update-attr required-only patch, and backup compatibility are implemented. | Broader frozen corpus coverage is still incomplete. |

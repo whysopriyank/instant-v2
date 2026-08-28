@@ -1,7 +1,8 @@
 # Audit Remediation Plan
 
-Status: proposed implementation plan based on the 2026-08-28 committed-code,
-working-tree, architecture, conformance, and performance audit.
+Status: Waves 0–3 complete; Wave 4 benchmark contract complete; Wave 5
+implementation and Wave 6 measurement remain open. Based on the 2026-08-28
+committed-code, working-tree, architecture, conformance, and performance audit.
 
 ## Objectives
 
@@ -25,7 +26,7 @@ working-tree, architecture, conformance, and performance audit.
 - Each workstream must leave a focused regression test and report the exact
   commands run. No worker commits, pushes, or deploys unless separately asked.
 
-## Wave 0 — Preserve the baseline
+## Wave 0 — Preserve the baseline — COMPLETE
 
 Owner: main agent. No parallel product edits yet.
 
@@ -38,10 +39,13 @@ Owner: main agent. No parallel product edits yet.
 3. Provision a dedicated disposable Postgres database and record which suites
    require `DATABASE_URL` or logical-decoding configuration.
 
-Gate: every known blocker has a deterministic failing test or a documented
-environmental prerequisite.
+Evidence: baseline state/diff were recorded, deterministic reproductions were
+preserved, and the dedicated logical-decoding Postgres prerequisite was
+documented and verified.
 
-## Wave 1 — Parallel correctness blockers
+Gate: complete.
+
+## Wave 1 — Parallel correctness blockers — COMPLETE
 
 Run these three workstreams concurrently. Their production-file ownership is
 disjoint.
@@ -91,7 +95,7 @@ files.
 Gate: focused sync tests pass repeatedly (`-count=20`) and under `-race` with a
 live Postgres database where required.
 
-## Wave 2 — Parallel committed-code gaps
+## Wave 2 — Parallel committed-code gaps — COMPLETE
 
 Start only after Wave 1 is integrated and green.
 
@@ -152,7 +156,14 @@ Ownership: config parser and config tests only.
 
 Gate: invalid values fail at startup with actionable errors.
 
-## Wave 3 — Integration verification
+Evidence: permission projection now fails closed, required attributes and
+backup compatibility are implemented, pagination uses the corrected boundary
+semantics, and configuration overflow is rejected. Focused tests, race tests,
+and the integrated verification record are in the completed commits; any
+remaining environmental prerequisite is reported rather than treated as a
+pass.
+
+## Wave 3 — Integration verification — COMPLETE
 
 Owner: main agent, assisted by a Luna test worker.
 
@@ -166,12 +177,17 @@ Owner: main agent, assisted by a Luna test worker.
 6. Review the integrated diff for ownership leakage, unnecessary API changes,
    and performance/correctness coupling.
 
-Gate: all mandated checks pass. Environmental skips are reported, not counted
-as passes.
+Evidence: formatting/diff checks, `go vet ./...`, the no-database suite, the
+serialized live-Postgres race suite, repeated focused stress suites, and the
+deterministic SSE overflow regression all passed. The disposable PostgreSQL
+cluster was stopped and removed.
 
-## Wave 4 — Documentation and architectural reconciliation
+Gate: complete.
 
-This can run in parallel with the performance-harness design after Wave 3.
+## Wave 4 — Documentation, architecture, and benchmark contract — COMPLETE
+
+The status and architecture reconciliation is complete. The implementation-ready
+comparative benchmark contract is [docs/13-benchmark-contract.md](13-benchmark-contract.md).
 
 Ownership: `README.md`, `tasks/`, architecture/conformance docs, and ADRs only.
 
@@ -184,41 +200,63 @@ Ownership: `README.md`, `tasks/`, architecture/conformance docs, and ADRs only.
   status, required-attribute decision, and corpus limitations.
 - Separate measured performance facts from inferred improvements.
 
-Gate: no plan or README claim contradicts current code or verification output.
+Evidence: current capability claims distinguish complete, partial, blocked, and
+deferred work; direct post-commit notification versus independently verified
+WAL-tail behavior is explicit; historical performance observations are labeled
+as such; the accepted benchmark contract freezes the semantic oracle, timing,
+matrix, provenance, statistics, safety, and Wave 5 ownership boundaries.
+
+Gate: complete. Wave 5 must implement docs/13 before Wave 6 measurement starts.
 
 ## Wave 5 — Benchmark harness hardening
 
-Ownership: `tools/soak`, benchmark result schema/scripts, CI performance job,
-and performance documentation. Keep product hot-path code out of this wave.
+Exact disjoint Luna work packages and their ownership are defined in
+[docs/13-benchmark-contract.md](13-benchmark-contract.md) §12:
+`WP5-A` (`internal/benchharness`, `tools/soak`, `tools/soaksetup`), `WP5-B`
+(`internal/benchrun`, `tools/benchrun`, `tools/benchreport`,
+`benchmarks/schema`), and `WP5-C` (`.github/workflows/ci.yml`,
+`.github/workflows/performance.yml`, `Makefile`, `benchmarks/README.md`,
+`docs/14-benchmark-running.md`).
+Keep product hot-path code out of this wave.
 
-1. Add a transaction-ID/semantic-state delivery ledger per expected recipient.
-2. Measure commit-to-receipt and convergence latency separately from raw frame
-   count; classify V1 coalescing rather than calling it dropped data.
+1. Add the dedicated-writer/client-event/server-tx ledger and prefix oracle per
+   expected query and recipient.
+2. Measure submit-to-cover and acknowledgement-bounded commit-to-cover
+   intervals, retaining refresh-before-ack evidence; do not fabricate an exact
+   commit timestamp. Classify V1 coalescing rather than calling it dropped data.
 3. Collect target-process CPU, RSS, GC, database, pool, and network samples.
 4. Store raw results with V1/V2 SHAs, dirty-state hashes, toolchain/database
    versions, command lines, host settings, schema hashes, and run order.
-5. Run at least five randomized paired repetitions and report median, spread,
-   and confidence intervals.
-6. Add workload shapes for homogeneous and heterogeneous queries, append/update/
-   retract/reorder, cold/warm data, slow readers, reconnects, and 300/1k/2k
-   subscribers.
+5. Run seven balanced seeded AB/BA paired repetitions for each fixed workload
+   family H/X/M/O/S/R/C/T at 300/1k/2k subscribers; five is preliminary and
+   fewer than five is smoke evidence. Do not repeat until only valid pairs
+   remain; retain target failures and poor performance.
+6. Add the fixed workload families and keep V2 full-vs-delta as a separate
+   benchmark.
 7. Keep CI's short soak as a correctness/resource guard; add a separate,
    scheduled or explicitly invoked performance suite with tighter budgets.
 
 Gate: the harness can reproduce a checked-in results bundle and distinguish
-delivery, convergence, latency, throughput, CPU, memory, and wire cost.
+delivery, convergence, latency, throughput, CPU, memory, and wire cost, while
+passing the Luna test-worker acceptance in docs/13 §13. Wave 5 is not complete
+until that evidence exists.
 
-## Wave 6 — Remeasure before further tuning
+## Wave 6 — Remeasure before further tuning — MEASUREMENT ONLY
 
-- Establish a clean V2 baseline after correctness integration.
-- Compare committed HEAD, corrected optimized V2, and pinned V1.
+- Establish clean pinned V1 and V2 baselines after correctness integration.
+- Execute seven balanced seeded AB/BA pairs for every H/X/M/O/S/R/C/T family at
+  300/1k/2k using the accepted intervals, prefix oracle, and no-regression
+  budgets in [docs/13-benchmark-contract.md](13-benchmark-contract.md).
+- Compute paired log-ratio confidence intervals with at least 10,000 bootstrap
+  resamples and publish the paired sign result and claim-gate decision.
 - Use profiles to select the next optimization. Candidate work—catalog indexes,
   JSON encoding, CTE planning, or topic routing—must be justified by measured
   share of CPU/allocations.
 - Do not state a percentage gain for the current dirty work until this wave.
 
 Gate: publish only measured ratios with raw artifacts; label architectural and
-microbenchmark conclusions separately.
+microbenchmark conclusions separately. Wave 6 is not complete and does not
+authorize concurrent optimization while the comparison is running.
 
 ## Suggested agent allocation
 
@@ -232,10 +270,13 @@ microbenchmark conclusions separately.
 | W2-C pagination | `trial_luna_worker` (GPT-5.6 Luna, high) | Bounded query/test change |
 | W2-D config | `trial_luna_worker` (GPT-5.6 Luna, high) | Very small parser/test task |
 | Integration tests | `trial_luna_test_worker` | Focused execution and log reduction |
-| Documentation | `trial_luna_worker` or main agent | Evidence-driven, no architecture decision authority |
-| Benchmark design | `trial_terra_analyst`; Luna implements accepted contract | Cross-version methodology needs moderate analysis |
+| Wave 4 benchmark contract | Sol contract, main agent/docs owner | Accepted methodology is frozen in docs/13; no worker may improvise interfaces |
+| WP5-A harness | Luna worker | `internal/benchharness`, `tools/soak`, `tools/soaksetup` only |
+| WP5-B run/report | Luna worker | `internal/benchrun`, `tools/benchrun`, `tools/benchreport`, `benchmarks/schema` only |
+| WP5-C CI/docs | Luna worker | `.github/workflows/ci.yml`, `.github/workflows/performance.yml`, `Makefile`, `benchmarks/README.md`, `docs/14-benchmark-running.md` only |
+| Benchmark acceptance | Luna test worker | Offline replay, synthetic classifications, safety/provenance checks, and isolated short smoke |
 
-Sol is not required for routine implementation. Use `trial_sol_security` only
-if the permission/required-attribute work exposes an unresolved authorization
-or data-integrity decision, and `trial_sol_architect` only if direct-notify versus
-WAL-tail semantics require a public compatibility change.
+Sol's Wave 4 contract is the authority for benchmark methodology. Sol is not
+required for routine Wave 5 implementation. Use a higher-level review only if
+Wave 5 exposes a security, data-integrity, or public-compatibility decision;
+Wave 6 remains a measurement gate, not an optimization authorization.

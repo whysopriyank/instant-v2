@@ -16,7 +16,7 @@ Any break is a new SDK major.
 ## 1. Transports
 
 - **WebSocket** at `GET /runtime/session` (default `wss://api.instantdb.com/runtime/session`).
-- **SSE fallback** at `GET /runtime/sse` (downstream) + `POST /runtime/sse/push` (upstream)
+- **SSE fallback** at `GET /runtime/sse` (downstream) + `POST /runtime/sse` (upstream)
   with handshake returning `{session-id, sse-token, machine-id}`.
 
 A single session negotiates versions on `init`; all subsequent ops carry a UUID
@@ -43,7 +43,7 @@ Responses are shaped behind these flags. Unknown `op`s are **logged and ignored*
 | `init` | `app-id`, `refresh-token?`, `versions`, `__admin-token?` | `__admin-token` bypasses permissions. Replies with `init-ok{session-id,auth,attrs,app-status}`. |
 | `add-query` | `q`, `client-event-id` | `q` is an InstaQL query (see §6). Replies `add-query-ok` or `add-query-exists`. |
 | `remove-query` | `q`, `client-event-id` | Tears down a subscription. Replies `remove-query-ok`. |
-| `transact` | `tx-steps`, `client-event-id` | Grammar in §4. Replies `transact-ok{tx-id,isn}` or `transact-error`. |
+| `transact` | `tx-steps`, `client-event-id` | Grammar in §4. Replies `transact-ok{tx-id}` in the current v2 assembly (optional `isn` is reserved for the tailer-driven path) or `transact-error`. |
 | `error` | `message` | Client-side error report. |
 | `join-room` / `leave-room` | `room-type`, `room-id` | Presence. |
 | `set-presence` / `refresh-presence` | `data`, `is-patch?` (behind `patch-presence`) | Ephemeral state. |
@@ -77,6 +77,11 @@ Lookup refs are encoded **as** `[attrId, value]` arrays (`instaml.ts: extractLoo
 ↔ server's lookup expansion). Modes `create`/`update` with required-checks are enforced
 server-side. Any grammar change is an SDK major.
 
+The current v2 implementation accepts `required?` on `add-attr` and supports a
+deliberately narrow `update-attr` patch containing `id` plus `required?`.
+Unsupported update fields are rejected rather than silently ignored. Full
+update-attr parity remains follow-up work.
+
 ## 5. Server → client ops
 
 | op | Fields |
@@ -85,7 +90,7 @@ server-side. Any grammar change is an SDK major.
 | `add-query-ok` / `add-query-exists` | echoes subscription id |
 | `remove-query-ok` | |
 | `refresh-ok` | `{computations:[{instaql-query, instaql-result}], processed-tx-id, processed-isn, attrs?}` |
-| `transact-ok` | `{tx-id, isn}` (`isn` = incrementing sequence number from wal tailer) |
+| `transact-ok` | `{tx-id}` in the current v2 assembly; an optional `isn` belongs to the future tailer-driven compatibility path |
 | `error` | `{status, type, message, hint?}` |
 | `presence` / `broadcast` / `stream:*` / `app-status-changed` | ephemeral/stream fan-out |
 
@@ -178,7 +183,7 @@ POST /runtime/auth/refresh_tokens
 POST /runtime/auth/sign_in_guest
 GET  /runtime/session                  ← WS upgrade
 GET  /runtime/sse                      SSE fallback
-POST /runtime/sse/push
+POST /runtime/sse
 POST /runtime/signout
 POST /runtime/framework/query          HTTP query path (no WS)
 GET  /runtime/oauth/{start,callback,token,id_token}
@@ -192,7 +197,7 @@ Kebab/snake details match `authAPI.ts`: `refresh-token` vs `refresh_token`,
 
 ```
 POST /admin/query | /admin/transact | /admin/query_perms_check
-                  | /admin/transact_perms_check | /admin/subscribe-query | /admin/sse (+push)
+                  | /admin/transact_perms_check | /admin/subscribe-query
 POST /admin/sign_out | /admin/refresh_tokens | /admin/magic_code | ...
 GET  /admin/users | DELETE /admin/users
 GET  /admin/schema | /admin/soft_deleted_attrs | /admin/rooms/presence
@@ -223,10 +228,13 @@ the frozen compat surface for phase 1–4.
 
 - Refresh tokens are **opaque secrets stored hashed**, looked up by re-running an InstaQL
   query on `$userRefreshTokens.hashedToken` (model/app_user.clj:155-176). Not JWT.
-- OAuth: bespoke GitHub + generic OIDC-discovery providers; id_token verification
-  RS256/ES256 via JWKS (`auth/jwt.clj`), including Apple client-secret minting and
-  provider nonce quirks (Google skips nonce check; Apple accepts `sha256(nonce)` at
-  auth/oauth.clj).
+- OAuth: direct id-token verification (including injected-provider test paths)
+  with RS256/ES256 JWKS support is implemented and tested. Apple ES256
+  client-secret key loading/minting is also unit-tested. The main assembly does
+  not configure builtin Google/GitHub/custom OIDC auth-code exchanges; builtin
+  token/userinfo URLs are absent from runtime configuration, and auth-code
+  nonce generation/validation remains deferred. Apple’s end-to-end exchange is
+  therefore not currently available.
 - PKCE everywhere (migration 15).
 
 ## 11. What must NOT change without an ADR

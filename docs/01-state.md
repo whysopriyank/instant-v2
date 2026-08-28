@@ -3,6 +3,12 @@
 Source of truth: `instantdb/instant` @ `a4d2ef33` ("Instant sunset"), local checkout
 `/Users/priyank/Developer/sideproj/instant`. All paths below are relative to that repo.
 
+This document mixes the original v1 assessment with dated v2 experiments. The
+inventory and historical measurements below are retained as audit history; they
+are not a statement that every listed v1 surface or benchmark gate is complete
+in the current checkout. Current implementation status is reconciled in
+`README.md`, `docs/04-roadmap.md`, and `docs/05-conformance.md`.
+
 ## 1. Inventory
 
 | Layer | Size | Language |
@@ -70,7 +76,7 @@ Items 1 and 2 are v2 workstreams; 3–6 are drops/simplifications. The frozen su
 The `init` op carries a `versions` map keyed by SDK name.
 
 
-## Capacity baseline: v1 vs v2 (2026-08-24)
+## Historical capacity baseline: v1 vs v2 (2026-08-24)
 
 Identical workload via `tools/soak` against both servers on the same machine
 (Apple M4 Pro), same Postgres 17 instance, separate databases:
@@ -112,7 +118,7 @@ memory is comparable; v2 delivers the reactive layer v1's boot could not, at
 the cost of proportional CPU. Full 5000×30-min v2-only soak numbers stand
 from Phase 4.
 
-### Post Tier-1 rerun (same workload, commit da65259+)
+### Post Tier-1 rerun (same workload, commit da65259+; historical)
 
 Query-group dedupe changed the picture materially:
 
@@ -133,7 +139,7 @@ clients finally receive the live updates they subscribed for (~857 per
 client over the run vs ~32 before). Lower CPU, lower memory, and strictly
 more correct delivery.
 
-### Head-to-head smoke soak (2026-08-25, both servers fully functional)
+### Head-to-head smoke soak (2026-08-25, both servers fully functional; historical)
 
 Same machine (M4 Pro), same Postgres 17 (`wal_level=logical`,
 `output_plugin_libraries=wal2json`), separate databases, identical workload
@@ -158,7 +164,7 @@ set (as v2's `GetOrCreateAttr` parity shape does) makes v1 classify the value
 slot as a link and reject string writes — keep reverse columns NULL for blobs
 when seeding v1 databases.
 
-### Head-to-head smoke soak II (2026-08-25, v2 @ f23bb78, broader scope)
+### Head-to-head smoke soak II (2026-08-25, v2 @ f23bb78, broader scope; historical)
 
 Same methodology as above, two workload shapes, one paired run each side.
 New in this pass: `tools/soak` now reports write→refresh **delivery lag**
@@ -183,3 +189,10 @@ audit and latency is now measured, not inferred. (2) v1's effective delivery
 share *falls* as watcher count grows (80% → 32%) while its lag triples; v2
 holds 100% with p99 <100 ms at both scales. (3) Per-delivered-update CPU at
 the 1000-session scale: v2 ≈0.23 ms-core vs v1 ≈10.1 ms-core (~44×).
+
+The preceding tables are useful historical observations, but their environments,
+commits, workload drivers, and run counts do not satisfy the hardened Wave 6
+methodology. In particular, they must not be converted into a single “v2 is N×
+faster” headline. The accepted methodology must pin server/database commits,
+schema, run order, warm-up, concurrency, delivery/convergence criteria, raw
+artifacts, and statistical summaries before a new comparative claim is made.
