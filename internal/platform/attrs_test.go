@@ -77,6 +77,22 @@ func TestCheckedDataTypePointerRoundTrip(t *testing.T) {
 	}
 }
 
+func TestIDAttrNormalizesRequired(t *testing.T) {
+	id := newUUIDv4()
+	a := Attr{ID: id, Label: mustStr("id")}
+	cat := &AttrCatalog{}
+	cat.Add(a)
+	got, ok := cat.ByID(id)
+	if !ok || !got.IsRequired {
+		t.Fatalf("id attr must be required after catalog normalization: %+v, %v", got, ok)
+	}
+
+	nonID := normalizeRequired(Attr{Label: mustStr("title")})
+	if nonID.IsRequired {
+		t.Fatal("optional non-id attr was changed to required")
+	}
+}
+
 // ---- indexed AttrCatalog ------------------------------------------------------
 
 // testUUID derives a collision-free [16]byte from a counter — deterministic
@@ -644,7 +660,7 @@ func TestByEtypeAndFindByEtypeLabelUnchanged(t *testing.T) {
 
 // scriptedQ serves a fixed attr row set; scriptedRows decodes them positionally
 // in attrCols order (id, app_id, etype, label, reverse_etype, reverse_label,
-// value_type, cardinality, is_unique, is_indexed, forward_ident,
+// value_type, cardinality, is_unique, is_indexed, is_required, forward_ident,
 // reverse_ident, checked_data_type).
 type scriptedQ struct{ rows []Attr }
 
@@ -670,8 +686,8 @@ func (r *scriptedRows) Scan(dest ...any) error {
 	if r.i >= len(r.rows) {
 		return pgx.ErrNoRows
 	}
-	if len(dest) != 13 {
-		return fmt.Errorf("scriptedRows: want 13 dests, got %d", len(dest))
+	if len(dest) != 14 {
+		return fmt.Errorf("scriptedRows: want 14 dests, got %d", len(dest))
 	}
 	a := r.rows[r.i]
 	r.i++
@@ -685,9 +701,10 @@ func (r *scriptedRows) Scan(dest ...any) error {
 	*dest[7].(*string) = a.Cardinality
 	*dest[8].(*bool) = a.IsUnique
 	*dest[9].(*bool) = a.IsIndexed
-	*dest[10].(*[16]byte) = a.ForwardIdent
-	*dest[11].(**[16]byte) = a.ReverseIdent
-	*dest[12].(**string) = a.CheckedDataType
+	*dest[10].(*bool) = a.IsRequired
+	*dest[11].(*[16]byte) = a.ForwardIdent
+	*dest[12].(**[16]byte) = a.ReverseIdent
+	*dest[13].(**string) = a.CheckedDataType
 	return nil
 }
 

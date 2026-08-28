@@ -95,10 +95,10 @@ type Attr struct {
 	Cardinality     string     `json:"cardinality"`      // "one" | "many"
 	ForwardIdentity [3]string  `json:"forward-identity"` // [uuid,etype,label]
 	ReverseIdentity *[3]string `json:"reverse-identity,omitempty"`
-	Unique          *bool      `json:"unique,omitempty"`
-	Index           *bool      `json:"index,omitempty"` // "index?"
-	Required        *bool      `json:"required,omitempty"`
-	Primary         *bool      `json:"primary,omitempty"`
+	Unique          *bool      `json:"unique?,omitempty"`
+	Index           *bool      `json:"index?,omitempty"`
+	Required        *bool      `json:"required?,omitempty"`
+	Primary         *bool      `json:"primary?,omitempty"`
 	OnDelete        *string    `json:"on-delete,omitempty"`
 	OnDeleteReverse *string    `json:"on-delete-reverse,omitempty"`
 	CheckedDataType *string    `json:"checked-data-type,omitempty"`

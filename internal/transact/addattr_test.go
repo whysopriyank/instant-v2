@@ -2,11 +2,12 @@ package transact_test
 
 import (
 	"context"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
-	"strings"
 	"testing"
 
+	"github.com/instant-v2/instant-v2/internal/perms"
 	"github.com/instant-v2/instant-v2/internal/platform"
 	"github.com/instant-v2/instant-v2/internal/storage"
 	"github.com/instant-v2/instant-v2/internal/transact"
@@ -224,6 +225,368 @@ func TestAddAttrRejectsReservedOrEmptyReverseIdentity(t *testing.T) {
 		if _, err := transact.Transact(ctx, db, cat, appID, steps, transact.Options{Admin: true}, nil); err == nil {
 			t.Fatalf("%s: must be rejected", tc.name)
 		}
+	}
+}
+
+func TestRequiredAttrLifecycleAndSameBatchEnforced(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	appID, _, _ := seed(t, db)
+
+	requiredID, optionalID, eid := rand16(), rand16(), rand16()
+	// Requiredness is evaluated against the transaction-local catalog. A batch
+	// that creates a required attr and an entity through only an optional attr
+	// must therefore reject and roll back all of its writes.
+	first := parseSteps(t,
+		mustJSON(t, []any{"add-attr", map[string]any{
+			"id":               uuidStr(requiredID),
+			"forward-identity": []string{uuidStr(rand16()), "required_batch", "title"},
+			"value-type":       "blob",
+			"cardinality":      "one",
+			"required?":        true,
+		}}),
+		mustJSON(t, []any{"add-attr", map[string]any{
+			"id":               uuidStr(optionalID),
+			"forward-identity": []string{uuidStr(rand16()), "required_batch", "note"},
+			"value-type":       "blob",
+			"cardinality":      "one",
+		}}),
+		mustJSON(t, []any{"add-triple", uuidStr(eid), uuidStr(optionalID), "before-required"}),
+	)
+	if _, err := transact.Transact(ctx, db, mustCatalog(t, db, appID), appID, first, transact.Options{Admin: true}, nil); err == nil || !strings.Contains(err.Error(), "Missing required attribute") {
+		t.Fatalf("same-batch missing required value must reject, got %v", err)
+	}
+	if _, ok := mustCatalog(t, db, appID).ByID(requiredID); ok {
+		t.Fatal("failed same-batch required validation must roll back the new attr")
+	}
+
+	// Supplying the required value in the same batch satisfies the validator,
+	// so the metadata and both values commit together.
+	second := parseSteps(t,
+		mustJSON(t, []any{"add-attr", map[string]any{
+			"id":               uuidStr(requiredID),
+			"forward-identity": []string{uuidStr(rand16()), "required_batch", "title"},
+			"value-type":       "blob",
+			"cardinality":      "one",
+			"required?":        true,
+		}}),
+		mustJSON(t, []any{"add-attr", map[string]any{
+			"id":               uuidStr(optionalID),
+			"forward-identity": []string{uuidStr(rand16()), "required_batch", "note"},
+			"value-type":       "blob",
+			"cardinality":      "one",
+		}}),
+		mustJSON(t, []any{"add-triple", uuidStr(eid), uuidStr(requiredID), "title"}),
+		mustJSON(t, []any{"add-triple", uuidStr(eid), uuidStr(optionalID), "note"}),
+	)
+	if _, err := transact.Transact(ctx, db, mustCatalog(t, db, appID), appID, second, transact.Options{Admin: true}, nil); err != nil {
+		t.Fatalf("same-batch add required attr with value: %v", err)
+	}
+	cat := mustCatalog(t, db, appID)
+	if a, ok := cat.ByID(requiredID); !ok || !a.IsRequired {
+		t.Fatalf("required flag not persisted: ok=%v attr=%+v", ok, a)
+	}
+	var wireRequired bool
+	for _, raw := range cat.WireAttrs() {
+		if raw["id"] == uuidStr(requiredID) {
+			wireRequired, _ = raw["required?"].(bool)
+		}
+	}
+	if !wireRequired {
+		t.Fatal("required? missing from wire catalog")
+	}
+
+	// A later entity that writes only the optional attr is also rejected.
+	missing := parseSteps(t, mustJSON(t, []any{"add-triple", uuidStr(rand16()), uuidStr(optionalID), "missing-title"}))
+	if _, err := transact.Transact(ctx, db, cat, appID, missing, transact.Options{Admin: true}, nil); err == nil || !strings.Contains(err.Error(), "Missing required attribute") {
+		t.Fatalf("missing required attr must reject, got %v", err)
+	}
+
+	// A required value makes the entity valid; adding another optional value is
+	// also valid, but retracting the required value must fail while it remains
+	// alive through the optional value.
+	if _, err := transact.Transact(ctx, db, cat, appID,
+		parseSteps(t, mustJSON(t, []any{"add-triple", uuidStr(eid), uuidStr(requiredID), "title"})),
+		transact.Options{Admin: true}, nil); err != nil {
+		t.Fatalf("required value: %v", err)
+	}
+	if _, err := transact.Transact(ctx, db, cat, appID,
+		parseSteps(t, mustJSON(t, []any{"add-triple", uuidStr(eid), uuidStr(optionalID), "note"})),
+		transact.Options{Admin: true}, nil); err != nil {
+		t.Fatalf("optional value: %v", err)
+	}
+	if _, err := transact.Transact(ctx, db, cat, appID,
+		parseSteps(t, mustJSON(t, []any{"retract-triple", uuidStr(eid), uuidStr(requiredID), "title"})),
+		transact.Options{Admin: true}, nil); err == nil || !strings.Contains(err.Error(), "Missing required attribute") {
+		t.Fatalf("retracting required value must reject, got %v", err)
+	}
+
+	// Full deletion removes the entity and therefore satisfies the validator.
+	if _, err := transact.Transact(ctx, db, cat, appID,
+		parseSteps(t, mustJSON(t, []any{"delete-entity", uuidStr(eid), "required_batch"})),
+		transact.Options{Admin: true}, nil); err != nil {
+		t.Fatalf("delete entity with required attr: %v", err)
+	}
+}
+
+func TestRequiredAttrUpdateReservedNamespaceAlwaysDenied(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	appID, _, _ := seed(t, db)
+
+	var forward, reverse platform.Attr
+	if err := db.WithTx(ctx, func(tx pgx.Tx) error {
+		var err error
+		forward, err = platform.GetOrCreateAttrRev(ctx, tx, appID, "$users", "secret", nil, nil, "blob", "one", false, false)
+		if err != nil {
+			return err
+		}
+		reverseEtype, reverseLabel := "$users", "owner"
+		reverse, err = platform.GetOrCreateAttrRev(ctx, tx, appID, "safe_links", "user", &reverseEtype, &reverseLabel, "ref", "one", false, false)
+		return err
+	}); err != nil {
+		t.Fatalf("seed reserved attrs: %v", err)
+	}
+
+	for _, attr := range []platform.Attr{forward, reverse} {
+		steps := parseSteps(t, mustJSON(t, []any{"update-attr", map[string]any{
+			"id": uuidStr(attr.ID), "required?": true,
+		}}))
+		if _, err := transact.Transact(ctx, db, mustCatalog(t, db, appID), appID, steps, transact.Options{Admin: true}, nil); err == nil || !strings.Contains(err.Error(), "reserved") {
+			t.Fatalf("admin update of reserved attr %s must reject, got %v", uuidStr(attr.ID), err)
+		}
+		if got, ok := mustCatalog(t, db, appID).ByID(attr.ID); !ok || got.IsRequired {
+			t.Fatalf("reserved update must roll back: ok=%v attr=%+v", ok, got)
+		}
+	}
+}
+
+func TestRequiredAttrUpdatePermissionsFailClosedAndUseBindings(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	appID, _, _ := seed(t, db)
+	attrID := rand16()
+	add := parseSteps(t, mustJSON(t, []any{"add-attr", map[string]any{
+		"id": uuidStr(attrID), "forward-identity": []string{uuidStr(rand16()), "permission_attrs", "title"},
+		"value-type": "blob", "cardinality": "one",
+	}}))
+	if _, err := transact.Transact(ctx, db, mustCatalog(t, db, appID), appID, add, transact.Options{Admin: true}, nil); err != nil {
+		t.Fatalf("add attr: %v", err)
+	}
+	update := func(doc *perms.RuleDoc, opts transact.Options) error {
+		_, err := transact.Transact(ctx, db, mustCatalog(t, db, appID), appID,
+			parseSteps(t, mustJSON(t, []any{"update-attr", map[string]any{
+				"id": uuidStr(attrID), "required?": true,
+			}})), opts, doc)
+		return err
+	}
+	assertNotRequired := func(label string) {
+		t.Helper()
+		if got, ok := mustCatalog(t, db, appID).ByID(attrID); !ok || got.IsRequired {
+			t.Fatalf("%s mutated attr after failed update: ok=%v attr=%+v", label, ok, got)
+		}
+	}
+
+	denyDoc, err := perms.ParseRuleDoc([]byte(`{"attrs":{"allow":{"update":"false"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := update(denyDoc, transact.Options{}); err == nil || !strings.Contains(err.Error(), "attrs.update denied") {
+		t.Fatalf("denied attrs update must fail, got %v", err)
+	}
+	assertNotRequired("permission denial")
+
+	evalDoc, err := perms.ParseRuleDoc([]byte(`{"attrs":{"allow":{"update":"not valid cel !!"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := update(evalDoc, transact.Options{}); err == nil || !strings.Contains(err.Error(), "attrs.update") {
+		t.Fatalf("CEL error must fail closed, got %v", err)
+	}
+	assertNotRequired("permission evaluation error")
+
+	// A non-admin caller is allowed only when the expression can evaluate from
+	// the opts bindings supplied to the update gate.
+	allowDoc, err := perms.ParseRuleDoc([]byte(`{"attrs":{"allow":{"update":"auth.id == ruleParams.owner"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := update(allowDoc, transact.Options{
+		AuthUser:   map[string]any{"id": "owner-1"},
+		RuleParams: map[string]any{"owner": "owner-1"},
+	}); err != nil {
+		t.Fatalf("bound attrs update should succeed: %v", err)
+	}
+	if got, ok := mustCatalog(t, db, appID).ByID(attrID); !ok || !got.IsRequired {
+		t.Fatalf("bound attrs update did not persist: ok=%v attr=%+v", ok, got)
+	}
+}
+
+func TestRequiredAttrUpdateWithoutRulesIsAllowed(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	appID, _, _ := seed(t, db)
+	attrID := rand16()
+	if _, err := transact.Transact(ctx, db, mustCatalog(t, db, appID), appID,
+		parseSteps(t, mustJSON(t, []any{"add-attr", map[string]any{
+			"id": uuidStr(attrID), "forward-identity": []string{uuidStr(rand16()), "no_rules_attrs", "title"},
+			"value-type": "blob", "cardinality": "one",
+		}})), transact.Options{Admin: true}, nil); err != nil {
+		t.Fatalf("add attr: %v", err)
+	}
+	if _, err := transact.Transact(ctx, db, mustCatalog(t, db, appID), appID,
+		parseSteps(t, mustJSON(t, []any{"update-attr", map[string]any{
+			"id": uuidStr(attrID), "required?": true,
+		}})), transact.Options{}, nil); err != nil {
+		t.Fatalf("non-admin update without rules should be allowed: %v", err)
+	}
+	if got, ok := mustCatalog(t, db, appID).ByID(attrID); !ok || !got.IsRequired {
+		t.Fatalf("no-rules update did not persist: ok=%v attr=%+v", ok, got)
+	}
+}
+
+func TestDeleteEntityCascadeValidatesRequiredReferrer(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	appID, _, _ := seed(t, db)
+	refAttrID, noteAttrID, targetAttrID := rand16(), rand16(), rand16()
+	referrerID, targetID := rand16(), rand16()
+
+	if _, err := transact.Transact(ctx, db, mustCatalog(t, db, appID), appID, parseSteps(t,
+		mustJSON(t, []any{"add-attr", map[string]any{
+			"id":               uuidStr(refAttrID),
+			"forward-identity": []string{uuidStr(rand16()), "required_referrers", "target"},
+			"value-type":       "ref",
+			"cardinality":      "one",
+			"required?":        true,
+			"reverse-identity": []string{uuidStr(rand16()), "targets", "referrers"},
+		}}),
+		mustJSON(t, []any{"add-attr", map[string]any{
+			"id":               uuidStr(noteAttrID),
+			"forward-identity": []string{uuidStr(rand16()), "required_referrers", "note"},
+			"value-type":       "blob",
+			"cardinality":      "one",
+		}}),
+		mustJSON(t, []any{"add-attr", map[string]any{
+			"id":               uuidStr(targetAttrID),
+			"forward-identity": []string{uuidStr(rand16()), "targets", "name"},
+			"value-type":       "blob",
+			"cardinality":      "one",
+		}}),
+		mustJSON(t, []any{"add-triple", uuidStr(referrerID), uuidStr(refAttrID), uuidStr(targetID)}),
+		mustJSON(t, []any{"add-triple", uuidStr(referrerID), uuidStr(noteAttrID), "keep-referrer-alive"}),
+		mustJSON(t, []any{"add-triple", uuidStr(targetID), uuidStr(targetAttrID), "target"}),
+	), transact.Options{Admin: true}, nil); err != nil {
+		t.Fatalf("seed required referrer and target: %v", err)
+	}
+
+	cat := mustCatalog(t, db, appID)
+	deleteTarget := parseSteps(t, mustJSON(t, []any{"delete-entity", uuidStr(targetID), "targets"}))
+	if _, err := transact.Transact(ctx, db, cat, appID, deleteTarget, transact.Options{Admin: true}, nil); err == nil || !strings.Contains(err.Error(), "Missing required attribute") {
+		t.Fatalf("deleting target with a live incomplete referrer must reject, got %v", err)
+	}
+	// The target delete and reverse cascade must be atomic when requiredness
+	// rejects the now-incomplete referrer.
+	rows, err := db.FetchTriples(ctx, appID, storage.FetchFilter{EntityIDs: [][16]byte{referrerID, targetID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("failed cascade should roll back all three triples, got %d: %+v", len(rows), rows)
+	}
+
+	// Once the optional note is retracted, deleting the target removes the
+	// referrer's final live triple. An empty referrer is no longer an entity, so
+	// the cascade is valid and the complete transaction commits.
+	if _, err := transact.Transact(ctx, db, cat, appID,
+		parseSteps(t, mustJSON(t, []any{"retract-triple", uuidStr(referrerID), uuidStr(noteAttrID), "keep-referrer-alive"})),
+		transact.Options{Admin: true}, nil); err != nil {
+		t.Fatalf("retract optional referrer value: %v", err)
+	}
+	if _, err := transact.Transact(ctx, db, cat, appID, deleteTarget, transact.Options{Admin: true}, nil); err != nil {
+		t.Fatalf("delete target after referrer is no longer independently live: %v", err)
+	}
+	rows, err = db.FetchTriples(ctx, appID, storage.FetchFilter{EntityIDs: [][16]byte{referrerID, targetID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("final target/referrer deletion left triples: %+v", rows)
+	}
+}
+
+func TestRequiredAttrAddRejectsPopulatedEtype(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	appID, _, _ := seed(t, db)
+	optionalID, requiredID, eid := rand16(), rand16(), rand16()
+	if _, err := transact.Transact(ctx, db, mustCatalog(t, db, appID), appID, parseSteps(t,
+		mustJSON(t, []any{"add-attr", map[string]any{
+			"id": uuidStr(optionalID), "forward-identity": []string{uuidStr(rand16()), "populated", "note"},
+			"value-type": "blob", "cardinality": "one",
+		}}),
+		mustJSON(t, []any{"add-triple", uuidStr(eid), uuidStr(optionalID), "existing"}),
+	), transact.Options{Admin: true}, nil); err != nil {
+		t.Fatalf("seed populated etype: %v", err)
+	}
+	errSteps := parseSteps(t, mustJSON(t, []any{"add-attr", map[string]any{
+		"id": uuidStr(requiredID), "forward-identity": []string{uuidStr(rand16()), "populated", "title"},
+		"value-type": "blob", "cardinality": "one", "required?": true,
+	}}))
+	if _, err := transact.Transact(ctx, db, mustCatalog(t, db, appID), appID, errSteps, transact.Options{Admin: true}, nil); err == nil || !strings.Contains(err.Error(), "already have entities") {
+		t.Fatalf("required attr on populated etype must reject, got %v", err)
+	}
+}
+
+func TestRequiredAttrUpdateValidationAndDisable(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	appID, _, _ := seed(t, db)
+	attrID, otherID, eid := rand16(), rand16(), rand16()
+	add := parseSteps(t, mustJSON(t, []any{"add-attr", map[string]any{
+		"id": uuidStr(attrID), "forward-identity": []string{uuidStr(rand16()), "update_required", "title"},
+		"value-type": "blob", "cardinality": "one",
+	}}), mustJSON(t, []any{"add-attr", map[string]any{
+		"id": uuidStr(otherID), "forward-identity": []string{uuidStr(rand16()), "update_required", "note"},
+		"value-type": "blob", "cardinality": "one",
+	}}))
+	if _, err := transact.Transact(ctx, db, mustCatalog(t, db, appID), appID, add, transact.Options{Admin: true}, nil); err != nil {
+		t.Fatalf("add attr: %v", err)
+	}
+	cat := mustCatalog(t, db, appID)
+	if _, err := transact.Transact(ctx, db, cat, appID, parseSteps(t,
+		mustJSON(t, []any{"add-triple", uuidStr(eid), uuidStr(otherID), "existing"})),
+		transact.Options{Admin: true}, nil); err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	update := func(required bool) error {
+		return func() error {
+			_, err := transact.Transact(ctx, db, mustCatalog(t, db, appID), appID, parseSteps(t,
+				mustJSON(t, []any{"update-attr", map[string]any{"id": uuidStr(attrID), "required?": required}})),
+				transact.Options{Admin: true}, nil)
+			return err
+		}()
+	}
+	if err := update(true); err == nil || !strings.Contains(err.Error(), "already have entities without it") {
+		t.Fatalf("incomplete required update must reject, got %v", err)
+	}
+	if got, ok := mustCatalog(t, db, appID).ByID(attrID); !ok || got.IsRequired {
+		t.Fatalf("failed update must roll back required flag: ok=%v attr=%+v", ok, got)
+	}
+	if _, err := transact.Transact(ctx, db, mustCatalog(t, db, appID), appID, parseSteps(t,
+		mustJSON(t, []any{"add-triple", uuidStr(eid), uuidStr(attrID), "title"})),
+		transact.Options{Admin: true}, nil); err != nil {
+		t.Fatalf("fill required value: %v", err)
+	}
+	// Once the only live entity has a value, toggling required on and off is valid.
+	if err := update(true); err != nil {
+		t.Fatalf("complete required update: %v", err)
+	}
+	if got := mustCatalog(t, db, appID); func() bool { a, _ := got.ByID(attrID); return !a.IsRequired }() {
+		t.Fatal("required update did not persist")
+	}
+	if err := update(false); err != nil {
+		t.Fatalf("remove required flag: %v", err)
 	}
 }
 

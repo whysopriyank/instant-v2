@@ -422,6 +422,75 @@ func TestImportRejectsForeignAttr(t *testing.T) {
 	}
 }
 
+// TestImportRejectsForeignTripleAttr ensures a native dump cannot use a
+// publicly visible attr id belonging to another app when the attr record is
+// omitted from the dump.
+func TestImportRejectsForeignTripleAttr(t *testing.T) {
+	ctx := context.Background()
+	pool, appA, cleanup := env(t)
+	defer cleanup()
+
+	appB := newUUID()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := platform.CreateApp(ctx, tx, creatorID(t, ctx, pool), appB, "other"); err != nil {
+		t.Fatal(err)
+	}
+	foreign, err := platform.GetOrCreateAttr(ctx, tx, appB, "secret", "body", "blob", "one", false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	header := fmt.Sprintf(`{"kind":"header","format":%q,"version":2,"app_id":%q,"title":"x","creator_id":%q}`,
+		"instant-v2-backup", uuidStr(appA), uuidStr(appA))
+	triple := fmt.Sprintf(`{"kind":"triple","entity_id":%q,"attr_id":%q,"value":"cross-tenant"}`,
+		uuidStr(newUUID()), uuidStr(foreign.ID))
+	h := sha256.New()
+	h.Write([]byte(header + "\n"))
+	h.Write([]byte(triple + "\n"))
+	dump := header + "\n" + triple + "\n" + fmt.Sprintf(`{"kind":"checksum","sha256":"%x","records":1}`, h.Sum(nil)) + "\n"
+
+	_, err = backup.Import(ctx, pool, strings.NewReader(dump), appA)
+	if err == nil || !strings.Contains(err.Error(), "unknown attrs") {
+		t.Fatalf("expected foreign triple attr rejection, got: %v", err)
+	}
+	var triples int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM triples WHERE app_id=$1`, appA).Scan(&triples); err != nil {
+		t.Fatal(err)
+	}
+	if triples != 0 {
+		t.Fatalf("foreign triple import wrote %d rows", triples)
+	}
+}
+
+// TestV2AttrRequiredFlagIsStrict prevents a v2 dump from silently dropping
+// requiredness. Version-1 dumps remain accepted for backward compatibility;
+// only the v2 wire version requires a present boolean field.
+func TestV2AttrRequiredFlagIsStrict(t *testing.T) {
+	ctx := context.Background()
+	pool, appID, cleanup := env(t)
+	defer cleanup()
+
+	header := fmt.Sprintf(`{"kind":"header","format":%q,"version":2,"app_id":%q,"title":"x","creator_id":%q}`,
+		"instant-v2-backup", uuidStr(appID), uuidStr(appID))
+	attr := fmt.Sprintf(`{"kind":"attr","id":%q,"etype":"todo","label":"title","reverse_etype":null,"reverse_label":null,"value_type":"blob","cardinality":"one","is_unique":false,"is_indexed":false,"forward_ident":%q,"reverse_ident":null,"checked_data_type":null,"checking_data_type":null,"deletion_marked_at":null}`,
+		uuidStr(newUUID()), uuidStr(newUUID()))
+	for _, record := range []string{attr, strings.Replace(attr, `"deletion_marked_at":null}`, `"deletion_marked_at":null,"is_required":"yes"}`, 1)} {
+		h := sha256.New()
+		h.Write([]byte(header + "\n"))
+		h.Write([]byte(record + "\n"))
+		dump := header + "\n" + record + "\n" + fmt.Sprintf(`{"kind":"checksum","sha256":"%x","records":1}`, h.Sum(nil)) + "\n"
+		if _, err := backup.Import(ctx, pool, strings.NewReader(dump), appID); err == nil || !strings.Contains(err.Error(), "is_required") {
+			t.Fatalf("expected strict is_required rejection for %s, got %v", record, err)
+		}
+	}
+}
+
 func creatorID(t *testing.T, ctx context.Context, pool *pgxpool.Pool) [16]byte {
 	t.Helper()
 	var id [16]byte
@@ -446,7 +515,7 @@ func TestV1DumpImport(t *testing.T) {
 	  "schema": {
 	    "blobs": {
 	      "todo": {
-	        "text":     {"valueType": "string",  "config": {"unique": false, "indexed": true}},
+	        "text":     {"valueType": "string",  "config": {"unique": false, "indexed": true, "required": true}},
 	        "priority": {"valueType": "number",  "config": {"unique": false, "indexed": false}},
 	        "done":     {"valueType": "boolean", "config": {"unique": false, "indexed": false}}
 	      }
@@ -487,9 +556,20 @@ func TestV1DumpImport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RestoreV1Zip: %v", err)
 	}
-	// attrs: text/priority/done + implicit id + rules row.
-	if counts.Triples != 6 || counts.Attrs != 4 || counts.Rules != 1 {
+	// attrs: text/priority/done + implicit id; each entity also carries its id
+	// triple, plus the rules row.
+	if counts.Triples != 8 || counts.Attrs != 4 || counts.Rules != 1 {
 		t.Fatalf("unexpected v1 import counts: %+v", counts)
+	}
+	var textRequired, idRequired bool
+	if err := pool.QueryRow(ctx, `SELECT is_required FROM attrs WHERE app_id=$1 AND etype='todo' AND label='text'`, appID).Scan(&textRequired); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT is_required FROM attrs WHERE app_id=$1 AND etype='todo' AND label='id'`, appID).Scan(&idRequired); err != nil {
+		t.Fatal(err)
+	}
+	if !textRequired || !idRequired {
+		t.Fatalf("v1 requiredness not preserved: text=%v id=%v", textRequired, idRequired)
 	}
 
 	st := storage.New(pool)
@@ -512,6 +592,82 @@ func TestV1DumpImport(t *testing.T) {
 		if !values[want] {
 			t.Fatalf("missing triple value %q; got %v", want, values)
 		}
+	}
+}
+
+// TestV1EntitiesLinksImport covers the current v1 config shape. V1 has also
+// emitted the older schema.blobs/schema.refs shape, which TestV1DumpImport
+// above keeps covered for compatibility.
+func TestV1EntitiesLinksImport(t *testing.T) {
+	ctx := context.Background()
+	pool, appID, cleanup := env(t)
+	defer cleanup()
+
+	postID, userID := newUUID(), newUUID()
+	configJSON := fmt.Sprintf(`{
+      "title":"current v1",
+      "schema": {
+		  "entities": {
+		    "posts": {"attrs": {"title": {"valueType":"any", "config":{"unique":false,"indexed":true,"required":true}}}},
+          "users": {"attrs": {}}
+        },
+        "links": {
+          "postAuthor": {"forward":{"on":"posts","label":"author","has":"one","required":true},"reverse":{"on":"users","label":"posts","has":"many"}}
+        }
+      }
+    }`)
+	postLine := fmt.Sprintf(`{"entity":{"id":%q,"title":["hello","world"],"author":%q},"createdAt":1700000000000}`, uuidStr(postID), uuidStr(userID))
+	userLine := fmt.Sprintf(`{"entity":{"id":%q},"createdAt":1700000000000}`, uuidStr(userID))
+
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+	wCfg, err := zw.Create("config.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wCfg.Write([]byte(configJSON)); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{"entities/posts.jsonl": postLine, "entities/users.jsonl": userLine} {
+		w, werr := zw.Create(name)
+		if werr != nil {
+			t.Fatal(werr)
+		}
+		if _, werr := w.Write([]byte(body)); werr != nil {
+			t.Fatal(werr)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reader := bytes.NewReader(zipBuf.Bytes())
+	counts, err := backup.RestoreV1Zip(ctx, pool, reader, int64(reader.Len()), appID)
+	if err != nil {
+		t.Fatalf("RestoreV1Zip: %v", err)
+	}
+	if counts.Attrs != 4 || counts.Triples != 4 {
+		t.Fatalf("unexpected current-v1 import counts: %+v", counts)
+	}
+	var titleRequired, idRequired, authorRequired bool
+	if err := pool.QueryRow(ctx, `SELECT is_required FROM attrs WHERE app_id=$1 AND etype='posts' AND label='title'`, appID).Scan(&titleRequired); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT is_required FROM attrs WHERE app_id=$1 AND etype='posts' AND label='id'`, appID).Scan(&idRequired); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT is_required FROM attrs WHERE app_id=$1 AND etype='posts' AND label='author'`, appID).Scan(&authorRequired); err != nil {
+		t.Fatal(err)
+	}
+	if !titleRequired || !idRequired || !authorRequired {
+		t.Fatalf("current-v1 requiredness not preserved: title=%v id=%v author=%v", titleRequired, idRequired, authorRequired)
+	}
+	var titleTriples int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM triples t JOIN attrs a ON a.id=t.attr_id WHERE t.app_id=$1 AND a.etype='posts' AND a.label='title'`, appID).Scan(&titleTriples); err != nil {
+		t.Fatal(err)
+	}
+	if titleTriples != 1 {
+		t.Fatalf("one-cardinality array was expanded into %d triples", titleTriples)
 	}
 }
 

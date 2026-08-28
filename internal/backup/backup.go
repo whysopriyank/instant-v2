@@ -8,7 +8,7 @@
 // A dump is UTF-8 text, one JSON object per line, each terminated by '\n'.
 // Every line carries a leading "kind" discriminator:
 //
-//	{"kind":"header","format":"instant-v2-backup","version":1,
+//	{"kind":"header","format":"instant-v2-backup","version":2,
 //	       "app_id":"<uuid>","title":"...","creator_id":"<uuid>"}
 //	{"kind":"attr","id":...,"etype":...,"label":...,            (attrs in id order)
 //	                ...full attrs row, nullable fields as null}
@@ -54,7 +54,9 @@ import (
 
 const (
 	dumpFormat = "instant-v2-backup"
-	dumpVer    = 1
+	// Version 2 adds the requiredness bit to attr records. Import retains
+	// compatibility with v1 dumps, which predate that field.
+	dumpVer = 2
 	// JSONNullMD5 mirrors triple.JSONNullMD5 (kept local to avoid a dependency
 	// cycle risk; the constant is frozen by v1 semantics: md5("null")).
 	jsonNullMD5 = "37a6259cc0c1dae299a7866489dff0bd"
@@ -180,6 +182,7 @@ func Export(ctx context.Context, w io.Writer, pool *pgxpool.Pool, appID [16]byte
 		'forward_ident', forward_ident, 'reverse_ident', reverse_ident,
 		'checked_data_type', checked_data_type::text,
 		'checking_data_type', checking_data_type,
+		'is_required', is_required,
 		'deletion_marked_at', to_json(deletion_marked_at))::text
 	FROM attrs WHERE app_id=$1 ORDER BY id`
 	if counts.Attrs, err = streamSection(ctx, conn, rw, attrSQL, appID); err != nil {
@@ -290,7 +293,7 @@ func Import(ctx context.Context, pool *pgxpool.Pool, r io.Reader, routeAppID [16
 	if err := json.Unmarshal([]byte(line), &hdr); err != nil {
 		return counts, fmt.Errorf("%w: %v", errBadHeader, err)
 	}
-	if hdr.Kind != "header" || hdr.Format != dumpFormat || hdr.Version != dumpVer || hdr.AppID == "" {
+	if hdr.Kind != "header" || hdr.Format != dumpFormat || (hdr.Version != 1 && hdr.Version != dumpVer) || hdr.AppID == "" {
 		return counts, fmt.Errorf("%w: kind=%q format=%q version=%d", errBadHeader, hdr.Kind, hdr.Format, hdr.Version)
 	}
 	appID, err := platform.ScanUUIDErr(hdr.AppID)
@@ -350,7 +353,7 @@ func Import(ctx context.Context, pool *pgxpool.Pool, r io.Reader, routeAppID [16
 		hash.Write([]byte(line + "\n"))
 		switch kind {
 		case "attr":
-			if err := importAttr(ctx, tx, appID, body); err != nil {
+			if err := importAttr(ctx, tx, appID, body, hdr.Version >= 2); err != nil {
 				return counts, fmt.Errorf("backup: import attr: %w", err)
 			}
 			counts.Attrs++
@@ -465,7 +468,7 @@ func ensureAppRow(ctx context.Context, tx pgx.Tx, appID, creator [16]byte, title
 	return nil
 }
 
-func importAttr(ctx context.Context, tx pgx.Tx, appID [16]byte, body json.RawMessage) error {
+func importAttr(ctx context.Context, tx pgx.Tx, appID [16]byte, body json.RawMessage, strictRequired bool) error {
 	var a struct {
 		ID               string  `json:"id"`
 		Etype            *string `json:"etype"`
@@ -480,10 +483,24 @@ func importAttr(ctx context.Context, tx pgx.Tx, appID [16]byte, body json.RawMes
 		ReverseIdent     *string `json:"reverse_ident"`
 		CheckedDataType  *string `json:"checked_data_type"`
 		CheckingDataType *bool   `json:"checking_data_type"`
+		IsRequired       *bool   `json:"is_required"`
 		DeletionMarkedAt *string `json:"deletion_marked_at"`
 	}
 	if err := strictUnmarshal(body, &a); err != nil {
 		return err
+	}
+	if strictRequired && a.IsRequired == nil {
+		return errors.New(`is_required is required for v2 attr records and must be a boolean`)
+	}
+	required := false
+	if a.IsRequired != nil {
+		required = *a.IsRequired
+	}
+	// Every entity has an implicit id attribute. Normalize hand-authored and
+	// legacy dumps so the invariant survives round trips even if an old dump
+	// omitted the flag or marked id optional.
+	if a.Label != nil && *a.Label == "id" {
+		required = true
 	}
 	id, err := platform.ScanUUIDErr(a.ID)
 	if err != nil {
@@ -515,8 +532,8 @@ func importAttr(ctx context.Context, tx pgx.Tx, appID [16]byte, body json.RawMes
 		INSERT INTO attrs (id, app_id, etype, label, reverse_etype, reverse_label,
 		                   value_type, cardinality, is_unique, is_indexed,
 		                   forward_ident, reverse_ident,
-		                   checked_data_type, checking_data_type, deletion_marked_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+			checked_data_type, checking_data_type, is_required, deletion_marked_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
 		ON CONFLICT (id) DO UPDATE SET
 			etype=EXCLUDED.etype, label=EXCLUDED.label,
 			reverse_etype=EXCLUDED.reverse_etype, reverse_label=EXCLUDED.reverse_label,
@@ -525,10 +542,11 @@ func importAttr(ctx context.Context, tx pgx.Tx, appID [16]byte, body json.RawMes
 			forward_ident=EXCLUDED.forward_ident, reverse_ident=EXCLUDED.reverse_ident,
 			checked_data_type=EXCLUDED.checked_data_type,
 			checking_data_type=EXCLUDED.checking_data_type,
+			is_required=EXCLUDED.is_required,
 			deletion_marked_at=EXCLUDED.deletion_marked_at`,
 		id, appID, a.Etype, a.Label, a.ReverseEtype, a.ReverseLabel,
 		a.ValueType, a.Cardinality, a.IsUnique, a.IsIndexed,
-		fwd, rev, a.CheckedDataType, a.CheckingDataType, a.DeletionMarkedAt); err != nil {
+		fwd, rev, a.CheckedDataType, a.CheckingDataType, required, a.DeletionMarkedAt); err != nil {
 		return err
 	}
 	// Mirror the idents row like platform.GetOrCreateAttr does on creation.
@@ -664,8 +682,9 @@ func (b *tripleBatch) flush(ctx context.Context, tx pgx.Tx, appID [16]byte, coun
 	if err := tx.QueryRow(ctx, `
 		SELECT count(*) FROM unnest($1::uuid[]) AS u(aid)
 		WHERE NOT EXISTS (
-			SELECT 1 FROM attrs WHERE id = u.aid AND deletion_marked_at IS NULL)`,
-		b.attrIDs).Scan(&dangling); err != nil {
+			SELECT 1 FROM attrs
+			 WHERE id = u.aid AND app_id = $2 AND deletion_marked_at IS NULL)`,
+		b.attrIDs, appID).Scan(&dangling); err != nil {
 		return err
 	}
 	if dangling > 0 {
@@ -688,7 +707,9 @@ func (b *tripleBatch) flush(ctx context.Context, tx pgx.Tx, appID [16]byte, coun
 			       a.checked_data_type                                  AS checked_data_type,
 			       i.created_at                                         AS created_at
 			  FROM input i
-			  JOIN attrs a ON a.id = i.attr_id AND a.deletion_marked_at IS NULL
+			  JOIN attrs a ON a.id = i.attr_id
+			             AND a.app_id = $1
+			             AND a.deletion_marked_at IS NULL
 		)
 		INSERT INTO triples (app_id, entity_id, attr_id, value, value_md5,
 		                     ea, eav, av, ave, vae, checked_data_type, created_at)

@@ -188,6 +188,7 @@ type wireAttr struct {
 	ReverseIdentity []string       `json:"reverse-identity"`
 	Unique          bool           `json:"unique?"`
 	Indexed         bool           `json:"index?"`
+	Required        *bool          `json:"required?"`
 	CheckedDataType string         `json:"checked-data-type"`
 	Rest            map[string]any `json:"-"`
 }
@@ -233,6 +234,14 @@ func parseWireAttr(raw json.RawMessage) (platform.Attr, error) {
 		wa = wireAttr{}
 		if err := json.Unmarshal(raw, &wa); err != nil {
 			return platform.Attr{}, fmt.Errorf("payload not an object: %w", err)
+		}
+	}
+	if wa.Required == nil {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &fields); err == nil {
+			if value, present := fields["required?"]; present && string(value) == "null" {
+				return platform.Attr{}, fmt.Errorf("required? must be a boolean")
+			}
 		}
 	}
 	var attrID [16]byte
@@ -284,6 +293,7 @@ func parseWireAttr(raw json.RawMessage) (platform.Attr, error) {
 		Cardinality:  card,
 		IsUnique:     wa.Unique,
 		IsIndexed:    wa.Indexed || wa.Unique, // unique implies index (v1 semantics)
+		IsRequired:   wa.Required != nil && *wa.Required,
 		ForwardIdent: fwdIdent,
 	}
 	if len(wa.ReverseIdentity) >= 3 {
@@ -316,6 +326,54 @@ func parseWireAttr(raw json.RawMessage) (platform.Attr, error) {
 		}
 	}
 	return a, nil
+}
+
+// requiredAttrUpdate is the bounded update-attr surface currently supported
+// by the v2 transactor. V1 accepts a full attr patch, but requiredness is the
+// only metadata mutation whose validation and persistence semantics are
+// implemented here. Rejecting other keys keeps callers from believing a
+// silently ignored index/cardinality/value-type update succeeded.
+type requiredAttrUpdate struct {
+	ID       string
+	Required *bool
+}
+
+func parseRequiredAttrUpdate(raw json.RawMessage) (requiredAttrUpdate, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return requiredAttrUpdate{}, fmt.Errorf("payload must be an object: %w", err)
+	}
+	var out requiredAttrUpdate
+	for key, value := range fields {
+		switch key {
+		case "id":
+			if err := json.Unmarshal(value, &out.ID); err != nil {
+				return requiredAttrUpdate{}, fmt.Errorf("id must be a uuid: %w", err)
+			}
+		case "required?":
+			var required *bool
+			if err := json.Unmarshal(value, &required); err != nil {
+				return requiredAttrUpdate{}, fmt.Errorf("required? must be a boolean: %w", err)
+			}
+			if required == nil {
+				return requiredAttrUpdate{}, fmt.Errorf("required? must be a boolean")
+			}
+			out.Required = required
+		default:
+			return requiredAttrUpdate{}, fmt.Errorf("unsupported update-attr field %q (only id and required? are supported)", key)
+		}
+	}
+	if out.ID == "" {
+		return requiredAttrUpdate{}, fmt.Errorf("update-attr: id is required")
+	}
+	var id [16]byte
+	if err := parseUUID(out.ID, &id); err != nil {
+		return requiredAttrUpdate{}, fmt.Errorf("update-attr: id %q: %w", out.ID, err)
+	}
+	if out.Required == nil {
+		return requiredAttrUpdate{}, fmt.Errorf("update-attr: required? is required by the supported v2 patch")
+	}
+	return out, nil
 }
 
 // rewriteAttrRefs replaces client-minted attr ids in triple steps with the

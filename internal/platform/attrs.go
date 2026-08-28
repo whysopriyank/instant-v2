@@ -21,6 +21,7 @@ type Attr struct {
 	Cardinality     string // "one" | "many"
 	IsUnique        bool
 	IsIndexed       bool
+	IsRequired      bool
 	ForwardIdent    [16]byte
 	ReverseIdent    *[16]byte
 	CheckedDataType *string // nil | "string"|"number"|"boolean"|"date"
@@ -67,7 +68,7 @@ type Queryer interface {
 
 const attrCols = `id, app_id, etype, label, reverse_etype, reverse_label,
 	value_type, cardinality, is_unique, is_indexed,
-	forward_ident, reverse_ident, checked_data_type`
+	is_required, forward_ident, reverse_ident, checked_data_type`
 
 // AttrCatalog is the in-memory attr set for one app.
 type AttrCatalog struct {
@@ -103,6 +104,7 @@ func (c *AttrCatalog) Clone() *AttrCatalog {
 // derived indexes and backfills IDStr, so it must only run on tx-local
 // clones, never on the shared cached catalog.
 func (c *AttrCatalog) Add(a Attr) {
+	a = normalizeRequired(a)
 	if c.byID == nil {
 		c.byID = make(map[[16]byte]Attr)
 	}
@@ -200,14 +202,15 @@ func (c *AttrCatalog) FindReverseAttr(childEtype, parentEtype, label string) *At
 // same batch, so the server adopts them verbatim (v1 semantics). Replay of a
 // known attr id is a no-op.
 func CreateAttrWithID(ctx context.Context, tx pgx.Tx, appID [16]byte, a Attr) error {
+	a = normalizeRequired(a)
 	tag, err := tx.Exec(ctx, `
 		INSERT INTO attrs (id, app_id, etype, label, reverse_etype, reverse_label,
 		                   value_type, cardinality, is_unique, is_indexed,
-		                   forward_ident, reverse_ident, checked_data_type)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+		                   is_required, forward_ident, reverse_ident, checked_data_type)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 		ON CONFLICT (id) DO NOTHING`,
 		a.ID, appID, a.Etype, a.Label, a.ReverseEtype, a.ReverseLabel,
-		a.ValueType, a.Cardinality, a.IsUnique, a.IsIndexed,
+		a.ValueType, a.Cardinality, a.IsUnique, a.IsIndexed, a.IsRequired,
 		a.ForwardIdent, a.ReverseIdent, a.CheckedDataType)
 	if err != nil {
 		return err
@@ -256,6 +259,31 @@ func FindAttrByIdent(ctx context.Context, q Queryer, appID [16]byte, etype, labe
 	return a, true, err
 }
 
+// FindAttrByID returns the live attr owned by appID. It is intentionally
+// queryer-backed so transaction callers can inspect and update metadata on
+// their active pgx transaction without opening a second connection.
+func FindAttrByID(ctx context.Context, q Queryer, appID, id [16]byte) (Attr, bool, error) {
+	rows, err := q.Query(ctx, `
+		SELECT `+attrCols+`
+		  FROM attrs
+		 WHERE app_id = $1 AND id = $2 AND deletion_marked_at IS NULL`, appID, id)
+	if err != nil {
+		return Attr{}, false, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return Attr{}, false, err
+		}
+		return Attr{}, false, nil
+	}
+	a, err := scanAttr(rows)
+	if err != nil {
+		return Attr{}, false, err
+	}
+	return a, true, rows.Err()
+}
+
 // LoadAttrCatalog reads all non-deleted attrs for appID.
 func LoadAttrCatalog(ctx context.Context, q Queryer, appID [16]byte) (*AttrCatalog, error) {
 	rows, err := q.Query(ctx, `
@@ -290,12 +318,19 @@ func (c *AttrCatalog) Len() int { return len(c.byID) }
 func scanAttr(r pgx.Row) (Attr, error) {
 	var a Attr
 	err := r.Scan(&a.ID, &a.AppID, &a.Etype, &a.Label, &a.ReverseEtype, &a.ReverseLabel,
-		&a.ValueType, &a.Cardinality, &a.IsUnique, &a.IsIndexed,
+		&a.ValueType, &a.Cardinality, &a.IsUnique, &a.IsIndexed, &a.IsRequired,
 		&a.ForwardIdent, &a.ReverseIdent, &a.CheckedDataType)
 	if err != nil {
 		return Attr{}, err
 	}
-	return a, nil
+	return normalizeRequired(a), nil
+}
+
+func normalizeRequired(a Attr) Attr {
+	if a.Label != nil && *a.Label == "id" {
+		a.IsRequired = true
+	}
+	return a
 }
 
 // CreateApp inserts an app owned by creatorID.
@@ -341,10 +376,10 @@ func GetOrCreateAttr(
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO attrs (id, app_id, etype, label, reverse_etype, reverse_label,
 		                   value_type, cardinality, is_unique, is_indexed,
-		                   forward_ident, reverse_ident)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+		                   is_required, forward_ident, reverse_ident)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
 		attrID, appID, etype, label, etype, label,
-		valueType, cardinality, isUnique, isIndexed, fwd, rev); err != nil {
+		valueType, cardinality, isUnique, isIndexed, label == "id", fwd, rev); err != nil {
 		return Attr{}, err
 	}
 	if _, err := tx.Exec(ctx, `
@@ -417,10 +452,10 @@ func GetOrCreateAttrRev(
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO attrs (id, app_id, etype, label, reverse_etype, reverse_label,
 		                   value_type, cardinality, is_unique, is_indexed,
-		                   forward_ident, reverse_ident)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+		                   is_required, forward_ident, reverse_ident)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
 		attrID, appID, etype, label, revEtype, revLabel,
-		valueType, cardinality, isUnique, isIndexed, fwd, rev); err != nil {
+		valueType, cardinality, isUnique, isIndexed, label == "id", fwd, rev); err != nil {
 		return Attr{}, err
 	}
 	if _, err := tx.Exec(ctx, `

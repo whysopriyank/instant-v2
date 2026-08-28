@@ -222,7 +222,7 @@ func (cat *AttrCatalog) WireAttrs() []map[string]any {
 			"cardinality":       a.Cardinality,
 			"unique?":           a.IsUnique,
 			"index?":            a.IsIndexed,
-			"required?":         false,
+			"required?":         a.IsRequired,
 			"checked-data-type": checkedPtr(a.CheckedDataType),
 		}
 		// v1 marks the implicit <etype>/id attr as the entity primary key;

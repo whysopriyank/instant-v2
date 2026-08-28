@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -82,7 +83,7 @@ func Transact(
 		// precede lookup/value resolution. Created attrs register into a
 		// per-tx catalog clone — the shared cache updates via invalidation.
 		txCat := catalog
-		if hasOp(steps, "add-attr") {
+		if hasOp(steps, "add-attr") || hasOp(steps, "update-attr") {
 			txCat = catalog.Clone()
 			// clientAttrID → serverAttrID for attrs the server already
 			// stores under another id (replayed or implicit-attr replays,
@@ -94,6 +95,9 @@ func Transact(
 				}
 				a, err := parseWireAttr(st.Args[0])
 				if err != nil {
+					return fmt.Errorf("transact: add-attr: %w", err)
+				}
+				if err := validateAddRequired(ctx, tx, appID, a); err != nil {
 					return fmt.Errorf("transact: add-attr: %w", err)
 				}
 				existing, found, err := platform.FindAttrByIdent(ctx, tx, appID, deref(a.Etype), deref(a.Label))
@@ -151,6 +155,8 @@ func Transact(
 
 		// Capture rule-params scoped by entity.
 		capturedRuleParams := map[string]map[string]any{}
+		var requiredUpdates []platform.Attr
+		var cascadeTouched [][16]byte
 
 		for _, op := range ordered {
 			batch := filterSteps(steps, op)
@@ -170,6 +176,13 @@ func Transact(
 			case "add-attr":
 				// Handled in the pre-pass above (attrs must exist before
 				// same-batch triples resolve); nothing left to do here.
+
+			case "update-attr":
+				updates, err := applyRequiredAttrUpdates(ctx, tx, appID, txCat, batch, opts, ruleDoc)
+				if err != nil {
+					return err
+				}
+				requiredUpdates = append(requiredUpdates, updates...)
 
 			case "delete-attr":
 				if !opts.Admin {
@@ -192,9 +205,11 @@ func Transact(
 				}
 
 			case "delete-entity":
-				if err := applyDeleteEntity(ctx, tx, db, appID, txCat, batch); err != nil {
+				refs, err := applyDeleteEntity(ctx, tx, db, appID, txCat, batch)
+				if err != nil {
 					return err
 				}
+				cascadeTouched = append(cascadeTouched, refs...)
 
 			default:
 				// forward-compat: unknown ops no-op
@@ -203,10 +218,16 @@ func Transact(
 		}
 
 		touched, _ := collectTouchedEntities(steps)
+		touched = appendDistinctEntities(touched, cascadeTouched...)
 		if txCat != nil && len(touched) > 0 {
-			if err := validateRequired(ctx, db.Pool, appID, txCat, touched); err != nil {
+			// Validate against the transaction-local catalog so required attrs
+			// created earlier in this batch are enforced before commit.
+			if err := validateRequired(ctx, tx, appID, txCat, touched); err != nil {
 				return err
 			}
+		}
+		if err := validateUpdatedRequired(ctx, tx, appID, requiredUpdates); err != nil {
+			return err
 		}
 		return nil
 	})
@@ -432,9 +453,9 @@ func applyInsertInto(ctx context.Context, tx pgx.Tx, appID [16]byte, cat *platfo
 	return nil
 }
 
-func applyDeleteEntity(ctx context.Context, tx pgx.Tx, db *storage.DB, appID [16]byte, cat *platform.AttrCatalog, batch []Step) error {
+func applyDeleteEntity(ctx context.Context, tx pgx.Tx, db *storage.DB, appID [16]byte, cat *platform.AttrCatalog, batch []Step) ([][16]byte, error) {
 	if len(batch) == 0 {
-		return nil
+		return nil, nil
 	}
 	ids := make([][16]byte, 0, len(batch))
 	for _, st := range batch {
@@ -448,10 +469,10 @@ func applyDeleteEntity(ctx context.Context, tx pgx.Tx, db *storage.DB, appID [16
 		ids = append(ids, u)
 	}
 	if len(ids) == 0 {
-		return nil
+		return nil, nil
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM triples WHERE app_id=$1 AND entity_id = ANY($2::uuid[])`, appID, ids); err != nil {
-		return fmt.Errorf("delete-entity: %w", err)
+		return nil, fmt.Errorf("delete-entity: %w", err)
 	}
 	// Reverse references (value = one of these entity ids). Refs are stored as
 	// jsonb strings ('"<uuid>"'), so match via to_jsonb over a text array in
@@ -461,12 +482,30 @@ func applyDeleteEntity(ctx context.Context, tx pgx.Tx, db *storage.DB, appID [16
 	for _, id := range ids {
 		texts = append(texts, uuidToStr(id))
 	}
-	if _, err := tx.Exec(ctx,
-		`DELETE FROM triples WHERE app_id=$1 AND vae AND value = ANY(SELECT to_jsonb(t) FROM unnest($2::text[]) AS t)`,
-		appID, texts); err != nil {
-		return fmt.Errorf("delete-entity reverse refs: %w", err)
+	rows, err := tx.Query(ctx,
+		`DELETE FROM triples WHERE app_id=$1 AND vae AND value = ANY(SELECT to_jsonb(t) FROM unnest($2::text[]) AS t) RETURNING entity_id`,
+		appID, texts)
+	if err != nil {
+		return nil, fmt.Errorf("delete-entity reverse refs: %w", err)
 	}
-	return nil
+	defer rows.Close()
+	refs := make([][16]byte, 0)
+	seen := make(map[[16]byte]struct{})
+	for rows.Next() {
+		var entityID [16]byte
+		if err := rows.Scan(&entityID); err != nil {
+			return nil, fmt.Errorf("delete-entity reverse refs: %w", err)
+		}
+		if _, ok := seen[entityID]; ok {
+			continue
+		}
+		seen[entityID] = struct{}{}
+		refs = append(refs, entityID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("delete-entity reverse refs: %w", err)
+	}
+	return refs, nil
 }
 
 func deepMergeJSON(dst, src any) any {
@@ -494,7 +533,7 @@ func collectTouchedEntities(steps []Step) ([][16]byte, error) {
 	var out [][16]byte
 	for _, st := range steps {
 		switch st.Op {
-		case "add-triple", "deep-merge-triple", "retract-triple":
+		case "add-triple", "deep-merge-triple", "retract-triple", "delete-entity":
 			if len(st.Args) == 0 {
 				continue
 			}
@@ -510,6 +549,21 @@ func collectTouchedEntities(steps []Step) ([][16]byte, error) {
 		}
 	}
 	return out, nil
+}
+
+func appendDistinctEntities(base [][16]byte, extra ...[16]byte) [][16]byte {
+	seen := make(map[[16]byte]struct{}, len(base)+len(extra))
+	for _, id := range base {
+		seen[id] = struct{}{}
+	}
+	for _, id := range extra {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		base = append(base, id)
+	}
+	return base
 }
 
 // tripleValueMatches mirrors triples_valid_value (migration 001) so clients
@@ -585,36 +639,290 @@ func convertNumbers(v any) any {
 		return v
 	}
 }
+
+// validateAddRequired implements v1's add-attr guard. A required attr may be
+// added only while its etype has no live entity. The precheck runs before the
+// batch writes; validateRequired below then uses the transaction-local catalog
+// so requiredness is enforced for same-batch entities as well.
+func validateAddRequired(ctx context.Context, q interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, appID [16]byte, attr platform.Attr) error {
+	if !attr.IsRequired || attr.Etype == nil {
+		return nil
+	}
+	var exists bool
+	err := q.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			  FROM triples t
+			  JOIN attrs a ON a.id = t.attr_id
+			 WHERE t.app_id = $1
+			   AND a.app_id = $1
+			   AND a.etype = $2
+			   AND a.deletion_marked_at IS NULL
+			   AND t.value <> 'null'::jsonb
+		)`, appID, *attr.Etype).Scan(&exists)
+	if err != nil {
+		return fmt.Errorf("check existing entities: %w", err)
+	}
+	if exists {
+		label := "<unknown>"
+		if attr.Label != nil {
+			label = *attr.Label
+		}
+		return fmt.Errorf("can't create attribute `%s` as required because `%s` already have entities", label, *attr.Etype)
+	}
+	return nil
+}
+
+// applyRequiredAttrUpdates applies the supported update-attr patch and
+// returns the resulting rows for the post-write coverage check. Metadata
+// updates are kept on the active transaction so a failed coverage check rolls
+// back together with the caller's data writes.
+func applyRequiredAttrUpdates(ctx context.Context, tx pgx.Tx, appID [16]byte, cat *platform.AttrCatalog, batch []Step, opts Options, ruleDoc *perms.RuleDoc) ([]platform.Attr, error) {
+	updates := make([]platform.Attr, 0, len(batch))
+	for _, st := range batch {
+		if len(st.Args) != 1 {
+			return nil, fmt.Errorf("transact: update-attr: want one payload")
+		}
+		patch, err := parseRequiredAttrUpdate(st.Args[0])
+		if err != nil {
+			return nil, fmt.Errorf("transact: update-attr: %w", err)
+		}
+		var id [16]byte
+		if err := parseUUID(patch.ID, &id); err != nil {
+			return nil, fmt.Errorf("transact: update-attr: %w", err)
+		}
+		current, found, err := platform.FindAttrByID(ctx, tx, appID, id)
+		if err != nil {
+			return nil, fmt.Errorf("transact: update-attr: %w", err)
+		}
+		if !found {
+			return nil, fmt.Errorf("transact: update-attr: unknown attr %s", patch.ID)
+		}
+		// Both identity directions are security-sensitive namespace gates. The
+		// stored row, rather than only the wire payload, is authoritative here:
+		// update-attr intentionally has no identity fields, so a forged client
+		// payload cannot bypass a reserved reverse etype either.
+		if current.Etype != nil && perms.ReservedNamespaces[*current.Etype] {
+			return nil, fmt.Errorf("transact: update-attr: %q is a reserved namespace", *current.Etype)
+		}
+		if current.ReverseEtype != nil && perms.ReservedNamespaces[*current.ReverseEtype] {
+			return nil, fmt.Errorf("transact: update-attr: reverse namespace %q is reserved", *current.ReverseEtype)
+		}
+		// update-attr is an attrs-level operation, not an entity mutation, so
+		// enforcePerms does not see it. Keep the same fail-closed rule gate and
+		// bindings as the add-attr path. Admin bypasses this permission only;
+		// namespace gates above still apply.
+		if !opts.Admin && ruleDoc != nil {
+			allow, err := perms.Check("attrs", "update", ruleDoc, perms.Bindings{
+				Auth: opts.AuthUser, RuleParams: opts.RuleParams, Request: opts.Request,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("transact: attrs.update: %w", err)
+			}
+			if !allow {
+				return nil, fmt.Errorf("transact: attrs.update denied")
+			}
+		}
+		current.IsRequired = *patch.Required
+		if _, err := tx.Exec(ctx, `
+			UPDATE attrs
+			   SET is_required = $1
+			 WHERE app_id = $2 AND id = $3 AND deletion_marked_at IS NULL`,
+			current.IsRequired, appID, id); err != nil {
+			return nil, fmt.Errorf("transact: update-attr: %w", err)
+		}
+		cat.Add(current)
+		updates = append(updates, current)
+	}
+	return updates, nil
+}
+
 func validateRequired(ctx context.Context, q interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }, appID [16]byte, cat *platform.AttrCatalog, touched [][16]byte) error {
 	if len(touched) == 0 {
 		return nil
 	}
-	for eid := range touched {
-		_ = eid
+	if cat == nil {
+		return nil
 	}
-	// Phase 2: required attrs are enforced as: for each attr with required=true,
-	// assert at least one triple exists for (entity, attr) where value IS NOT NULL.
+	etypes := make(map[string]struct{})
 	for _, attr := range catalogAttrs(cat) {
-		if !attr.IsIndexed && !isRequiredAttr(attr) {
+		if attr.Etype == nil {
 			continue
 		}
-		// Only attrs flagged as required via platform's required=true.
+		if attr.IsRequired || (attr.Label != nil && *attr.Label == "id") {
+			etypes[*attr.Etype] = struct{}{}
+		}
 	}
-	return nil
-}
-
-func isRequiredAttr(a platform.Attr) bool {
-	_ = a
-	return false // Phase 2 defers required? enforcement to the transactor-layer
-	// check_data_type validation (v1: validate-required!). Actual required?
-	// flags come from checked_data_type==not-null; here we just check that the
-	// catalog's attribute entry has cardinality one required semantics.
+	if len(etypes) == 0 {
+		return nil
+	}
+	etypeList := make([]string, 0, len(etypes))
+	for etype := range etypes {
+		etypeList = append(etypeList, etype)
+	}
+	sort.Strings(etypeList)
+	rows, err := q.Query(ctx, `
+		WITH touched(entity_id) AS (
+			SELECT * FROM unnest($2::uuid[])
+		),
+		alive AS (
+			SELECT DISTINCT t.entity_id, a.etype
+			  FROM triples t
+			  JOIN attrs a ON a.id = t.attr_id
+			  JOIN touched x ON x.entity_id = t.entity_id
+			 WHERE t.app_id = $1
+			   AND a.app_id = $1
+			   AND a.deletion_marked_at IS NULL
+			   AND a.etype = ANY($3::text[])
+			   AND t.value <> 'null'::jsonb
+		),
+		required_attrs AS (
+			SELECT a.id, a.etype, a.label
+			  FROM attrs a
+			 WHERE a.app_id = $1
+			   AND a.deletion_marked_at IS NULL
+			   AND a.etype = ANY($3::text[])
+			   AND (a.is_required OR a.label = 'id')
+		),
+		present AS (
+			SELECT DISTINCT t.entity_id, t.attr_id
+			  FROM triples t
+			  JOIN alive e ON e.entity_id = t.entity_id
+			  JOIN required_attrs r ON r.id = t.attr_id AND r.etype = e.etype
+			 WHERE t.app_id = $1
+			   AND t.value <> 'null'::jsonb
+		)
+		SELECT e.entity_id, r.etype, r.label
+		  FROM alive e
+		  JOIN required_attrs r ON r.etype = e.etype
+		 WHERE NOT EXISTS (
+			SELECT 1 FROM present p
+			 WHERE p.entity_id = e.entity_id AND p.attr_id = r.id
+		)
+		 ORDER BY e.entity_id, r.etype, r.label`, appID, touched, etypeList)
+	if err != nil {
+		return fmt.Errorf("validate required attrs: %w", err)
+	}
+	defer rows.Close()
+	type missing struct {
+		eid          [16]byte
+		etype, label string
+	}
+	var misses []missing
+	for rows.Next() {
+		var m missing
+		if err := rows.Scan(&m.eid, &m.etype, &m.label); err != nil {
+			return fmt.Errorf("validate required attrs: %w", err)
+		}
+		misses = append(misses, m)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("validate required attrs: %w", err)
+	}
+	if len(misses) == 0 {
+		return nil
+	}
+	parts := make([]string, 0, len(misses))
+	for _, m := range misses {
+		parts = append(parts, fmt.Sprintf("`%s/%s`: %s", m.etype, m.label, platform.UUIDToStr(m.eid)))
+	}
+	if len(parts) == 1 {
+		return fmt.Errorf("Missing required attribute %s", parts[0])
+	}
+	return fmt.Errorf("Missing required attributes %s", strings.Join(parts, "; "))
 }
 
 func catalogAttrs(cat *platform.AttrCatalog) []platform.Attr {
-	return []platform.Attr{} // Phase 2 defers catalog enumeration behind catalog method
+	if cat == nil {
+		return nil
+	}
+	return cat.Attrs()
+}
+
+// validateUpdatedRequired checks all live entities of each attr's etype after
+// the complete batch has run. It mirrors v1's validate-update-required! and
+// deliberately uses the caller's pgx.Tx so the check is atomic with metadata
+// and data mutations.
+func validateUpdatedRequired(ctx context.Context, q interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}, appID [16]byte, updates []platform.Attr) error {
+	byID := make(map[[16]byte]platform.Attr, len(updates))
+	for _, attr := range updates {
+		if attr.IsRequired && attr.Etype != nil {
+			byID[attr.ID] = attr
+		}
+	}
+	if len(byID) == 0 {
+		return nil
+	}
+	ordered := make([]platform.Attr, 0, len(byID))
+	for _, attr := range byID {
+		ordered = append(ordered, attr)
+	}
+	sort.Slice(ordered, func(i, j int) bool { return platform.UUIDToStr(ordered[i].ID) < platform.UUIDToStr(ordered[j].ID) })
+	ids := make([][16]byte, len(ordered))
+	etypes := make([]string, len(ordered))
+	labels := make([]string, len(ordered))
+	for i, attr := range ordered {
+		ids[i] = attr.ID
+		etypes[i] = *attr.Etype
+		if attr.Label != nil {
+			labels[i] = *attr.Label
+		}
+	}
+	rows, err := q.Query(ctx, `
+		WITH requested(id, etype, label) AS (
+			SELECT * FROM unnest($2::uuid[], $3::text[], $4::text[])
+		),
+		alive AS (
+			SELECT DISTINCT t.entity_id, a.etype
+			  FROM triples t
+			  JOIN attrs a ON a.id = t.attr_id
+			 WHERE t.app_id = $1
+			   AND a.app_id = $1
+			   AND a.deletion_marked_at IS NULL
+			   AND a.etype = ANY($3::text[])
+			   AND t.value <> 'null'::jsonb
+		),
+		coverage AS (
+			SELECT r.id, r.etype, r.label,
+			       count(DISTINCT e.entity_id) AS entity_count,
+			       count(DISTINCT CASE WHEN t.value <> 'null'::jsonb THEN t.entity_id END) AS attr_count
+			  FROM requested r
+			  LEFT JOIN alive e ON e.etype = r.etype
+			  LEFT JOIN triples t ON t.app_id = $1
+			                    AND t.entity_id = e.entity_id
+			                    AND t.attr_id = r.id
+			 GROUP BY r.id, r.etype, r.label
+		)
+		SELECT id, etype, label
+		  FROM coverage
+		 WHERE entity_count <> attr_count
+		 ORDER BY etype, label`, appID, ids, etypes, labels)
+	if err != nil {
+		return fmt.Errorf("validate updated required attrs: %w", err)
+	}
+	defer rows.Close()
+	var parts []string
+	for rows.Next() {
+		var id [16]byte
+		var etype, label string
+		if err := rows.Scan(&id, &etype, &label); err != nil {
+			return fmt.Errorf("validate updated required attrs: %w", err)
+		}
+		parts = append(parts, fmt.Sprintf("Can't update attribute `%s` to required because `%s` already have entities without it", label, etype))
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("validate updated required attrs: %w", err)
+	}
+	if len(parts) > 0 {
+		return fmt.Errorf("%s", strings.Join(parts, "; "))
+	}
+	return nil
 }
 
 func orderSteps(steps []Step) []string {

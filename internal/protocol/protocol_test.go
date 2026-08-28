@@ -90,7 +90,8 @@ func TestAttrTagRoundTrip(t *testing.T) {
 	// We hand-author Attr tags; the test pins spellings so a rename can't drift silently.
 	uniq := true
 	idx := true
-	a := Attr{ID: "a", ValueType: "ref", Cardinality: "one", ForwardIdentity: [3]string{"uuid", "etype", "label"}, Unique: &uniq, Index: &idx}
+	req := true
+	a := Attr{ID: "a", ValueType: "ref", Cardinality: "one", ForwardIdentity: [3]string{"uuid", "etype", "label"}, Unique: &uniq, Index: &idx, Required: &req}
 	b, err := json.Marshal(a)
 	if err != nil {
 		t.Fatal(err)
@@ -105,10 +106,9 @@ func TestAttrTagRoundTrip(t *testing.T) {
 	if _, ok := m["forward-identity"]; !ok {
 		t.Fatal("forward-identity missing")
 	}
-	// "unique?" was kept as "unique" (Go json field tag can't carry '?') — document that delta here
-	// so a future review can decide to restore it. For now, assert "unique" (not "unique?") is present
-	// and "index" matches — these are the only two that drop the '?' for valid Go struct tags.
-	if _, ok := m["unique"]; !ok {
-		t.Fatal("unique missing")
+	for _, k := range []string{"unique?", "index?", "required?"} {
+		if _, ok := m[k]; !ok {
+			t.Fatalf("%s missing", k)
+		}
 	}
 }
