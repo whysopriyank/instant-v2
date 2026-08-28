@@ -121,6 +121,12 @@ func run(logger *slog.Logger) error {
 		} else if writeCfg.MaxConns < 32 {
 			writeCfg.MaxConns = 32 // reactive refreshes + transacts share the writer budget
 		}
+		if cfg.PoolMinConns > 0 {
+			writeCfg.MinConns = cfg.PoolMinConns
+			if writeCfg.MinConns > writeCfg.MaxConns {
+				writeCfg.MinConns = writeCfg.MaxConns
+			}
+		}
 		storage.ApplyStatementLimits(writeCfg, cfg.PGStatementTimeout, cfg.PGLockTimeout, cfg.PGIdleTxTimeout)
 		writePool, err := pgxpool.NewWithConfig(ctx, writeCfg)
 		if err != nil {
@@ -140,6 +146,12 @@ func run(logger *slog.Logger) error {
 			readCfg.MaxConns = cfg.ReadPoolMaxConns
 		} else if readCfg.MaxConns < 32 {
 			readCfg.MaxConns = 32
+		}
+		if cfg.PoolMinConns > 0 {
+			readCfg.MinConns = cfg.PoolMinConns
+			if readCfg.MinConns > readCfg.MaxConns {
+				readCfg.MinConns = readCfg.MaxConns
+			}
 		}
 		storage.ApplyStatementLimits(readCfg, cfg.PGStatementTimeout, cfg.PGLockTimeout, cfg.PGIdleTxTimeout)
 		readPool, err := pgxpool.NewWithConfig(ctx, readCfg)

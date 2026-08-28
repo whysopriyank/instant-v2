@@ -263,14 +263,15 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					sendErr(500, "internal", "subscription missing after add-query")
 					return
 				}
-				result, rerr := h.Refresh(ctx, sub)
+				result, rerr := h.Manager.snapshotOrRefresh(ctx, h.Refresh, sub)
 				if rerr != nil {
 					sendErr(400, "invalid-query", platform.ClientMessage(rerr))
 					return
 				}
 				// Baseline for delta-refresh diffs is always the flat envelope;
-				// the wire gets the v1 node-list.
-				sub.SetSnapshot(result)
+				// the wire gets the v1 node-list. snapshotOrRefresh seeded the
+				// baseline on the refresh path; on the reuse path it is already
+				// current and must NOT be overwritten with a stale-local copy.
 				nodes, nerr := nodelistFor(ctx, h.Manager.Deps.Catalogs, sess.AppID, result)
 				if nerr != nil {
 					sendErr(500, "internal", nerr.Error())

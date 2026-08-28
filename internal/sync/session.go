@@ -141,6 +141,11 @@ type Manager struct {
 	groupsMu   sync.Mutex
 	groups     map[string]*queryGroup
 	appMembers map[string]int // appID -> total attached members (cap accounting)
+
+	// flight serializes the synchronous add-query initial answer per group
+	// key: the first arriver computes and seeds the group snapshot,
+	// concurrent duplicates wait and reuse it (docs/08 §T1.1 single-flight).
+	flight sync.Map // group key -> *sync.Mutex
 }
 
 func NewManager(d Deps) *Manager {
@@ -524,7 +529,6 @@ func (m *Manager) topicsFor(ctx context.Context, appID string, rawQ json.RawMess
 	topics := map[string]bool{}
 	var walk func(prefixEtype string, node map[string]any) error
 	walk = func(etype string, node map[string]any) error {
-		attrs := cat.ByEtype(etype)
 		for k, v := range node {
 			if k == "$" {
 				if wm, ok := v.(map[string]any); ok {
@@ -538,7 +542,6 @@ func (m *Manager) topicsFor(ctx context.Context, appID string, rawQ json.RawMess
 				}
 				continue
 			}
-			_ = attrs
 			child, ok := v.(map[string]any)
 			if !ok {
 				child = map[string]any{}

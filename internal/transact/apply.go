@@ -144,7 +144,7 @@ func Transact(
 		// Fail-closed — compile or eval errors deny the whole batch. Admin
 		// callers bypass (v1 :admin? true semantics).
 		if ruleDoc != nil && !opts.Admin {
-			if err := enforcePerms(ctx, tx, appID, txCat, steps, opts, ruleDoc); err != nil {
+			if err := enforcePerms(ctx, tx, appID, txCat, steps, opts, ruleDoc, storage.FetchTx); err != nil {
 				return err
 			}
 		}
@@ -268,7 +268,29 @@ func applyRetract(ctx context.Context, tx pgx.Tx, db *storage.DB, appID [16]byte
 	return err
 }
 
+// applyDeepMerge batches the per-step fetch→merge→write pipeline for
+// cardinality-one attrs into ONE (e,a)-pair fetch plus ONE batched insert
+// (audit backlog: the per-step loop issued 2 queries per step inside the
+// write tx).
+//
+// Cardinality-many attrs retain the old sequential pipeline. A many attr does
+// not overwrite its existing row, so collapsing repeated steps to one final
+// insert would drop values and would not be equivalent to the old behavior.
+// For cardinality-one attrs, deep-merge is a fold where each incoming value is
+// applied in step order to the result of the previous step. This preserves
+// scalar/map/null transitions exactly while allowing the fetch and write to be
+// batched.
 func applyDeepMerge(ctx context.Context, tx pgx.Tx, db *storage.DB, appID [16]byte, cat *platform.AttrCatalog, batch []Step, opts Options) error {
+	if len(batch) == 0 {
+		return nil
+	}
+	type mergeKey struct{ e, a [16]byte }
+	type mergeOp struct {
+		triple triple.Triple
+		srcs   []any // incoming values in step order
+	}
+	ops := make([]*mergeOp, 0, len(batch))
+	byKey := make(map[mergeKey]*mergeOp, len(batch))
 	for _, st := range batch {
 		ta, err := parseTripleArgs(st, cat)
 		if err != nil {
@@ -282,7 +304,105 @@ func applyDeepMerge(ctx context.Context, tx pgx.Tx, db *storage.DB, appID [16]by
 		if err != nil {
 			return err
 		}
-		// Fetch existing value for (e,a); merge via jsonb_deep_merge-like semantics.
+		k := mergeKey{eid, ta.AttrID}
+		op := byKey[k]
+		if op == nil {
+			op = &mergeOp{triple: triple.Triple{E: eid, A: ta.AttrID}}
+			byKey[k] = op
+			ops = append(ops, op)
+		}
+		op.srcs = append(op.srcs, incoming)
+	}
+
+	// The batched write path is equivalent only for cardinality-one attrs.
+	// Keep many-cardinality operations in their original step order: each
+	// sequential insert can add a distinct value, whereas one final insert
+	// would incorrectly discard intermediate values.
+	hasMany := false
+	oneOps := make([]*mergeOp, 0, len(ops))
+	for _, op := range ops {
+		a, ok := cat.ByID(op.triple.A)
+		if !ok || a.Cardinality != "one" {
+			// parseTripleArgs already validates the attr, but preserve the old
+			// path if a catalog implementation ever cannot report its shape.
+			hasMany = true
+			continue
+		}
+		oneOps = append(oneOps, op)
+	}
+	if hasMany {
+		for _, st := range batch {
+			attr, err := parseTripleArgs(st, cat)
+			if err != nil {
+				return err
+			}
+			a, ok := cat.ByID(attr.AttrID)
+			if !ok || a.Cardinality != "one" {
+				if err := applyDeepMergeSequential(ctx, tx, db, appID, cat, []Step{st}, opts); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	if len(oneOps) == 0 {
+		return nil
+	}
+
+	pairs := make([]storage.EAPair, len(oneOps))
+	for i, op := range oneOps {
+		pairs[i] = storage.EAPair{E: op.triple.E, A: op.triple.A}
+	}
+	bases, err := storage.FetchPairs(ctx, tx, appID, pairs)
+	if err != nil {
+		return err
+	}
+	baseBy := make(map[mergeKey]any, len(bases))
+	for _, row := range bases {
+		k := mergeKey{row.Triple.E, row.Triple.A}
+		if _, ok := baseBy[k]; !ok {
+			// First row per pair = the old rows[0] pick. decodeValue
+			// leaves json.Number in place (storage pkg contract); widen
+			// so the merged map re-encodes via triple.IsValue.
+			baseBy[k] = convertNumbers(row.Triple.V)
+		}
+	}
+
+	ts := make([]triple.Triple, 0, len(oneOps))
+	for _, op := range oneOps {
+		merged, hasMerged := baseBy[mergeKey{op.triple.E, op.triple.A}]
+		for _, src := range op.srcs { // fold sources in step order
+			if !hasMerged {
+				merged, hasMerged = src, true
+				continue
+			}
+			merged = deepMergeJSON(merged, src)
+		}
+		if !hasMerged {
+			continue // unreachable: every op has ≥1 src
+		}
+		op.triple.V = merged
+		ts = append(ts, op.triple)
+	}
+	return applyInsertInto(ctx, tx, appID, cat, ts, opts.OverwriteT)
+}
+
+// applyDeepMergeSequential is the compatibility path for many-cardinality
+// attrs. It intentionally mirrors the pre-batching implementation one step at
+// a time, including its first-row selection and insert semantics.
+func applyDeepMergeSequential(ctx context.Context, tx pgx.Tx, db *storage.DB, appID [16]byte, cat *platform.AttrCatalog, batch []Step, opts Options) error {
+	for _, st := range batch {
+		ta, err := parseTripleArgs(st, cat)
+		if err != nil {
+			return err
+		}
+		var eid [16]byte
+		if err := parseUUID(strings.Trim(string(ta.EID), `"`), &eid); err != nil {
+			return err
+		}
+		incoming, err := parseValueJSON(ta.Value)
+		if err != nil {
+			return err
+		}
 		rows, err := storage.FetchTx(ctx, tx, appID, storage.FetchFilter{
 			EntityIDs: [][16]byte{eid},
 			AttrIDs:   [][16]byte{ta.AttrID},
@@ -294,8 +414,6 @@ func applyDeepMerge(ctx context.Context, tx pgx.Tx, db *storage.DB, appID [16]by
 		if len(rows) == 0 {
 			merged = incoming
 		} else {
-			// decodeValue leaves json.Number in place (storage pkg contract);
-			// widen it here so the merged map re-encodes via triple.IsValue.
 			merged = deepMergeJSON(convertNumbers(rows[0].Triple.V), incoming)
 		}
 		if err := applyInsertInto(ctx, tx, appID, cat, []triple.Triple{{E: eid, A: ta.AttrID, V: merged}}, opts.OverwriteT); err != nil {
@@ -539,13 +657,19 @@ func etypeFor(cat *platform.AttrCatalog, attrID [16]byte) string {
 // entityProjection projects one entity's committed triples into a
 // label→value map (the `data` binding v1 rules see). Cardinality-many attrs
 // accumulate as arrays; unknown attrs are skipped.
-func entityProjection(ctx context.Context, tx pgx.Tx, appID [16]byte, eid [16]byte, cat *platform.AttrCatalog) map[string]any {
+type permissionFetcher func(context.Context, pgx.Tx, [16]byte, storage.FetchFilter) ([]storage.Enhanced, error)
+
+func entityProjection(ctx context.Context, tx pgx.Tx, appID [16]byte, eid [16]byte, cat *platform.AttrCatalog) (map[string]any, error) {
+	return entityProjectionWithFetcher(ctx, tx, appID, eid, cat, storage.FetchTx)
+}
+
+func entityProjectionWithFetcher(ctx context.Context, tx pgx.Tx, appID [16]byte, eid [16]byte, cat *platform.AttrCatalog, fetch permissionFetcher) (map[string]any, error) {
 	out := map[string]any{}
-	rows, err := storage.FetchTx(ctx, tx, appID, storage.FetchFilter{
+	rows, err := fetch(ctx, tx, appID, storage.FetchFilter{
 		EntityIDs: [][16]byte{eid},
 	})
 	if err != nil {
-		return out // projection is best-effort: eval proceeds with what loaded
+		return nil, fmt.Errorf("fetch entity projection: %w", err)
 	}
 	for _, r := range rows {
 		a, ok := cat.ByID(r.Triple.A)
@@ -560,7 +684,7 @@ func entityProjection(ctx context.Context, tx pgx.Tx, appID [16]byte, eid [16]by
 			out[label] = r.Triple.V
 		}
 	}
-	return out
+	return out, nil
 }
 
 func permBindings(opts Options, data, newData map[string]any) perms.Bindings {
@@ -578,7 +702,7 @@ func permBindings(opts Options, data, newData map[string]any) perms.Bindings {
 // and data projections see same-batch state. Any check error or denial
 // aborts the whole transaction (fail-closed).
 func enforcePerms(ctx context.Context, tx pgx.Tx, appID [16]byte,
-	cat *platform.AttrCatalog, steps []Step, opts Options, doc *perms.RuleDoc,
+	cat *platform.AttrCatalog, steps []Step, opts Options, doc *perms.RuleDoc, fetch permissionFetcher,
 ) error {
 	for _, op := range orderSteps(steps) {
 		switch op {
@@ -593,7 +717,7 @@ func enforcePerms(ctx context.Context, tx pgx.Tx, appID [16]byte,
 					return fmt.Errorf("perms: eid %s: %w", ta.EID, err)
 				}
 				action := "create"
-				existing, err := storage.FetchTx(ctx, tx, appID, storage.FetchFilter{
+				existing, err := fetch(ctx, tx, appID, storage.FetchFilter{
 					EntityIDs: [][16]byte{eid}, AttrIDs: [][16]byte{ta.AttrID},
 				})
 				if err != nil {
@@ -603,7 +727,10 @@ func enforcePerms(ctx context.Context, tx pgx.Tx, appID [16]byte,
 					action = "update"
 				}
 				etype := etypeFor(cat, ta.AttrID)
-				data := entityProjection(ctx, tx, appID, eid, cat)
+				data, err := entityProjectionWithFetcher(ctx, tx, appID, eid, cat, fetch)
+				if err != nil {
+					return fmt.Errorf("perms %s projection: %w", etype, err)
+				}
 				newData := cloneMap(data)
 				incoming, err := parseValueJSON(ta.Value)
 				if err != nil {
@@ -632,7 +759,10 @@ func enforcePerms(ctx context.Context, tx pgx.Tx, appID [16]byte,
 					return fmt.Errorf("perms: eid %s: %w", ta.EID, err)
 				}
 				etype := etypeFor(cat, ta.AttrID)
-				data := entityProjection(ctx, tx, appID, eid, cat)
+				data, err := entityProjectionWithFetcher(ctx, tx, appID, eid, cat, fetch)
+				if err != nil {
+					return fmt.Errorf("perms %s projection: %w", etype, err)
+				}
 				newData := cloneMap(data)
 				if label := attrLabel(cat, ta.AttrID); label != "" {
 					delete(newData, label) // post-retract state approximation
@@ -656,13 +786,16 @@ func enforcePerms(ctx context.Context, tx pgx.Tx, appID [16]byte,
 				if err := parseUUID(eidStr, &eid); err != nil {
 					continue
 				}
-				data := entityProjection(ctx, tx, appID, eid, cat)
 				etype := "$default"
 				if len(st.Args) == 2 {
 					var e string
 					if json.Unmarshal(st.Args[1], &e) == nil && e != "" {
 						etype = e
 					}
+				}
+				data, err := entityProjectionWithFetcher(ctx, tx, appID, eid, cat, fetch)
+				if err != nil {
+					return fmt.Errorf("perms %s projection: %w", etype, err)
 				}
 				allow, err := perms.Check(etype, "delete", doc, permBindings(opts, data, map[string]any{}))
 				if err != nil {

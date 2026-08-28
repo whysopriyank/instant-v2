@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/instant-v2/instant-v2/internal/metrics"
@@ -114,13 +115,53 @@ type bucket struct {
 }
 
 // Limiter is the in-process token-bucket set. Safe for concurrent use.
+//
+// Locking: buckets are striped across limiterShards shards keyed by a hash of
+// (appID, class). The previous single-mutex design serialized every Allow
+// call process-wide — one lock contended by every WS frame, SSE message and
+// HTTP request across all apps. Existing buckets now lock only their own
+// shard; new-bucket admission additionally takes the reservation mutex so
+// the global cap remains atomic. The cap counter is read lock-free.
 type Limiter struct {
-	mu         sync.Mutex
-	cfg        map[Class]ClassConfig
-	buckets    map[bucketKey]*bucket
-	now        func() time.Time // swappable for tests
-	maxBuckets int
-	idleTTL    time.Duration
+	// admissionMu serializes only new-bucket reservations and global idle
+	// eviction. Existing buckets remain protected by their own shard mutex.
+	// Every path that acquires a shard while holding admissionMu does so in
+	// this direction; no path acquires admissionMu while holding a shard.
+	admissionMu sync.Mutex
+	cfg         map[Class]ClassConfig
+	shards      [limiterShards]limiterShard
+	now         func() time.Time // swappable for tests
+	maxBuckets  int
+	idleTTL     time.Duration
+	total       atomic.Int64 // tracked buckets across all shards
+}
+
+// limiterShards is the stripe count (power of two, so shardFor masks).
+const limiterShards = 64
+
+type limiterShard struct {
+	mu      sync.Mutex
+	buckets map[bucketKey]*bucket
+}
+
+// shardFor hashes a bucket key to its stripe (alloc-free FNV-1a).
+func shardFor(key bucketKey) uint32 {
+	const (
+		offset32 = 2166136261
+		prime32  = 16777619
+	)
+	h := uint32(offset32)
+	for i := 0; i < len(key.appID); i++ {
+		h ^= uint32(key.appID[i])
+		h *= prime32
+	}
+	h ^= uint32(len(key.appID)) // separator without an allocation
+	h *= prime32
+	for i := 0; i < len(key.class); i++ {
+		h ^= uint32(key.class[i])
+		h *= prime32
+	}
+	return h & (limiterShards - 1)
 }
 
 // New builds a Limiter from cfg (missing classes inherit defaults).
@@ -133,13 +174,16 @@ func New(cfg Config) *Limiter {
 	if ttl <= 0 {
 		ttl = DefaultIdleTTL
 	}
-	return &Limiter{
+	l := &Limiter{
 		cfg:        cfg.resolved(),
-		buckets:    map[bucketKey]*bucket{},
 		now:        time.Now,
 		maxBuckets: maxB,
 		idleTTL:    ttl,
 	}
+	for i := range l.shards {
+		l.shards[i].buckets = map[bucketKey]*bucket{}
+	}
+	return l
 }
 
 // SweepLoop evicts idle buckets every `every` until ctx is canceled. Without
@@ -153,20 +197,65 @@ func (l *Limiter) SweepLoop(ctx context.Context, every time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			l.mu.Lock()
-			l.evictLocked(l.now())
-			l.mu.Unlock()
+			l.evictAll(l.now())
 		}
 	}
 }
 
-// evictLocked drops buckets idle longer than idleTTL. Caller holds mu.
-func (l *Limiter) evictLocked(now time.Time) {
-	for k, b := range l.buckets {
+// evictShardLocked drops buckets idle longer than idleTTL in one shard.
+// Caller holds sh.mu.
+func (l *Limiter) evictShardLocked(sh *limiterShard, now time.Time) {
+	for k, b := range sh.buckets {
 		if now.Sub(b.last) > l.idleTTL {
-			delete(l.buckets, k)
+			delete(sh.buckets, k)
+			l.total.Add(-1)
 		}
 	}
+}
+
+// evictAll drops idle buckets across every shard. The admission mutex gives
+// this operation the same global reservation exclusion as new-bucket paths.
+func (l *Limiter) evictAll(now time.Time) {
+	l.admissionMu.Lock()
+	l.evictAllLocked(now)
+	l.admissionMu.Unlock()
+}
+
+// evictAllLocked drops idle buckets across every shard. Caller holds
+// admissionMu and no shard mutex.
+func (l *Limiter) evictAllLocked(now time.Time) {
+	for i := range l.shards {
+		sh := &l.shards[i]
+		sh.mu.Lock()
+		l.evictShardLocked(sh, now)
+		sh.mu.Unlock()
+	}
+}
+
+// lenBuckets reports tracked buckets across all shards (test helper).
+func (l *Limiter) lenBuckets() int {
+	n := 0
+	for i := range l.shards {
+		sh := &l.shards[i]
+		sh.mu.Lock()
+		n += len(sh.buckets)
+		sh.mu.Unlock()
+	}
+	return n
+}
+
+// bucketAppIDs lists the app ids of every tracked bucket (test helper).
+func (l *Limiter) bucketAppIDs() map[string]struct{} {
+	out := map[string]struct{}{}
+	for i := range l.shards {
+		sh := &l.shards[i]
+		sh.mu.Lock()
+		for k := range sh.buckets {
+			out[k.appID] = struct{}{}
+		}
+		sh.mu.Unlock()
+	}
+	return out
 }
 
 // Allow attempts to take one token for (appID, class). It returns the retry
@@ -183,23 +272,44 @@ func (l *Limiter) Allow(appID string, class Class) (ok bool, retryAfter time.Dur
 		return false, time.Minute
 	}
 
-	l.mu.Lock()
-	defer l.mu.Unlock()
 	key := bucketKey{appID: appID, class: class}
-	b, okb := l.buckets[key]
+	sh := &l.shards[shardFor(key)]
+	sh.mu.Lock()
 	now := l.now()
+	b, okb := sh.buckets[key]
 	if !okb {
-		if len(l.buckets) >= l.maxBuckets {
-			l.evictLocked(now)
+		// A new key must release its shard before taking admissionMu. This
+		// avoids the old cross-shard lock inversion. Recheck after acquiring
+		// the reservation because another caller may have created this key.
+		sh.mu.Unlock()
+		l.admissionMu.Lock()
+		sh.mu.Lock()
+		now = l.now()
+		b, okb = sh.buckets[key]
+		if !okb && l.total.Load() >= int64(l.maxBuckets) {
+			// evictAllLocked takes shard locks in one direction while no
+			// caller holds a shard lock, so concurrent admissions cannot
+			// form a cycle here.
+			sh.mu.Unlock()
+			l.evictAllLocked(now)
+			sh.mu.Lock()
+			b, okb = sh.buckets[key]
 		}
-		if len(l.buckets) >= l.maxBuckets {
-			// Cap reached with nothing evictable: admit untracked so the
-			// cap stays a memory bound, not a denial-of-service lever.
-			return true, 0
+		if !okb {
+			if l.total.Load() >= int64(l.maxBuckets) {
+				// Cap reached with nothing evictable: admit untracked so the
+				// cap stays a memory bound, not a denial-of-service lever.
+				sh.mu.Unlock()
+				l.admissionMu.Unlock()
+				return true, 0
+			}
+			b = &bucket{tokens: float64(cc.Burst), last: now}
+			sh.buckets[key] = b
+			l.total.Add(1)
 		}
-		b = &bucket{tokens: float64(cc.Burst), last: now}
-		l.buckets[key] = b
-	} else {
+		l.admissionMu.Unlock()
+	}
+	if okb {
 		elapsed := now.Sub(b.last)
 		if elapsed > 0 {
 			b.tokens = math.Min(float64(cc.Burst), b.tokens+elapsed.Seconds()*cc.Rate)
@@ -208,9 +318,11 @@ func (l *Limiter) Allow(appID string, class Class) (ok bool, retryAfter time.Dur
 	}
 	if b.tokens >= 1 {
 		b.tokens--
+		sh.mu.Unlock()
 		return true, 0
 	}
 	deficit := 1 - b.tokens
+	sh.mu.Unlock()
 	metrics.RateLimitRejections.WithLabelValues(string(class)).Inc()
 	return false, time.Duration(deficit / cc.Rate * float64(time.Second))
 }

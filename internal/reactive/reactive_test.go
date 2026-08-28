@@ -23,7 +23,7 @@ func TestAddRemoveAndTopicIndex(t *testing.T) {
 		t.Fatalf("len %d", s.Len())
 	}
 	got := s.SubsForTopics([]string{"attr-a"})
-	if len(got) != 1 || got[0] != id {
+	if len(got) != 1 || got[0].ID != id {
 		t.Fatalf("SubsForTopics: %v", got)
 	}
 	// Unrelated topic misses.

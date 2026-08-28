@@ -24,6 +24,7 @@ package reactive
 // same Frame/group dispatch.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -417,7 +418,7 @@ func (s *InstaqlSource) Entities(ctx context.Context, appID string, f *instaql.F
 	if err != nil {
 		return nil, err
 	}
-	attrs := attrsOfEtypeFor(cat, f.Etype)
+	attrs := cat.IDIndex(f.Etype) // prebuilt etype→uuid→attr index (was: full-catalog scan per drain)
 	rows, err := s.DB.Query(ctx, `
 		SELECT t.entity_id, t.attr_id, t.value, a.cardinality
 		  FROM triples t JOIN attrs a ON a.id = t.attr_id
@@ -453,7 +454,13 @@ func (s *InstaqlSource) Entities(ctx context.Context, appID string, f *instaql.F
 			continue
 		}
 		var v any
-		if err := json.Unmarshal(raw, &v); err != nil {
+		// UseNumber parity with instaql loadEntities: splice-produced
+		// payloads must render numbers identically to executor-produced
+		// envelopes, or delta baselines and splices would disagree on
+		// every numeric field (audit backlog B5).
+		vdec := json.NewDecoder(bytes.NewReader(raw))
+		vdec.UseNumber()
+		if err := vdec.Decode(&v); err != nil {
 			return nil, err
 		}
 		if str, isStr := v.(string); isStr && a.ValueType == "ref" {
@@ -491,18 +498,6 @@ func (s *InstaqlSource) Entities(ctx context.Context, appID string, f *instaql.F
 		out[id] = b
 	}
 	return out, nil
-}
-
-// attrsOfEtypeFor mirrors instaql's attrsOfEtype: catalog attrs of one etype
-// keyed by canonical attr-id text.
-func attrsOfEtypeFor(cat *platform.AttrCatalog, etype string) map[string]platform.Attr {
-	out := map[string]platform.Attr{}
-	for _, a := range cat.Attrs() {
-		if a.Etype != nil && *a.Etype == etype {
-			out[platform.UUIDToStr(a.ID)] = a
-		}
-	}
-	return out
 }
 
 // conditionsFor mirrors instaql's buildConditions (query.go:321): where

@@ -56,21 +56,26 @@ func (n *Notifier) NotifyChanges(ctx context.Context, appID string, changes []Ch
 	n.enqueue(appID, n.Store.SubsForTopics(topics), txID, dedupeChanges(changes))
 }
 
-// enqueue dirties subIDs at txID under n.mu, attaching ch (non-nil = known
+// enqueue dirties subs at txID under n.mu, attaching ch (non-nil = known
 // change set) for the drain loop. Shared by Notify (ch nil) and
 // NotifyChanges; coalescing keeps the newest tx-id per sub and merges known
 // change sets until the cap degrades them to unknown.
-func (n *Notifier) enqueue(appID string, subIDs []string, txID int64, ch []Change) {
+//
+// subs arrive as live *Subscription pointers straight from a Store snapshot
+// (SubsForTopics/SubsForApp) — no per-id Store.Get re-locking on the
+// transact hot path. A sub removed between snapshot and enqueue costs one
+// skipped drain at most: refreshOne re-validates liveness and watermark.
+func (n *Notifier) enqueue(appID string, subs []*Subscription, txID int64, ch []Change) {
 	n.mu.Lock()
 	if n.pending == nil {
 		n.pending = map[string]int64{}
 	}
 	added := 0
-	for _, id := range subIDs {
-		sub, ok := n.Store.Get(id)
-		if !ok || sub.AppID != appID || txID <= sub.TxID.Load() {
+	for _, sub := range subs {
+		if sub.AppID != appID || txID <= sub.TxID.Load() {
 			continue
 		}
+		id := sub.ID
 		n.pending[id] = txID
 		added++
 		switch ch {

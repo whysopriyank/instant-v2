@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -249,16 +250,16 @@ func TestBucketMapBoundedAndFailOpen(t *testing.T) {
 			t.Fatalf("bucket %d must be admitted", i)
 		}
 	}
-	if len(l.buckets) != 3 {
-		t.Fatalf("want 3 buckets, got %d", len(l.buckets))
+	if l.lenBuckets() != 3 {
+		t.Fatalf("want 3 buckets, got %d", l.lenBuckets())
 	}
 	// Over cap with nothing evictable: still allowed, not tracked.
 	for i := 10; i < 20; i++ {
 		if ok, _ := l.Allow(fmt.Sprintf("app-%d", i), ClassWS); !ok {
 			t.Fatalf("over-cap request must fail open (allowed), key app-%d denied", i)
 		}
-		if len(l.buckets) > 3 {
-			t.Fatalf("bucket map grew past cap: %d", len(l.buckets))
+		if l.lenBuckets() > 3 {
+			t.Fatalf("bucket map grew past cap: %d", l.lenBuckets())
 		}
 	}
 	// Advance past IdleTTL: lazy insert path evicts the stale set.
@@ -266,38 +267,33 @@ func TestBucketMapBoundedAndFailOpen(t *testing.T) {
 	if ok, _ := l.Allow("fresh", ClassWS); !ok {
 		t.Fatal("fresh bucket after idle sweep must be admitted")
 	}
-	for k := range l.buckets {
-		if k.appID != "fresh" && strings.HasPrefix(k.appID, "app-") && k.appID != "app-0" && k.appID != "app-1" && k.appID != "app-2" {
-			t.Fatalf("unexpected survivor %q", k.appID)
+	appIDs := l.bucketAppIDs()
+	for appID := range appIDs {
+		if appID != "fresh" && strings.HasPrefix(appID, "app-") && appID != "app-0" && appID != "app-1" && appID != "app-2" {
+			t.Fatalf("unexpected survivor %q", appID)
 		}
 	}
-	found := false
-	for k := range l.buckets {
-		if k.appID == "fresh" {
-			found = true
-		}
-	}
-	if !found {
+	if _, found := appIDs["fresh"]; !found {
 		t.Fatal("fresh key missing after eviction cycle")
 	}
 }
 
 func TestSweepLoopEvictsIdleBuckets(t *testing.T) {
-	base := time.Unix(1, 0)
-	clock := base
+	// fakeClock is mutex-guarded: SweepLoop reads l.now() from its own
+	// goroutine, so the clock must be race-free (a bare captured variable
+	// was a latent data race the single-mutex implementation masked).
+	fc := newFakeClock()
 	l := New(Config{IdleTTL: time.Minute})
-	l.now = func() time.Time { return clock }
+	l.now = fc.Now
 	if ok, _ := l.Allow("doomed", ClassAuth); !ok {
 		t.Fatal("initial allow must succeed")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { l.SweepLoop(ctx, time.Millisecond); close(done) }()
-	clock = base.Add(2 * time.Minute)
+	fc.Advance(2 * time.Minute)
 	size := func() int {
-		l.mu.Lock()
-		defer l.mu.Unlock()
-		return len(l.buckets)
+		return l.lenBuckets()
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for size() != 0 && time.Now().Before(deadline) {
@@ -307,5 +303,121 @@ func TestSweepLoopEvictsIdleBuckets(t *testing.T) {
 	<-done
 	if n := size(); n != 0 {
 		t.Fatalf("sweep loop left %d buckets behind", n)
+	}
+}
+
+// TestShardedConcurrency hammers one limiter from many goroutines with
+// distinct keys — the sharded stripe must show no deadlock, no lost updates,
+// and exact per-key burst accounting under -race.
+func TestShardedConcurrency(t *testing.T) {
+	const burst = 50
+	const goroutines = 8
+	const keys = 40 // spread across shards
+
+	l := New(testConfig(1000, burst))
+	var denials atomic.Int64
+	var admits atomic.Int64
+
+	var wg sync.WaitGroup
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < 200; i++ {
+				appID := fmt.Sprintf("app-%d", (g*keys+i)%keys)
+				if err := l.Acquire(context.Background(), appID, ClassTransact); err != nil {
+					denials.Add(1)
+				} else {
+					admits.Add(1)
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+
+	// Every key's bucket holds at most its burst; total admits can never
+	// exceed keys*burst regardless of interleaving.
+	if got := admits.Load(); got > keys*burst {
+		t.Fatalf("admits %d exceed total burst capacity %d", got, keys*burst)
+	}
+	if got := l.lenBuckets(); got != keys {
+		t.Fatalf("want %d tracked buckets, got %d", keys, got)
+	}
+	// Token accounting is conservative: admits + denials must equal calls.
+	if got := admits.Load() + denials.Load(); got != goroutines*200 {
+		t.Fatalf("lost decisions: %d != %d", got, goroutines*200)
+	}
+}
+
+// TestConcurrentAdmissionsBoundedAndNonBlocking forces many distinct keys to
+// contend for a tiny global bucket cap. New keys must not deadlock while
+// sweeping other shards, and the tracked bucket count must never exceed the
+// configured cap. Requests that arrive at a full, non-idle cap are fail-open
+// and therefore still admitted without creating another tracked bucket.
+func TestConcurrentAdmissionsBoundedAndNonBlocking(t *testing.T) {
+	const (
+		maxBuckets = 2
+		workers    = limiterShards
+		rounds     = 20
+	)
+
+	keys := make([]string, 0, workers)
+	seenShards := make(map[uint32]struct{}, workers)
+	for i := 0; len(keys) < workers; i++ {
+		appID := fmt.Sprintf("contention-app-%d", i)
+		shard := shardFor(bucketKey{appID: appID, class: ClassTransact})
+		if _, seen := seenShards[shard]; seen {
+			continue
+		}
+		seenShards[shard] = struct{}{}
+		keys = append(keys, appID)
+	}
+
+	for round := 0; round < rounds; round++ {
+		l := New(Config{
+			Classes: map[Class]ClassConfig{
+				ClassTransact: {Rate: 1, Burst: 1},
+			},
+			MaxBuckets: maxBuckets,
+			IdleTTL:    time.Hour,
+		})
+		fixedNow := time.Unix(1_700_000_000, 0)
+		l.now = func() time.Time { return fixedNow }
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for i := range keys {
+			wg.Add(1)
+			go func(appID string) {
+				defer wg.Done()
+				<-start
+				if ok, _ := l.Allow(appID, ClassTransact); !ok {
+					t.Errorf("round %d: %s was denied under cap pressure", round, appID)
+				}
+			}(keys[i])
+		}
+
+		close(start)
+		finished := make(chan struct{})
+		go func() {
+			wg.Wait()
+			close(finished)
+		}()
+		select {
+		case <-finished:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("round %d: concurrent admissions did not finish", round)
+		}
+
+		if got := l.total.Load(); got > maxBuckets {
+			t.Fatalf("round %d: tracked bucket counter %d exceeds cap %d", round, got, maxBuckets)
+		}
+		got := l.lenBuckets()
+		if got > maxBuckets {
+			t.Fatalf("round %d: tracked bucket map size %d exceeds cap %d", round, got, maxBuckets)
+		}
+		if got != maxBuckets {
+			t.Fatalf("round %d: tracked bucket map size %d, want cap %d after initial admissions", round, got, maxBuckets)
+		}
 	}
 }

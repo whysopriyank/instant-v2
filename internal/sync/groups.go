@@ -11,6 +11,7 @@ package sync
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
@@ -54,6 +55,26 @@ type queryGroup struct {
 	mu      sync.Mutex
 	members map[*Session]member
 }
+
+// snapshotFlight represents one in-progress initial refresh. The registry
+// entry is removed only after the leader has published its result and closed
+// done. This is important on failures: a waiter that already joined the old
+// flight must observe that flight's error, while a caller arriving after the
+// failure must be able to start a fresh attempt without overlapping the old
+// refresh.
+type snapshotFlight struct {
+	done chan struct{}
+
+	started      bool
+	participants int
+	result       json.RawMessage
+	err          error
+}
+
+// snapshotFlightsMu serializes lifecycle operations on Manager.flight. The
+// refresh itself never runs under this lock; it is held only while selecting
+// or completing a flight, so different query keys remain independent.
+var snapshotFlightsMu sync.Mutex
 
 func (g *queryGroup) snapshotMembers() (members []member, anyDelta bool) {
 	g.mu.Lock()
@@ -187,6 +208,89 @@ func (m *Manager) DetachAll(sess *Session) {
 	}
 }
 
+// snapshotOrRefresh produces the synchronous initial answer for one group's
+// subscription under the per-key flight: the first arriver runs the full
+// refresh and seeds the group snapshot; concurrent duplicates of the same
+// group wait and reuse the baseline instead of stacking N recomputes on the
+// read pool (docs/08-tier1-hotpath.md §T1.1 single-flight).
+//
+// Reuse safety: the baseline covers exactly this group's query. Any commit
+// newer than the baseline either already dirtied the group (the drain pushes
+// refresh-ok to every attached member, including the waiter) or cannot exist
+// (fresh group ⇒ the baseline just materialized). A failed refresh seeds
+// nothing, so the next caller retries.
+func (m *Manager) snapshotOrRefresh(
+	ctx context.Context,
+	refresh func(context.Context, *reactive.Subscription) (json.RawMessage, error),
+	sub *reactive.Subscription,
+) (json.RawMessage, error) {
+	if snap := sub.Snapshot(); snap != nil {
+		return snap, nil
+	}
+
+	snapshotFlightsMu.Lock()
+	flightAny, ok := m.flight.Load(sub.ID)
+	if !ok {
+		flightAny = &snapshotFlight{done: make(chan struct{})}
+		m.flight.Store(sub.ID, flightAny)
+	}
+	flight := flightAny.(*snapshotFlight)
+	leader := !flight.started
+	if leader {
+		flight.started = true
+	}
+	flight.participants++
+	snapshotFlightsMu.Unlock()
+	defer m.releaseSnapshotFlight(flight)
+
+	if !leader {
+		select {
+		case <-flight.done:
+			return flight.result, flight.err
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	// A notifier may have seeded the subscription between the fast-path check
+	// above and flight acquisition. Treat that as a successful no-op and still
+	// complete the flight so followers receive the same baseline.
+	if snap := sub.Snapshot(); snap != nil {
+		m.completeSnapshotFlight(sub.ID, flight, snap, nil)
+		return snap, nil
+	}
+	if err := ctx.Err(); err != nil {
+		m.completeSnapshotFlight(sub.ID, flight, nil, err)
+		return nil, err
+	}
+
+	result, err := refresh(ctx, sub)
+	if err == nil {
+		sub.SetSnapshot(result)
+	}
+	m.completeSnapshotFlight(sub.ID, flight, result, err)
+	return result, err
+}
+
+// completeSnapshotFlight publishes a flight outcome before making the entry
+// unavailable to later callers. The channel close is the synchronization
+// edge for followers; deleting while holding the same registry lock prevents
+// the old unlock-then-delete race from creating a second active refresh.
+func (m *Manager) completeSnapshotFlight(id string, flight *snapshotFlight, result json.RawMessage, err error) {
+	snapshotFlightsMu.Lock()
+	flight.result = result
+	flight.err = err
+	close(flight.done)
+	m.flight.Delete(id)
+	snapshotFlightsMu.Unlock()
+}
+
+func (m *Manager) releaseSnapshotFlight(flight *snapshotFlight) {
+	snapshotFlightsMu.Lock()
+	flight.participants--
+	snapshotFlightsMu.Unlock()
+}
+
 // dispatchGroup renders ONE full envelope (+ optional delta variant) for the
 // generation and fans pre-encoded bytes to every member. Replaces the old
 // per-session Emit body.
@@ -205,30 +309,29 @@ func (m *Manager) dispatchGroup(g *queryGroup, fr reactive.Frame) {
 			logger.Error("groups: unwrap tree", "err", terr)
 			return
 		}
-		payload := computationEntry(
+		// Single render + single encode per generation. resultMetaOf returns
+		// non-empty bytes for essentially every instaql result (at minimum
+		// "{}"), so the previous assemble-encode-reassemble-reencode flow
+		// paid the full frame copy TWICE on every tree-class refresh.
+		meta := resultMetaOf(fr.ResultJSON)
+		pairs := make([][2]json.RawMessage, 0, 3)
+		pairs = append(pairs,
 			[2]json.RawMessage{keyInstaqlQuery, json.RawMessage(fr.QueryJSON)},
 			[2]json.RawMessage{keyInstaqlResult, tree},
 		)
-		fullRaw = encodeFrame(Frame{
+		out := Frame{
 			"op":              json.RawMessage(`"refresh-ok"`),
-			"computations":    payload,
 			"processed-tx-id": json.RawMessage(mustJSON(fr.ProcessedTxID)),
-		})
-		if meta := resultMetaOf(fr.ResultJSON); len(meta) > 0 {
-			// v1 admin SSE carries result-meta on refreshes too; rebuild the
-			// frame with it rather than short-circuit above.
-			payload2 := computationEntry(
-				[2]json.RawMessage{keyInstaqlQuery, json.RawMessage(fr.QueryJSON)},
-				[2]json.RawMessage{keyInstaqlResult, tree},
-				[2]json.RawMessage{keyResultMeta, json.RawMessage(meta)},
-			)
-			fullRaw = encodeFrame(Frame{
-				"op":              json.RawMessage(`"refresh-ok"`),
-				"computations":    payload2,
-				"result-meta":     json.RawMessage(meta),
-				"processed-tx-id": json.RawMessage(mustJSON(fr.ProcessedTxID)),
-			})
 		}
+		if len(meta) > 0 {
+			// v1 admin SSE carries result-meta on refreshes too. Pairs stay
+			// in sorted key order (instaql-query < instaql-result <
+			// result-meta) as computationEntry requires.
+			pairs = append(pairs, [2]json.RawMessage{keyResultMeta, json.RawMessage(meta)})
+			out["result-meta"] = json.RawMessage(meta)
+		}
+		out["computations"] = computationEntry(pairs...)
+		fullRaw = encodeFrame(out)
 	default:
 		nodes, nerr := BuildNodeList(g.cat, fr.ResultJSON)
 		if nerr != nil {

@@ -1,6 +1,7 @@
 package instaql
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -106,11 +107,8 @@ func (x *Executor) runForm(ctx context.Context, f *Form, cat *platform.AttrCatal
 		}
 	}
 
-	etypeAttrs := attrsOfEtype(cat, f.Etype)
-	attrIDs := make([]string, 0, len(etypeAttrs))
-	for id := range etypeAttrs {
-		attrIDs = append(attrIDs, id)
-	}
+	etypeAttrs := cat.IDIndex(f.Etype) // prebuilt etype→uuid→attr index (was: per-form full-catalog scan)
+	attrIDs := cat.ByEtype(f.Etype)    // prebuilt uuid list backing the same index
 
 	conds, err := buildConditions(f, cat)
 	if err != nil {
@@ -196,13 +194,11 @@ func (x *Executor) runForm(ctx context.Context, f *Form, cat *platform.AttrCatal
 	// Ordering (in-memory; corpus validates parity with v1's SQL ordering).
 	applyOrder(entities, f.Options)
 
-	// Page-info. LIMIT/OFFSET already applied SQL-side (paginateWrap); the
-	// in-memory pass only handles `last` (tail slice).
+	// Page-info. paginateWrap fetches one sentinel row for positive limits so
+	// an exact-size final page is distinguishable from a page with more rows.
+	// The sentinel is trimmed before projection and never reaches the wire.
 	pageInfo := &PageInfo{}
-	slice := entities
-	if o := f.Options; o != nil && o.Last != nil && len(entities) > *o.Last {
-		slice = entities[len(entities)-*o.Last:]
-	}
+	slice, hasNextPage, hasPreviousPage := pageSlice(entities, f.Options)
 	if needsPageInfo(f.Options) {
 		if len(slice) > 0 {
 			sc := encodeCursor(slice[0].ID, "", nil)
@@ -210,17 +206,14 @@ func (x *Executor) runForm(ctx context.Context, f *Form, cat *platform.AttrCatal
 			pageInfo.StartCursor = &sc
 			pageInfo.EndCursor = &ec
 		}
-		if o := f.Options; o != nil {
-			limit, offset := effectiveLimitOffset(o)
-			pageInfo.HasNextPage = len(slice) == limit && limit > 0
-			pageInfo.HasPreviousPage = offset > 0 || (o.Before != nil)
-		}
+		pageInfo.HasNextPage = hasNextPage
+		pageInfo.HasPreviousPage = hasPreviousPage
 	}
 
 	// Project into label→value maps.
 	out := make([]map[string]any, 0, len(slice))
 	for _, e := range slice {
-		m := projectEntity(e, f.Options, etypeAttrs)
+		m := projectEntity(e, f.Options)
 		out = append(out, m)
 	}
 
@@ -228,9 +221,9 @@ func (x *Executor) runForm(ctx context.Context, f *Form, cat *platform.AttrCatal
 	// links pointing back at this etype.
 	for _, child := range f.Children {
 		var rl *refLink
-		refAttr := findAttrByLabel(etypeAttrs, child.Label)
+		refAttr, hasRefAttr := cat.LabelIndex(f.Etype)[child.Label]
 		switch {
-		case refAttr != nil && refAttr.ValueType == "ref":
+		case hasRefAttr && refAttr.ValueType == "ref":
 			var vals []any
 			for _, e := range slice {
 				if vs, ok := e.Fields[child.Label].([]any); ok {
@@ -240,9 +233,9 @@ func (x *Executor) runForm(ctx context.Context, f *Form, cat *platform.AttrCatal
 			if vals == nil {
 				vals = []any{}
 			}
-			rl = &refLink{Mode: "forward", AttrID: uuidToStr(refAttr.ID), Values: vals}
+			rl = &refLink{Mode: "forward", AttrID: refAttr.UUID(), Values: vals}
 		default:
-			ra := findReverseAttr(cat, child.Etype, f.Etype, child.Label)
+			ra := cat.FindReverseAttr(child.Etype, f.Etype, child.Label)
 			if ra == nil {
 				return fmt.Errorf("instaql: %s.%s is not a link attribute", f.Etype, child.Label)
 			}
@@ -253,15 +246,19 @@ func (x *Executor) runForm(ctx context.Context, f *Form, cat *platform.AttrCatal
 			if vals == nil {
 				vals = []any{}
 			}
-			rl = &refLink{Mode: "reverse", AttrID: uuidToStr(ra.ID), ReverseLabel: derefS(ra.Label), Values: vals}
+			rl = &refLink{Mode: "reverse", AttrID: ra.UUID(), ReverseLabel: derefS(ra.Label), Values: vals}
 		}
 		if err := x.runForm(ctx, child, cat, appID, rl, res); err != nil {
 			return err
 		}
 		// Attach linked children onto each parent entity.
 		if childData, ok := res.Data[child.Etype]; ok && string(childData) != "null" {
+			// UseNumber: child bodies must keep the same number fidelity as
+			// the level that produced them (they re-marshal into parents).
 			var kids []map[string]any
-			_ = json.Unmarshal(childData, &kids)
+			kdec := json.NewDecoder(bytes.NewReader(childData))
+			kdec.UseNumber()
+			_ = kdec.Decode(&kids)
 			if rl.Mode == "reverse" {
 				// Group kids by the parent ids listed under their forward attr.
 				byparent := map[string][]map[string]any{}
@@ -351,6 +348,37 @@ func effectiveLimitOffset(o *Options) (limit, offset int) {
 	return
 }
 
+// pageSlice removes the SQL sentinel row and derives page direction metadata.
+// A forward page (limit/first) has another page only when the sentinel was
+// returned. A backward page (last) uses the sentinel to indicate preceding
+// rows instead; it does not manufacture a next page from the page size.
+func pageSlice(entities []entity, o *Options) (slice []entity, hasNext, hasPrevious bool) {
+	slice = entities
+	if o == nil {
+		return slice, false, false
+	}
+	_, offset := effectiveLimitOffset(o)
+	hasPrevious = offset > 0 || o.Before != nil
+	limit, _ := effectiveLimitOffset(o)
+	if limit <= 0 {
+		return slice, false, hasPrevious
+	}
+	if o.Last != nil {
+		if len(entities) > limit {
+			hasPrevious = true
+		}
+		if len(slice) > limit {
+			slice = slice[len(slice)-limit:]
+		}
+		return slice, false, hasPrevious
+	}
+	if len(entities) > limit {
+		hasNext = true
+		slice = slice[:limit]
+	}
+	return slice, hasNext, hasPrevious
+}
+
 // buildConditions converts where-conditions into datalog conditions using the
 // catalog for attr resolution and index choice.
 func buildConditions(f *Form, cat *platform.AttrCatalog) ([]datalog.Condition, error) {
@@ -365,8 +393,8 @@ func buildConditions(f *Form, cat *platform.AttrCatalog) ([]datalog.Condition, e
 			return nil, fmt.Errorf("instaql: dotted where path %q not supported yet", strings.Join(w.Path, "."))
 		}
 		label := w.Path[0]
-		aPtr := findAttrByLabel(attrsOfEtype(cat, f.Etype), label)
-		if aPtr == nil {
+		a, found := cat.LabelIndex(f.Etype)[label]
+		if !found {
 			// Unknown attr: $isNull semantics still work — every entity of
 			// this etype lacks it (v1 allows querying absent attrs with
 			// $isNull). true → no constraint; false → impossible set.
@@ -387,8 +415,7 @@ func buildConditions(f *Form, cat *platform.AttrCatalog) ([]datalog.Condition, e
 			}
 			return nil, fmt.Errorf("instaql: no attr %s.%s", f.Etype, label)
 		}
-		a := *aPtr
-		cond := datalog.Condition{AttrID: uuidToStr(a.ID), Attr: a}
+		cond := datalog.Condition{AttrID: a.UUID(), Attr: a}
 		switch tv := w.Value.(type) {
 		case map[string]any:
 			op, args, err := coerceOpMap(tv)
@@ -518,8 +545,14 @@ func (x *Executor) loadEntities(ctx context.Context, appID string, ids []string,
 		if !ok {
 			continue
 		}
+		// UseNumber keeps numeric literals verbatim through the pipeline:
+		// float64 re-rendering reformatted stored numbers (1.0 → 1) and
+		// silently corrupted integers beyond 2^53 (audit backlog B5).
+		// json.Marshal renders json.Number literals byte-exactly.
 		var v any
-		if err := json.Unmarshal(raw, &v); err != nil {
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.UseNumber()
+		if err := dec.Decode(&v); err != nil {
 			return out, err
 		}
 		if s, ok := v.(string); ok && a.ValueType == "ref" {
@@ -543,26 +576,6 @@ func (x *Executor) loadEntities(ctx context.Context, appID string, ids []string,
 	return out, nil
 }
 
-func attrsOfEtype(cat *platform.AttrCatalog, etype string) map[string]platform.Attr {
-	out := map[string]platform.Attr{}
-	for _, a := range cat.Attrs() {
-		if a.Etype != nil && *a.Etype == etype {
-			out[uuidToStr(a.ID)] = a
-		}
-	}
-	return out
-}
-
-func findAttrByLabel(attrs map[string]platform.Attr, label string) *platform.Attr {
-	for _, a := range attrs {
-		if a.Label != nil && *a.Label == label {
-			cp := a
-			return &cp
-		}
-	}
-	return nil
-}
-
 func applyOrder(entities []entity, o *Options) {
 	if o == nil || o.Order == nil {
 		sort.SliceStable(entities, func(i, j int) bool { return entities[i].ID < entities[j].ID })
@@ -582,6 +595,16 @@ func applyOrder(entities []entity, o *Options) {
 		case float64:
 			bv, _ := b.(float64)
 			return float64(dir)*(av-bv) < 0
+		case json.Number:
+			// UseNumber pipeline: order fields may arrive as numeric
+			// literals; compare numerically.
+			bn, _ := b.(json.Number)
+			af, aerr := av.Float64()
+			bf, berr := bn.Float64()
+			if aerr != nil || berr != nil {
+				return false
+			}
+			return float64(dir)*(af-bf) < 0
 		default:
 			return false
 		}
@@ -595,7 +618,7 @@ func comparableField(e entity, k string) any {
 	return e.Fields[k]
 }
 
-func projectEntity(e entity, o *Options, attrs map[string]platform.Attr) map[string]any {
+func projectEntity(e entity, o *Options) map[string]any {
 	m := map[string]any{"id": e.ID}
 	for k, v := range e.Fields {
 		if k == "id" {
@@ -632,7 +655,9 @@ func paginateWrap(entitySQL string, args []any, o *Options, cat *platform.AttrCa
 		wrapped += " ORDER BY s.entity_id"
 	}
 	if limit > 0 {
-		wrapped += fmt.Sprintf(" LIMIT %d", limit)
+		// Keep one row beyond the requested page as a sentinel. runForm trims
+		// it after ordering and uses its presence for hasNextPage.
+		wrapped += fmt.Sprintf(" LIMIT %d", limit+1)
 	}
 	if offset > 0 {
 		wrapped += fmt.Sprintf(" OFFSET %d", offset)
@@ -642,19 +667,6 @@ func paginateWrap(entitySQL string, args []any, o *Options, cat *platform.AttrCa
 
 // Attrs exposes the catalog entries (added to platform.AttrCatalog).
 func init() {}
-
-func findReverseAttr(cat *platform.AttrCatalog, childEtype, parentEtype, label string) *platform.Attr {
-	for _, a := range cat.Attrs() {
-		if a.Etype != nil && *a.Etype == childEtype &&
-			a.ReverseEtype != nil && *a.ReverseEtype == parentEtype &&
-			a.ReverseLabel != nil && *a.ReverseLabel == label &&
-			a.ValueType == "ref" {
-			cp := a
-			return &cp
-		}
-	}
-	return nil
-}
 
 func derefS(s *string) string {
 	if s == nil {

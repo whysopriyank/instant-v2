@@ -36,6 +36,12 @@ type sseConn struct {
 	sess      *Session
 	events    chan Frame
 	sessionID string
+	// overflow is signaled (non-blocking, capacity 1) whenever a reply
+	// cannot fit the event buffer. The GET writer ends the stream on
+	// receipt: an SSE client reconnects and re-initializes, whereas a
+	// silently dropped frame strands it stale until an unrelated event
+	// happens to re-dirty its subscriptions (audit backlog B1).
+	overflow chan struct{}
 	// msgMu serializes POST handling per stream: two overlapping POSTs with
 	// the same sse_token would otherwise race conn.sess materialization and
 	// Session map mutations (concurrent map writes = process-fatal).
@@ -165,6 +171,7 @@ func (h *SSEHandler) getSSE(w http.ResponseWriter, r *http.Request) {
 	conn := &sseConn{
 		sessionID: sessionID,
 		events:    make(chan Frame, 128),
+		overflow:  make(chan struct{}, 1),
 	}
 	if h.conns == nil {
 		h.conns = map[string]*sseConn{}
@@ -236,6 +243,12 @@ func (h *SSEHandler) getSSE(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			fl.Flush()
+		case <-conn.overflow:
+			// The event buffer overflowed: this stream can no longer keep
+			// up with its reply pressure. End it — EventSource clients
+			// reconnect with backoff and re-initialize; silently dropping
+			// frames would leave them stale with no signal at all.
+			return
 		case f := <-conn.events:
 			if raw, isRaw := f["__raw"]; isRaw {
 				writeDeadline()
@@ -288,6 +301,7 @@ func (h *SSEHandler) postSSE(w http.ResponseWriter, r *http.Request) {
 				case conn.events <- f:
 					return nil
 				default:
+					signalOverflow(conn)
 					return errSSEBackpressure
 				}
 			},
@@ -296,6 +310,7 @@ func (h *SSEHandler) postSSE(w http.ResponseWriter, r *http.Request) {
 				case conn.events <- Frame{"__raw": json.RawMessage(b)}:
 					return nil
 				default:
+					signalOverflow(conn)
 					return errSSEBackpressure
 				}
 			},
@@ -304,20 +319,20 @@ func (h *SSEHandler) postSSE(w http.ResponseWriter, r *http.Request) {
 	for _, raw := range req.Messages {
 		f, err := ParseFrame(raw)
 		if err != nil {
-			pushReply(conn.events, ErrFrame(400, "bad-frame", err.Error()))
+			pushReply(conn, ErrFrame(400, "bad-frame", err.Error()))
 			continue
 		}
 		op, _ := f.GetOp()
 		// Protocol guard (audit M5): mirror the WS loop — every op except
 		// init is refused until the session is initialized.
 		if op != "init" && !conn.initialized {
-			pushReply(conn.events, ErrFrame(401, "not-initialized", "send init first"))
+			pushReply(conn, ErrFrame(401, "not-initialized", "send init first"))
 			continue
 		}
 		if op == "init" {
 			sess, reply, ierr := h.Manager.HandleInit(r.Context(), f)
 			if ierr != nil {
-				pushReply(conn.events, reply)
+				pushReply(conn, reply)
 				continue
 			}
 			// Audit F6 parity with the WS loop: detach the replaced session.
@@ -328,7 +343,7 @@ func (h *SSEHandler) postSSE(w http.ResponseWriter, r *http.Request) {
 			sess.Send = conn.sess.Send
 			conn.sess = sess
 			conn.initialized = true
-			pushReply(conn.events, reply)
+			pushReply(conn, reply)
 			continue
 		}
 		// Per-message chatter budget (audit H5): the WS loop charges the
@@ -336,13 +351,13 @@ func (h *SSEHandler) postSSE(w http.ResponseWriter, r *http.Request) {
 		// limiter bypass. Transacts stay self-limited in handleTransact.
 		if h.Limiter != nil && op != "transact" {
 			if aerr := h.Limiter.Acquire(r.Context(), conn.sess.AppID, ratelimit.ClassWS); aerr != nil {
-				pushReply(conn.events, ErrFrame(429, "rate-limited", "rate limited"))
+				pushReply(conn, ErrFrame(429, "rate-limited", "rate limited"))
 				break
 			}
 		}
 		replies, herr := h.Manager.Handle(r.Context(), conn.sess, f)
 		for _, rf := range replies {
-			pushReply(conn.events, rf)
+			pushReply(conn, rf)
 		}
 		if errors.Is(herr, ErrCloseSession) {
 			h.closeTearDown(tokenHashOf(req.SSEToken), conn)
@@ -372,14 +387,14 @@ func (h *SSEHandler) snapshot(ctx context.Context, sess *Session, f Frame) {
 	if !ok {
 		return
 	}
-	result, err := h.Refresh(ctx, sub)
+	result, err := h.Manager.snapshotOrRefresh(ctx, h.Refresh, sub)
 	if err != nil {
 		return
 	}
 	// Baseline for delta-refresh diffs is the flat envelope; SSE init-query
 	// answers with v1 :tree semantics (session.clj:1395) — a bare object
-	// tree with NO "data" wrapper key.
-	sub.SetSnapshot(result)
+	// tree with NO "data" wrapper key. snapshotOrRefresh seeds the baseline
+	// on the refresh path and reuses it on the duplicate path.
 	tree, terr := UnwrapTree(result)
 	if terr != nil {
 		return
@@ -409,10 +424,24 @@ func (h *SSEHandler) closeTearDown(tokenHash string, c *sseConn) {
 
 var errSSEBackpressure = fmt.Errorf("sse: event buffer full")
 
-func pushReply(events chan Frame, f Frame) {
+// signalOverflow flags the stream as overloaded (idempotent — capacity 1,
+// non-blocking). The GET writer observes it and closes the stream.
+func signalOverflow(conn *sseConn) {
 	select {
-	case events <- f:
+	case conn.overflow <- struct{}{}:
 	default:
+	}
+}
+
+// pushReply queues one reply frame; when the event buffer is full it
+// signals stream overflow instead of silently dropping the frame — the
+// GET writer ends the stream so the client reconnects rather than
+// silently missing deliveries (audit backlog B1).
+func pushReply(conn *sseConn, f Frame) {
+	select {
+	case conn.events <- f:
+	default:
+		signalOverflow(conn)
 	}
 }
 

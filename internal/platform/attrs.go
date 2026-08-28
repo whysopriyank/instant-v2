@@ -9,7 +9,9 @@ import (
 
 // Attr is the DB-facing attribute row (modern v1 shape: etype/label live on attrs).
 type Attr struct {
-	ID              [16]byte
+	ID    [16]byte
+	IDStr string // cached canonical hyphenated uuid (UUIDToStr form); "" until backfilled
+
 	AppID           [16]byte
 	Etype           *string
 	Label           *string
@@ -22,6 +24,17 @@ type Attr struct {
 	ForwardIdent    [16]byte
 	ReverseIdent    *[16]byte
 	CheckedDataType *string // nil | "string"|"number"|"boolean"|"date"
+}
+
+// UUID returns the attr id in canonical hyphenated form. It serves the IDStr
+// cache when populated (rebuildIndexes backfills every catalog entry) and
+// falls back to a fresh UUIDToStr otherwise, so lone Attr values minted
+// outside a catalog keep rendering correctly.
+func (a Attr) UUID() string {
+	if a.IDStr != "" {
+		return a.IDStr
+	}
+	return UUIDToStr(a.ID)
 }
 
 // Flags are the five boolean flag columns on triples. Derivation is a direct
@@ -60,6 +73,16 @@ const attrCols = `id, app_id, etype, label, reverse_etype, reverse_label,
 type AttrCatalog struct {
 	AppID [16]byte
 	byID  map[[16]byte]Attr
+
+	// Derived indexes over byID, rebuilt wholesale by rebuildIndexes() after
+	// every mutation. They are built once at construction (LoadAttrCatalog,
+	// Clone, Add) and only read afterwards, so shared cached catalogs stay
+	// race-free. Zero-value catalogs miss cleanly on every lookup.
+	byEtypeLabel map[string]map[string]Attr // etype -> label -> attr (Etype+Label non-nil only)
+	byEtypeByID  map[string]map[string]Attr // etype -> UUIDToStr(id) -> attr
+	byEtypeIDs   map[string][]string        // etype -> UUIDToStr(id) list (ByEtype backing)
+	byEtypeList  map[string][]Attr          // etype -> attr list (AttrsOfEtype backing)
+	byReverseKey map[string]*Attr           // child etype \0 parent etype \0 reverse label -> ref attr
 }
 
 // Clone returns a mutable copy for one transaction's add-attr overlay.
@@ -70,16 +93,106 @@ func (c *AttrCatalog) Clone() *AttrCatalog {
 	for k, v := range c.byID {
 		by[k] = v
 	}
-	return &AttrCatalog{AppID: c.AppID, byID: by}
+	nc := &AttrCatalog{AppID: c.AppID, byID: by}
+	nc.rebuildIndexes()
+	return nc
 }
 
 // Add registers an attr in this catalog view (in-tx add-attr support).
-// Safe on a zero-value catalog.
+// Safe on a zero-value catalog. Callers own the catalog: Add rebuilds the
+// derived indexes and backfills IDStr, so it must only run on tx-local
+// clones, never on the shared cached catalog.
 func (c *AttrCatalog) Add(a Attr) {
 	if c.byID == nil {
 		c.byID = make(map[[16]byte]Attr)
 	}
 	c.byID[a.ID] = a
+	c.rebuildIndexes()
+}
+
+// rebuildIndexes recomputes every derived index from byID and backfills the
+// IDStr cache on entries still missing it. It runs after each byID mutation
+// (LoadAttrCatalog, Clone, Add), so constructor sites repo-wide need zero
+// changes and every catalog lookup carries a populated IDStr. byID iteration
+// order is randomized, which only shuffles the unordered per-etype lists —
+// the same nondeterminism Attrs/ByEtype always had.
+func (c *AttrCatalog) rebuildIndexes() {
+	c.byEtypeLabel = make(map[string]map[string]Attr)
+	c.byEtypeByID = make(map[string]map[string]Attr)
+	c.byEtypeIDs = make(map[string][]string)
+	c.byEtypeList = make(map[string][]Attr)
+	c.byReverseKey = make(map[string]*Attr, len(c.byID))
+	for id, a := range c.byID {
+		if a.IDStr == "" {
+			a.IDStr = UUIDToStr(id)
+			c.byID[id] = a // store back so every lookup exposes the cache
+		}
+		if a.Etype == nil {
+			continue
+		}
+		et := *a.Etype
+		c.byEtypeList[et] = append(c.byEtypeList[et], a)
+		c.byEtypeIDs[et] = append(c.byEtypeIDs[et], a.IDStr)
+		idm, ok := c.byEtypeByID[et]
+		if !ok {
+			idm = make(map[string]Attr)
+			c.byEtypeByID[et] = idm
+		}
+		idm[a.IDStr] = a
+		if a.Label != nil {
+			lb := *a.Label
+			lm, ok := c.byEtypeLabel[et]
+			if !ok {
+				lm = make(map[string]Attr)
+				c.byEtypeLabel[et] = lm
+			}
+			lm[lb] = a
+		}
+		// Reverse traversal index: only ref attrs with full reverse metadata
+		// participate — exactly the predicate instaql's findReverseAttr scan
+		// applied. NUL-separated key: etype/label text cannot contain NUL
+		// (postgres text forbids it), so the encoding is injective.
+		if a.ValueType == "ref" && a.ReverseEtype != nil && a.ReverseLabel != nil {
+			key := et + "\x00" + *a.ReverseEtype + "\x00" + *a.ReverseLabel
+			cp := a
+			c.byReverseKey[key] = &cp
+		}
+	}
+}
+
+// AttrsOfEtype returns the catalog attrs whose forward etype matches, in no
+// particular order. The backing array is shared with the catalog — callers
+// MUST NOT mutate the returned slice (no appends, no element writes); treat
+// it as a read-only view. A nil slice means "no such etype".
+func (c *AttrCatalog) AttrsOfEtype(etype string) []Attr {
+	return c.byEtypeList[etype]
+}
+
+// LabelIndex returns the etype's attrs keyed by label, covering only attrs
+// with both Etype and Label set. The map is the catalog's internal index —
+// read-only contract: callers must not add, delete, or write entries. A nil
+// map means "no such etype (or no labeled attrs for it)".
+func (c *AttrCatalog) LabelIndex(etype string) map[string]Attr {
+	return c.byEtypeLabel[etype]
+}
+
+// IDIndex returns the etype's attrs keyed by UUIDToStr(id). Same read-only
+// contract as LabelIndex; a nil map means "no such etype".
+func (c *AttrCatalog) IDIndex(etype string) map[string]Attr {
+	return c.byEtypeByID[etype]
+}
+
+// FindReverseAttr resolves the ref attr on childEtype whose reverse identity
+// points back at parentEtype/label — the link traversal lookup instaql
+// performs per nested form per query. O(1) via the reverse index; nil when no
+// attr matches. The result is a heap copy: callers own it, and no mutation
+// can leak back into the index.
+func (c *AttrCatalog) FindReverseAttr(childEtype, parentEtype, label string) *Attr {
+	if hit := c.byReverseKey[childEtype+"\x00"+parentEtype+"\x00"+label]; hit != nil {
+		cp := *hit
+		return &cp
+	}
+	return nil
 }
 
 // CreateAttrWithID inserts an attr with caller-supplied ids. The frozen wire
@@ -161,6 +274,7 @@ func LoadAttrCatalog(ctx context.Context, q Queryer, appID [16]byte) (*AttrCatal
 		}
 		cat.byID[a.ID] = a
 	}
+	cat.rebuildIndexes()
 	return cat, rows.Err()
 }
 

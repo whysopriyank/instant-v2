@@ -16,6 +16,7 @@ package sync
 // envelope so every full frame on the wire is byte-compatible with what the
 // frozen SDK expects.
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -34,6 +35,14 @@ import (
 // position the frozen client reads (result[0].data). Multi-form paginated
 // queries lose per-form attribution inside the executor already; this keeps
 // the single-form case exact.
+//
+// Numbers are decoded with UseNumber and re-marshaled as json.Number —
+// literals ride the output byte-exactly. A float64 decode here would
+// reformat stored numbers (1.0 → 1) and silently corrupt integers beyond
+// 2^53 (audit backlog B5). A hand-assembled verbatim variant was measured
+// SLOWER (per-value RawMessage copies + per-string marshal allocations
+// beat single-decode + single-marshal amortization), so the marshal-based
+// shape stays.
 func BuildNodeList(cat *platform.AttrCatalog, result json.RawMessage) (json.RawMessage, error) {
 	var env struct {
 		Data      map[string]json.RawMessage `json:"data"`
@@ -56,7 +65,11 @@ func BuildNodeList(cat *platform.AttrCatalog, result json.RawMessage) (json.RawM
 		var ents []map[string]any
 		raw := env.Data[etype]
 		if len(raw) > 0 && string(raw) != "null" {
-			if err := json.Unmarshal(raw, &ents); err != nil {
+			// UseNumber: values re-marshal byte-exactly through
+			// json.Number (see func comment).
+			dec := json.NewDecoder(bytes.NewReader(raw))
+			dec.UseNumber()
+			if err := dec.Decode(&ents); err != nil {
 				return nil, fmt.Errorf("nodelist: %s payload: %w", etype, err)
 			}
 		}
@@ -74,7 +87,7 @@ func BuildNodeList(cat *platform.AttrCatalog, result json.RawMessage) (json.RawM
 				return nil, fmt.Errorf("nodelist: %s entity missing id", etype)
 			}
 			if idAttr != nil {
-				triples = append(triples, []any{id, platform.UUIDToStr(idAttr.ID), id})
+				triples = append(triples, []any{id, idAttr.UUID(), id})
 			}
 			labels := make([]string, 0, len(e))
 			for label := range e {
@@ -91,10 +104,10 @@ func BuildNodeList(cat *platform.AttrCatalog, result json.RawMessage) (json.RawM
 					// Link attrs project one triple per linked child id;
 					// child bodies arrive via the child etype's own node.
 					for _, cid := range linkedIDs(e[label]) {
-						triples = append(triples, []any{id, platform.UUIDToStr(attr.ID), cid})
+						triples = append(triples, []any{id, attr.UUID(), cid})
 					}
 				case attr != nil:
-					triples = append(triples, []any{id, platform.UUIDToStr(attr.ID), e[label]})
+					triples = append(triples, []any{id, attr.UUID(), e[label]})
 				default:
 					// Unknown label (defensive): keep it verbatim so the
 					// projection stays lossless.
@@ -149,7 +162,9 @@ func UnwrapTree(result json.RawMessage) (json.RawMessage, error) {
 }
 
 // linkedIDs normalizes a ref attr value into linked child ids; values may be
-// nested child objects ({id:…}) or bare id strings.
+// nested child objects ({id:…}) or bare id strings. Values come from the
+// UseNumber decode — ref payloads are strings, so number fidelity is moot
+// here.
 func linkedIDs(v any) []string {
 	arr, ok := v.([]any)
 	if !ok {

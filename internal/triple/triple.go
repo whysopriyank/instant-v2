@@ -47,6 +47,32 @@ func EncodeValue(v any) ([]byte, error) {
 	return out, nil
 }
 
+// EncodeValues renders many values with ONE shared encoder and buffer —
+// byte-identical to calling EncodeValue per value, but the batched write
+// path pays two allocations total instead of two per value (audit backlog:
+// large-tx writes allocated a fresh Buffer+Encoder for every triple).
+func EncodeValues(vs []any) ([][]byte, error) {
+	out := make([][]byte, len(vs))
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	for i, v := range vs {
+		if !IsValue(v) {
+			return nil, fmt.Errorf("triple: unsupported value type %T", v)
+		}
+		buf.Reset()
+		if err := enc.Encode(v); err != nil {
+			return nil, err
+		}
+		b := buf.Bytes()
+		if n := len(b); n > 0 && b[n-1] == '\n' {
+			b = b[:n-1]
+		}
+		out[i] = append(make([]byte, 0, len(b)), b...)
+	}
+	return out, nil
+}
+
 // IsValue mirrors db.model.triple/value?: string, uuid(string), number, nil,
 // boolean, sequential, associative. UUIDs and dates arrive as strings from the
 // wire, so they are covered by the string case.

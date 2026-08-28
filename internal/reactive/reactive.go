@@ -171,38 +171,50 @@ func (s *Store) Get(id string) (*Subscription, bool) {
 	return sub, ok
 }
 
-// SubsForTopics returns the affected subscription ids for a changed attr.
-func (s *Store) SubsForTopics(attrIDs []string) []string {
+// SubsForTopics returns the subscriptions watching any of the changed attrs,
+// as a snapshot sorted by subscription id (deterministic iteration parity
+// with the previous id-slice form). Callers own the slice; the *Subscription
+// pointers are the store's live entries.
+func (s *Store) SubsForTopics(attrIDs []string) []*Subscription {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	seen := map[string]struct{}{}
-	var out []string
+	var out []*Subscription
 	for _, t := range attrIDs {
 		for id := range s.topics[t] {
 			if _, dup := seen[id]; !dup {
 				seen[id] = struct{}{}
-				out = append(out, id)
+				if sub, ok := s.byID[id]; ok {
+					out = append(out, sub)
+				}
 			}
 		}
 	}
-	sort.Strings(out)
+	sortSubsByID(out)
 	return out
 }
 
-// SubsForApp returns every active subscription id for an app — the routing
+// SubsForApp returns every active subscription of an app — the routing
 // set when an invalidation carries no topic information at all
 // (NotifyChanges with unknown changes, docs/09-tier2-architecture.md §T2.5).
-func (s *Store) SubsForApp(appID string) []string {
+// Snapshot sorted by id, same ownership contract as SubsForTopics.
+func (s *Store) SubsForApp(appID string) []*Subscription {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	var out []string
-	for id, sub := range s.byID {
+	var out []*Subscription
+	for _, sub := range s.byID {
 		if sub.AppID == appID {
-			out = append(out, id)
+			out = append(out, sub)
 		}
 	}
-	sort.Strings(out)
+	sortSubsByID(out)
 	return out
+}
+
+// sortSubsByID keeps enqueue iteration order identical to the old
+// sort.Strings(id-list) pipeline.
+func sortSubsByID(subs []*Subscription) {
+	sort.Slice(subs, func(i, j int) bool { return subs[i].ID < subs[j].ID })
 }
 
 // Len reports active subscriptions (test hook).
@@ -388,7 +400,7 @@ func (n *Notifier) refreshOne(ctx context.Context, log *slog.Logger, id string, 
 		// only fire when fresh commits wake the drain (no hot spin on a
 		// persistent failure). Change knowledge degrades to unknown (nil),
 		// which is correct: the retry takes the full-refresh path anyway.
-		n.enqueue(sub.AppID, []string{id}, txID, nil)
+		n.enqueue(sub.AppID, []*Subscription{sub}, txID, nil)
 		return
 	}
 

@@ -251,6 +251,77 @@ func TestQueryPaginationAndAggregate(t *testing.T) {
 	}
 }
 
+// TestQueryPageInfoBoundaries verifies that page-info is based on a hidden
+// sentinel row rather than the visible page length. In particular, an exact
+// final page must not claim that another page exists.
+func TestQueryPageInfoBoundaries(t *testing.T) {
+	db := qdb(t)
+	ctx := context.Background()
+	appID, cat, ids := qseed(t, db)
+
+	var triples []triple.Triple
+	for i := range 3 {
+		triples = append(triples, triple.Triple{E: rand16(), A: ids.title, V: fmt.Sprintf("page-%d", i)})
+	}
+	if _, err := db.InsertTriples(ctx, appID, cat, triples, false); err != nil {
+		t.Fatal(err)
+	}
+
+	ex := &instaql.Executor{DB: db.Pool}
+	run := func(opts map[string]any) (int, *instaql.PageInfo) {
+		raw := map[string]any{"posts": map[string]any{"$": opts}}
+		q, err := instaql.Coerce(raw)
+		if err != nil {
+			t.Fatalf("coerce %+v: %v", opts, err)
+		}
+		res, err := ex.Run(ctx, q, cat, appID)
+		if err != nil {
+			t.Fatalf("run %+v: %v", opts, err)
+		}
+		var rows []map[string]any
+		if rawRows := res.Data["posts"]; len(rawRows) > 0 && string(rawRows) != "null" {
+			if err := json.Unmarshal(rawRows, &rows); err != nil {
+				t.Fatalf("decode %+v: %v", opts, err)
+			}
+		}
+		return len(rows), res.PageInfo
+	}
+
+	if rows, info := run(map[string]any{
+		"where": map[string]any{"title": "missing"}, "limit": float64(2),
+	}); rows != 0 || info == nil || info.HasNextPage {
+		t.Fatalf("zero page: rows=%d info=%+v", rows, info)
+	}
+	if rows, info := run(map[string]any{
+		"where": map[string]any{"title": "page-0"}, "limit": float64(2),
+	}); rows != 1 || info == nil || info.HasNextPage {
+		t.Fatalf("under-limit page: rows=%d info=%+v", rows, info)
+	}
+	if rows, info := run(map[string]any{"limit": float64(3)}); rows != 3 || info == nil || info.HasNextPage {
+		t.Fatalf("exact-limit page: rows=%d info=%+v", rows, info)
+	}
+	rows, info := run(map[string]any{"limit": float64(2)})
+	if rows != 2 || info == nil || !info.HasNextPage || info.HasPreviousPage {
+		t.Fatalf("over-limit page: rows=%d info=%+v", rows, info)
+	}
+	if info.StartCursor == nil || info.EndCursor == nil {
+		t.Fatalf("over-limit page missing cursors: %+v", info)
+	}
+	var cursor []any
+	if err := json.Unmarshal([]byte(*info.EndCursor), &cursor); err != nil || len(cursor) != 3 {
+		t.Fatalf("end cursor wire shape: %q (%v)", *info.EndCursor, err)
+	}
+	if rows, info := run(map[string]any{"first": float64(2)}); rows != 2 || info == nil || !info.HasNextPage {
+		t.Fatalf("first over-limit page: rows=%d info=%+v", rows, info)
+	}
+	if rows, info := run(map[string]any{"last": float64(2)}); rows != 2 || info == nil || info.HasNextPage || !info.HasPreviousPage {
+		t.Fatalf("last over-limit page: rows=%d info=%+v", rows, info)
+	}
+	if rows, info := run(map[string]any{"limit": float64(2), "offset": float64(1)}); rows != 2 || info == nil || info.HasNextPage || !info.HasPreviousPage {
+		t.Fatalf("offset exact-final page: rows=%d info=%+v", rows, info)
+	}
+}
+
 func TestCoerceRejectsUnknowns(t *testing.T) {
 	for _, raw := range []map[string]any{
 		{"posts": map[string]any{"$": map[string]any{"bogus": 1}}},

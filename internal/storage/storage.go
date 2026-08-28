@@ -121,18 +121,21 @@ func insertBatch(ctx context.Context, tx pgx.Tx, appID [16]byte, cat *platform.A
 	apps := make([][16]byte, 0, len(ts))
 	ents := make([][16]byte, 0, len(ts))
 	attrs := make([][16]byte, 0, len(ts))
-	vals := make([][]byte, 0, len(ts))
 	idxs := make([]int, 0, len(ts))
+	vs := make([]any, len(ts))
 	for i, t := range ts {
-		enc, err := encodeOrNull(t.V)
-		if err != nil {
-			return InsertResult{}, err
-		}
 		apps = append(apps, appID)
 		ents = append(ents, t.E)
 		attrs = append(attrs, t.A)
-		vals = append(vals, enc)
+		vs[i] = t.V
 		idxs = append(idxs, i)
+	}
+	// Batched value encoding: one shared encoder/buffer for the whole
+	// batch instead of a fresh Buffer+Encoder per triple (audit backlog).
+	// encodeOrNull semantics fold in: nil → JSON 'null' literal.
+	vals, err := triple.EncodeValues(vs)
+	if err != nil {
+		return InsertResult{}, err
 	}
 
 	var res InsertResult
@@ -174,18 +177,6 @@ ON CONFLICT (app_id, entity_id, attr_id) WHERE ea DO UPDATE ` + setClause
 	res.Inserted = remTag.RowsAffected()
 	return res, nil
 }
-func encodeOrNull(v any) ([]byte, error) {
-	if v == nil {
-		// jsonb 'null', not SQL NULL — the column is NOT NULL and
-		// md5('null'::text) == triple.JSONNullMD5 (v1 parity).
-		return []byte("null"), nil
-	}
-	b, err := triple.EncodeValue(v)
-	if err != nil {
-		return nil, err
-	}
-	return b, nil
-}
 
 // Enhanced is a fetched triple plus its storage metadata.
 type Enhanced struct {
@@ -210,6 +201,60 @@ func (f FetchFilter) empty() bool {
 // FetchTx fetches within a transaction/connection.
 func FetchTx(ctx context.Context, tx pgx.Tx, appID [16]byte, f FetchFilter) ([]Enhanced, error) {
 	return fetch(ctx, tx, appID, f)
+}
+
+// EAPair is one exact (entity, attr) probe for pair-scoped reads.
+type EAPair struct {
+	E [16]byte
+	A [16]byte
+}
+
+// FetchPairs fetches triples for exact (entity, attr) pairs in ONE query —
+// the batched deep-merge probe (audit backlog). FetchFilter's EntityIDs ×
+// AttrIDs is a cross-product and cannot express per-row pairs; the unnest
+// join here binds entity and attr together. Multiple stored rows per pair
+// (many-cardinality attrs) all come back — callers pick the first, exactly
+// like the per-step fetch they replaced.
+func FetchPairs(ctx context.Context, tx pgx.Tx, appID [16]byte, pairs []EAPair) ([]Enhanced, error) {
+	if len(pairs) == 0 {
+		return nil, nil
+	}
+	ents := make([][16]byte, len(pairs))
+	attrs := make([][16]byte, len(pairs))
+	for i, p := range pairs {
+		ents[i] = p.E
+		attrs[i] = p.A
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT t.entity_id, t.attr_id, t.value, t.value_md5,
+		       t.ea, t.eav, t.av, t.ave, t.vae, t.checked_data_type
+		  FROM triples t
+		  JOIN attrs a ON a.id = t.attr_id AND a.deletion_marked_at IS NULL
+		  JOIN unnest($2::uuid[], $3::uuid[]) AS p(entity_id, attr_id)
+		    ON t.entity_id = p.entity_id AND t.attr_id = p.attr_id
+		 WHERE t.app_id = $1`, appID, ents, attrs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Enhanced
+	for rows.Next() {
+		var e Enhanced
+		var val []byte
+		if err := rows.Scan(&e.Triple.E, &e.Triple.A, &val, &e.MD5,
+			&e.Flags.EA, &e.Flags.EAV, &e.Flags.AV, &e.Flags.AVE, &e.Flags.VAE,
+			&e.CheckedDataType); err != nil {
+			return nil, err
+		}
+		v, err := decodeValue(val, e.Flags.EAV)
+		if err != nil {
+			return nil, err
+		}
+		e.Triple.V = v
+		out = append(out, e)
+	}
+	return out, rows.Err()
 }
 
 // FetchTriples reads triples for appID joined against non-deleted attrs,
@@ -324,17 +369,19 @@ func deleteTriplesExec(ctx context.Context, exec deleteExecutor, appID [16]byte,
 	if len(ts) == 0 {
 		return 0, nil
 	}
-	ents := make([][16]byte, 0, len(ts))
-	attrs := make([][16]byte, 0, len(ts))
-	vals := make([][]byte, 0, len(ts))
-	for _, t := range ts {
-		enc, err := encodeOrNull(t.V)
-		if err != nil {
-			return 0, err
-		}
-		ents = append(ents, t.E)
-		attrs = append(attrs, t.A)
-		vals = append(vals, enc)
+	ents := make([][16]byte, len(ts))
+	attrs := make([][16]byte, len(ts))
+	vs := make([]any, len(ts))
+	for i, t := range ts {
+		ents[i] = t.E
+		attrs[i] = t.A
+		vs[i] = t.V
+	}
+	// Batched value encoding (audit backlog): shared encoder, exact
+	// encodeOrNull parity (nil → JSON 'null' literal).
+	vals, err := triple.EncodeValues(vs)
+	if err != nil {
+		return 0, err
 	}
 	tag, err := exec.Exec(ctx, `
 		WITH input(entity_id, attr_id, value) AS (

@@ -35,6 +35,7 @@ func TestLoadDefaults(t *testing.T) {
 		"INSTANT_V2_MAX_QUEUE_DEPTH":     "",
 		"INSTANT_V2_WRITE_POOL_MAXCONNS": "",
 		"INSTANT_V2_READ_POOL_MAXCONNS":  "",
+		"INSTANT_V2_POOL_MINCONNS":       "",
 		"INSTANT_V2_STORAGE_SECRET":      "test-secret",
 	})
 	cfg, err := Load()
@@ -46,6 +47,9 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.MaxQueueDepth != 0 || cfg.WritePoolMaxConns != 0 || cfg.ReadPoolMaxConns != 0 {
 		t.Fatalf("numeric defaults must be zero-valued: %+v", cfg)
+	}
+	if cfg.PoolMinConns != 8 {
+		t.Fatalf("pool min default = %d, want 8", cfg.PoolMinConns)
 	}
 	// Resource-bound defaults.
 	if cfg.MaxSubsPerApp != 2000 || cfg.MaxWSConns != 20000 || cfg.MaxSSEConns != 10000 {
@@ -86,6 +90,7 @@ func TestLoadTier2Knobs(t *testing.T) {
 		"INSTANT_V2_MAX_QUEUE_DEPTH":     "5000",
 		"INSTANT_V2_WRITE_POOL_MAXCONNS": "16",
 		"INSTANT_V2_READ_POOL_MAXCONNS":  "48",
+		"INSTANT_V2_POOL_MINCONNS":       "4",
 		"INSTANT_V2_STORAGE_SECRET":      "k1",
 	})
 	cfg, err := Load()
@@ -100,11 +105,75 @@ func TestLoadTier2Knobs(t *testing.T) {
 		cfg.WritePoolMaxConns != 16 || cfg.ReadPoolMaxConns != 48 {
 		t.Fatalf("knobs: %+v", cfg)
 	}
+	if cfg.PoolMinConns != 4 {
+		t.Fatalf("pool min = %d, want 4", cfg.PoolMinConns)
+	}
 	if cfg.String() != "{addr::8080 db:split bus:postgres}" {
 		t.Fatalf("String: %q", cfg.String())
 	}
 	if cfg.NodeName() != "node-7" {
 		t.Fatalf("NodeName: %q", cfg.NodeName())
+	}
+}
+
+func TestEnvInt32DefaultBoundaries(t *testing.T) {
+	const key = "INSTANT_V2_POOL_MINCONNS"
+	const maxInt32 = int64(1<<31 - 1)
+
+	cases := []struct {
+		name    string
+		raw     string
+		want    int32
+		wantErr bool
+	}{
+		{name: "empty uses default", raw: "", want: 8},
+		{name: "zero disables", raw: "0", want: 0},
+		{name: "negative rejected", raw: "-1", wantErr: true},
+		{name: "max int32 accepted", raw: "2147483647", want: int32(maxInt32)},
+		{name: "above max int32 rejected", raw: "2147483648", wantErr: true},
+		{name: "huge overflow rejected", raw: "999999999999999999999999999999", wantErr: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setEnv(t, map[string]string{key: tc.raw})
+			got, err := envInt32Default(key, 8)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("envInt32Default(%q) = %d, want actionable range error", tc.raw, got)
+				}
+				if !strings.Contains(err.Error(), key) {
+					t.Fatalf("error %q does not identify %s", err, key)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("envInt32Default(%q): %v", tc.raw, err)
+			}
+			if got != tc.want {
+				t.Fatalf("envInt32Default(%q) = %d, want %d", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadPoolMinOverflowRejected(t *testing.T) {
+	setEnv(t, map[string]string{
+		"INSTANT_V2_STORAGE_SECRET": "s",
+		"INSTANT_V2_POOL_MINCONNS":  "2147483648",
+	})
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "INSTANT_V2_POOL_MINCONNS") {
+		t.Fatalf("pool min overflow must fail with an actionable error, got: %v", err)
+	}
+}
+
+func TestLoadPoolMaxOverflowRejected(t *testing.T) {
+	setEnv(t, map[string]string{
+		"INSTANT_V2_STORAGE_SECRET":      "s",
+		"INSTANT_V2_WRITE_POOL_MAXCONNS": "2147483648",
+	})
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "INSTANT_V2_WRITE_POOL_MAXCONNS") {
+		t.Fatalf("pool max overflow must fail with an actionable error, got: %v", err)
 	}
 }
 

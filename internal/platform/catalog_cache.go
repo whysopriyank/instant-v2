@@ -261,26 +261,27 @@ func UUIDToStr(u [16]byte) string {
 	return string(out)
 }
 
-// ByEtype lists attr ids belonging to an etype.
+// ByEtype lists attr ids belonging to an etype, via the prebuilt per-etype
+// index (O(1) lookup, no per-call scan). The backing slice is shared with
+// the catalog — callers must not mutate it.
 func (cat *AttrCatalog) ByEtype(etype string) []string {
-	var out []string
-	for _, a := range cat.byID {
-		if a.Etype != nil && *a.Etype == etype {
-			out = append(out, UUIDToStr(a.ID))
-		}
-	}
-	return out
+	return cat.byEtypeIDs[etype]
 }
 
-// FindByEtypeLabel resolves one attr by namespace + label.
+// FindByEtypeLabel resolves one attr by namespace + label via the prebuilt
+// label index (O(1) lookup, no per-call scan). The result is a heap copy:
+// callers own it, and no mutation can leak back into the index.
 func (cat *AttrCatalog) FindByEtypeLabel(etype, label string) *Attr {
-	for _, a := range cat.byID {
-		if a.Etype != nil && *a.Etype == etype && a.Label != nil && *a.Label == label {
-			cp := a
-			return &cp
-		}
+	m, ok := cat.byEtypeLabel[etype]
+	if !ok {
+		return nil
 	}
-	return nil
+	a, ok := m[label]
+	if !ok {
+		return nil
+	}
+	cp := a
+	return &cp
 }
 
 // ScanUUIDErr is ScanUUID with an error return for call sites preferring that

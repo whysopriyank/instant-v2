@@ -25,6 +25,13 @@ type Config struct {
 	WritePoolMaxConns int32 // INSTANT_V2_WRITE_POOL_MAXCONNS, default 0 (=32)
 	ReadPoolMaxConns  int32 // INSTANT_V2_READ_POOL_MAXCONNS, default 0 (=32)
 
+	// PoolMinConns warms both pools at boot. pgxpool defaults MinConns to 0
+	// and lets idle connections expire, so the first request after a quiet
+	// window pays full connection setup (TLS + auth) — visible as latency
+	// spikes on bursty self-host workloads (audit backlog). Default 8;
+	// 0 restores pgxpool behavior.
+	PoolMinConns int32 // INSTANT_V2_POOL_MINCONNS, default 8
+
 	// Backpressure (docs/09 §T2.1). 0 disables shedding: the notifier
 	// queue may grow unbounded (pre-T2 behavior).
 	MaxQueueDepth int64 // INSTANT_V2_MAX_QUEUE_DEPTH, default 0
@@ -184,6 +191,12 @@ func Load() (Config, error) {
 	if cfg.PGIdleTxTimeout, err = envDuration("INSTANT_V2_PG_IDLE_TX_TIMEOUT", 30*time.Second); err != nil {
 		return cfg, err
 	}
+	// Pool warm-up floor (audit backlog): both pools keep this many ready
+	// connections so a quiet window cannot turn the next burst into a
+	// connection-setup latency spike. 0 explicitly disables.
+	if cfg.PoolMinConns, err = envInt32Default("INSTANT_V2_POOL_MINCONNS", 8); err != nil {
+		return cfg, err
+	}
 	return cfg, nil
 }
 
@@ -250,9 +263,23 @@ func envInt32(key string) (int32, error) {
 	if v == "" {
 		return 0, nil
 	}
-	n, err := strconv.Atoi(v)
+	n, err := strconv.ParseInt(v, 10, 32)
 	if err != nil || n < 1 {
-		return 0, fmt.Errorf("%s %q: want positive integer", key, v)
+		return 0, fmt.Errorf("%s %q: want positive 32-bit integer (1..2147483647)", key, v)
+	}
+	return int32(n), nil
+}
+
+// envInt32Default parses a non-negative integer; empty takes def. Unlike
+// envInt32 it accepts 0, so operators can explicitly disable a warm floor.
+func envInt32Default(key string, def int32) (int32, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return def, nil
+	}
+	n, err := strconv.ParseInt(v, 10, 32)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("%s %q: want non-negative 32-bit integer (0..2147483647)", key, v)
 	}
 	return int32(n), nil
 }
