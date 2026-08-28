@@ -1,0 +1,8 @@
+{
+  "revision": "REPLACE_WITH_REVIEWED_V2_COMMIT_SHA",
+  "database_name": "instant_bench_v2",
+  "postgres_version": "REPLACE_WITH_POSTGRES_VERSION",
+  "invalidation_mode": "post-commit-notification",
+  "output_plugin": "",
+  "dirty_tree_hash": ""
+}

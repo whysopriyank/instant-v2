@@ -15,6 +15,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -27,6 +28,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/instant-v2/instant-v2/internal/benchharness"
 )
 
 // Lag samples (write→next-refresh-at-this-session), filled from reader
@@ -59,16 +61,37 @@ func main() {
 	globalRate := flag.Float64("global-tx-rate", 8, "aggregate transacts/sec across all sessions")
 	attr := flag.String("attr", os.Getenv("SOAK_ATTR"), "attr uuid (uuid string) to write")
 	rampUp := flag.Duration("ramp", 30*time.Second, "dial ramp window")
+	settle := flag.Duration("settle", 30*time.Second, "post-ramp settle window before writes")
 	pprofAddr := flag.String("pprof", "127.0.0.1:18811", "pprof endpoint")
 	maxP99 := flag.Duration("max-p99-lag", 0, "fail when p99 write→refresh delivery lag exceeds this (0=off)")
+	eventsPath := flag.String("events", envOr("SOAK_EVENTS", ""), "structured JSONL event output path (use - for stdout)")
 	flag.Parse()
+	if *n <= 0 || *globalRate <= 0 || *dur <= 0 {
+		fmt.Fprintln(os.Stderr, "soak: sessions, global-tx-rate, and duration must be positive")
+		os.Exit(2)
+	}
+	if err := benchharness.ValidateLoopbackURL(*url); err != nil {
+		fmt.Fprintln(os.Stderr, "soak: refusing non-loopback target:", err)
+		os.Exit(2)
+	}
 
 	go func() { _ = http.ListenAndServe(*pprofAddr, nil) }()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	events, closeEvents, err := openEvents(*eventsPath)
+	if err != nil {
+		logger.Error("cannot open structured event output", "error", err)
+		os.Exit(2)
+	}
+	defer closeEvents()
+	_ = events.Emit("run_started", map[string]any{
+		"url": *url, "sessions": *n, "duration": dur.String(), "global_tx_rate": *globalRate,
+		"ramp": rampUp.String(), "settle": settle.String(), "workload": "historical-soak",
+	})
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	deadline, cancel := context.WithDeadline(ctx, time.Now().Add(*dur))
+	runUntil := time.Now().Add(*dur)
+	deadline, cancel := context.WithDeadline(ctx, runUntil)
 	defer cancel()
 
 	var (
@@ -80,29 +103,42 @@ func main() {
 		wg        sync.WaitGroup
 	)
 
-	// Writes start only after a settle window, then flow at the global rate —
-	// modeling readers >> writers instead of an all-to-all storm.
+	// Writes start only after a settle window, then flow at the global rate.
+	// The gate is unbuffered and the scheduler is blocking: every scheduled
+	// token is delivered to a session or remains visible as schedule slip.
 	writeGate := make(chan struct{})
 	go func() {
-		select {
-		case <-time.After(*rampUp + 30*time.Second):
-		case <-deadline.Done():
+		if *globalRate <= 0 {
+			_ = events.Emit("scheduler_error", map[string]any{"error": "global tx rate must be positive"})
 			return
 		}
-		interval := time.Duration(float64(time.Second) / *globalRate)
-		t := time.NewTicker(interval)
-		defer t.Stop()
-		for {
-			select {
-			case <-deadline.Done():
-				return
-			case <-t.C:
-				select {
-				case writeGate <- struct{}{}:
-				default:
-				}
-			}
+		if *settle < 0 {
+			_ = events.Emit("scheduler_error", map[string]any{"error": "settle duration must not be negative"})
+			return
 		}
+		start := time.Now().Add(*rampUp + *settle)
+		scheduler, err := benchharness.NewBlockingScheduler(*globalRate, start)
+		if err != nil {
+			_ = events.Emit("scheduler_error", map[string]any{"error": err.Error()})
+			return
+		}
+		count := int(math.Ceil(runUntil.Sub(start).Seconds() * *globalRate))
+		if count < 1 {
+			count = 1
+		}
+		items := make([]benchharness.Mutation, count)
+		for i := range items {
+			items[i] = benchharness.Mutation{Sequence: int64(i + 1), EventID: fmt.Sprintf("soak/%06d", i+1)}
+		}
+		err = scheduler.Run(deadline, items, func(ctx context.Context, _ benchharness.Mutation) error {
+			select {
+			case writeGate <- struct{}{}:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		})
+		_ = events.Emit("scheduler_finished", map[string]any{"scheduled": len(scheduler.Slips()), "slip_samples": len(scheduler.Slips()), "error": errorString(err)})
 	}()
 
 	rampStep := *rampUp / time.Duration(*n)
@@ -151,14 +187,21 @@ loop:
 				"r/s", (r-lastR)/10, "t/s", (t-lastT)/10, "c/s", (c-lastC)/10,
 				"dropped", len(dropped))
 			lastR, lastT, lastC = r, t, c
+			_ = events.Emit("progress", map[string]any{"sessions": c, "refreshes": r, "transacts": t, "dropped": len(dropped)})
 		}
 	}
 	cancel()
 	wg.Wait()
 
 	if len(dropped) > 0 {
+		_ = events.Emit("run_finished", map[string]any{"status": "failed", "dropped": len(dropped), "refreshes": refreshes.Load(), "transacts": transacts.Load()})
 		logger.Error("soak FAILED: dropped refreshes/protocol errors", "count", len(dropped),
 			"first", dropped[0].Error())
+		os.Exit(1)
+	}
+	if transacts.Load() == 0 {
+		_ = events.Emit("run_finished", map[string]any{"status": "failed", "reason": "zero_writes"})
+		logger.Error("soak FAILED: zero writes submitted")
 		os.Exit(1)
 	}
 
@@ -172,31 +215,47 @@ loop:
 	if n := len(sorted); n > 0 {
 		max = sorted[n-1]
 	}
-	logger.Info("delivery lag", "samples", len(sorted), "p50", p50.Round(time.Millisecond),
+	logger.Info("transport lag diagnostic", "samples", len(sorted), "p50", p50.Round(time.Millisecond),
 		"p99", p99.Round(time.Millisecond), "max", max.Round(time.Millisecond))
+	_ = events.Emit("lag_diagnostic", map[string]any{"metric_kind": "transport_diagnostic", "semantic_claim": false, "samples": len(sorted), "p50": p50.String(), "p99": p99.String(), "max": max.String()})
 	if *maxP99 > 0 && p99 > *maxP99 {
+		_ = events.Emit("run_finished", map[string]any{"status": "failed", "reason": "p99_budget", "p99": p99.String(), "budget": maxP99.String()})
 		logger.Error("soak FAILED: p99 delivery lag over budget", "p99", p99, "budget", *maxP99)
+		os.Exit(1)
+	}
+	if len(sorted) == 0 {
+		_ = events.Emit("run_finished", map[string]any{"status": "failed", "reason": "no_delivery_samples"})
+		logger.Error("soak FAILED: no delivery samples")
 		os.Exit(1)
 	}
 	logger.Info("soak PASSED", "sessions", connects.Load(), "refreshes", refreshes.Load(),
 		"transacts", transacts.Load())
+	_ = events.Emit("run_finished", map[string]any{"status": "passed", "sessions": connects.Load(), "refreshes": refreshes.Load(), "transacts": transacts.Load(), "lag_samples": len(sorted)})
+}
+
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+func openEvents(path string) (*benchharness.EventWriter, func(), error) {
+	if path == "" {
+		return benchharness.NewEventWriter(nil, 0), func() {}, nil
+	}
+	if path == "-" {
+		return benchharness.NewEventWriter(func(b []byte) error { _, err := os.Stdout.Write(b); return err }, 0), func() {}, nil
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return nil, func() {}, err
+	}
+	return benchharness.NewEventWriter(func(b []byte) error { _, err := f.Write(b); return err }, 0), func() { _ = f.Close() }, nil
 }
 
 // runSession drives one client until deadline. Returns a non-nil error when a
 // correctness violation is detected (missed refresh, bad frame ordering).
-// refreshStall reports true when no refresh arrived for 20s after activity.
-func refreshStall(now int64, last *int64, lastAt *time.Time) bool {
-	if now != *last {
-		*last = now
-		*lastAt = time.Now()
-		return false
-	}
-	if now == 0 {
-		return false // writers may not have started
-	}
-	return time.Since(*lastAt) > 20*time.Second
-}
-
 func runSession(ctx context.Context, _ *slog.Logger, rawURL, appID string, id int,
 	attr *string, txInterval *time.Duration,
 	refreshes, transacts, connects *atomic.Int64, writeGate chan struct{},
@@ -225,7 +284,6 @@ func runSession(ctx context.Context, _ *slog.Logger, rawURL, appID string, id in
 		gotSnapshot   bool
 		mu            sync.Mutex
 		lastRefreshAt = time.Now()
-		lastRefreshCt int64
 		lastTxAt      time.Time // last transact send; sampled on next refresh
 	)
 
@@ -266,11 +324,10 @@ func runSession(ctx context.Context, _ *slog.Logger, rawURL, appID string, id in
 				}
 			case "transact-ok":
 				atomic.AddInt32(&pendingTxs, -1)
-			case "refresh-ok":
+			case "refresh-ok", "refresh-ok-delta":
 				mu.Lock()
 				gotSnapshot = true
 				lastRefreshAt = time.Now()
-				lastRefreshCt++
 				if !lastTxAt.IsZero() {
 					recordLag(time.Since(lastTxAt))
 					lastTxAt = time.Time{}
@@ -312,12 +369,15 @@ func runSession(ctx context.Context, _ *slog.Logger, rawURL, appID string, id in
 	for {
 		select {
 		case <-ctx.Done():
+			if atomic.LoadInt32(&pendingTxs) != 0 {
+				return fmt.Errorf("unresolved transacts: %d", atomic.LoadInt32(&pendingTxs))
+			}
 			return nil
 		case err := <-readErr:
 			return err
 		case <-tick.C:
 			mu.Lock()
-			snap, lastAt, lastCt := gotSnapshot, lastRefreshAt, lastRefreshCt
+			snap, lastAt := gotSnapshot, lastRefreshAt
 			mu.Unlock()
 			if !snap {
 				if time.Now().After(snapDeadline) {
@@ -328,7 +388,7 @@ func runSession(ctx context.Context, _ *slog.Logger, rawURL, appID string, id in
 			if pending := atomic.LoadInt32(&pendingTxs); pending > 50 {
 				return fmt.Errorf("stalled: %d transacts without ok", pending)
 			}
-			if refreshStall(refreshes.Load(), &lastCt, &lastAt) && counter > 0 {
+			if time.Since(lastAt) > 20*time.Second && counter > 0 {
 				return fmt.Errorf("refresh stream stalled")
 			}
 			counter++

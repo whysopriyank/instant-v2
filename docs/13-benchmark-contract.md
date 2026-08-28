@@ -1,6 +1,6 @@
 # Wave 4 — Comparative Benchmark Contract
 
-Status: accepted design for Wave 5 implementation; Wave 6 measurement has not
+Status: Wave 5 harness implemented and accepted; Wave 6 measurement has not
 run.
 
 This document is the binding contract for the hardened V1/V2 benchmark. It is

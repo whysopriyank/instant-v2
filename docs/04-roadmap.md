@@ -23,7 +23,7 @@ gate.
 | 3 — query | Partial | InstaQL, datalog plans, pagination, local evaluation, and index-oriented tests exist; broad v1/JS differential coverage remains open. |
 | 4 — reactive sync | Partial | WS/SSE, groups, incremental/delta refresh, direct post-commit invalidation, optional peer bus, and isolated pgoutput tests exist; full-session corpus, 5k×30-minute soak, production WAL-tail assembly, and cross-node write ordering are not all complete. |
 | 5 — platform | Partial | Admin/runtime/storage APIs, injected-provider/direct id-token tests, JWKS, backups, and S3-compatible routes exist; builtin auth-code provider configuration, nonce handling, HTTP corpus breadth, admin presence projection, and Apple end-to-end exchange remain open. |
-| 6 — hardening/release | Partial | Security, rate limits, queue gates, chaos, and race checks landed; the accepted Wave 4 contract (`docs/13-benchmark-contract.md`) still needs its Wave 5 harness implementation and paired v1/V2 Wave 6 measurement. |
+| 6 — hardening/release | Partial | Security, rate limits, queue gates, chaos, race checks, and the accepted Wave 5 comparative harness landed; paired live V1/V2 Wave 6 measurement remains open. |
 
 “Complete for implemented scope” means the code and focused tests cover the
 current contract; it does not waive the broader corpus or release gates below.

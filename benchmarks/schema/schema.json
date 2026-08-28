@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://instant-v2.dev/benchmarks/schema/v1",
+  "title": "instant-v2 benchmark artifact envelope",
+  "type": "object",
+  "required": ["schema_version"],
+  "properties": {"schema_version": {"const": "bench-v1"}},
+  "additionalProperties": true
+}

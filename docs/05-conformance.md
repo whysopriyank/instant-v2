@@ -28,7 +28,7 @@ backups, WS/SSE flows, rooms, delta/incremental refresh, and live pgoutput.
 | WAL/invalidation | Live PG17 pgoutput test plus direct-notify/bus tests | Production assembly uses post-commit notification; tailer-driven ack ordering is not the running path. |
 | Presence/rooms | In-process WS tests | No cross-node ephemeral-state bus; admin presence endpoint currently returns `{}`. |
 | Storage/backups | Real-DB and S3/fake-store tests | Broad SDK HTTP corpus remains open. |
-| Performance | Existing named smoke/soak and microbenchmarks | The accepted Wave 4 contract is in `docs/13-benchmark-contract.md`; Wave 5 harness implementation and Wave 6 paired v1/V2 measurement are required before comparative claims. |
+| Performance | Wave 5 hardened harness plus named smoke/soak and microbenchmarks | The accepted contract is implemented with deterministic paired artifacts and offline replay; Wave 6 paired live V1/V2 measurement is still required before comparative claims. |
 
 The tables below describe the target gate and historical apparatus; they do
 not imply that every listed fixture already exists.

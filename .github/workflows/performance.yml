@@ -1,0 +1,167 @@
+name: performance
+
+# This workflow is deliberately not a pull_request workflow. It is an
+# explicit/scheduled, bounded V2 smoke and artifact-replay entry point. The
+# full 24-cell/7-pair V1/V2 matrix belongs to Wave 6 and is never run on PRs.
+on:
+  workflow_dispatch:
+    inputs:
+      family:
+        description: Synthetic workload family
+        required: true
+        type: choice
+        default: H-append
+        options: [H-append, X-heterogeneous, M-mixed, O-reorder, S-slow-reader, R-reconnect, C-process-cold, T-saturation]
+      scale:
+        description: Synthetic subscriber scale
+        required: true
+        type: choice
+        default: "300"
+        options: ["300", "1000", "2000"]
+      seed:
+        description: Deterministic synthetic seed
+        required: true
+        type: string
+        default: "1"
+      smoke_sessions:
+        description: Bounded V2 smoke subscriber count
+        required: true
+        type: choice
+        default: "300"
+        options: ["150", "300"]
+      smoke_duration:
+        description: Bounded V2 smoke duration
+        required: true
+        type: choice
+        default: 60s
+        options: [60s]
+  schedule:
+    - cron: "17 3 * * 0"
+
+permissions:
+  contents: read
+
+jobs:
+  bounded-v2-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PGPASSWORD: instant
+      REQUESTED_FAMILY: ${{ inputs.family || 'H-append' }}
+      REQUESTED_SCALE: ${{ inputs.scale || '300' }}
+      REQUESTED_SEED: ${{ inputs.seed || '1' }}
+      REQUESTED_SESSIONS: ${{ inputs.smoke_sessions || '300' }}
+      REQUESTED_DURATION: ${{ inputs.smoke_duration || '60s' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Resolve disposable run names
+        run: |
+          case "$REQUESTED_FAMILY" in H-append|X-heterogeneous|M-mixed|O-reorder|S-slow-reader|R-reconnect|C-process-cold|T-saturation) ;; *) echo "unsupported family"; exit 2;; esac
+          case "$REQUESTED_SCALE" in 300|1000|2000) ;; *) echo "unsupported scale"; exit 2;; esac
+          case "$REQUESTED_SESSIONS" in 150|300) ;; *) echo "unsupported session count"; exit 2;; esac
+          case "$REQUESTED_DURATION" in 60s) ;; *) echo "unsupported duration"; exit 2;; esac
+          # Live V1/V2 runs are operator-controlled and must not receive
+          # benchmark credentials from repository-managed values. This
+          # workflow is intentionally synthetic plus bounded V2 smoke only.
+          echo "RUN_MODE=synthetic" >> "$GITHUB_ENV"
+          DB_NAME="instant_bench_perf_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+          BUNDLE="benchmarks/results/perf-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          MARKER="perf-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "DB_NAME=$DB_NAME" >> "$GITHUB_ENV"
+          echo "BUNDLE=$BUNDLE" >> "$GITHUB_ENV"
+          echo "BENCHMARK_MARKER=$MARKER" >> "$GITHUB_ENV"
+          echo "DATABASE_URL=postgres://instant:instant@127.0.0.1:5432/$DB_NAME?sslmode=disable" >> "$GITHUB_ENV"
+          mkdir -p "$BUNDLE"
+      - name: Start disposable postgres (wal_level=logical)
+        run: |
+          docker rm -f perf-pg 2>/dev/null || true
+          docker run -d --name perf-pg \
+            -e POSTGRES_USER=instant -e POSTGRES_PASSWORD=instant -e POSTGRES_DB="$DB_NAME" \
+            -p 5432:5432 postgres:17 -c wal_level=logical
+          ready=0
+          for i in $(seq 1 45); do
+            if docker exec perf-pg pg_isready -U instant -d "$DB_NAME" | grep -q "accepting connections"; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" = 1
+      - name: Build source binaries
+        run: |
+          mkdir -p bin
+          go build -o bin/instantd ./cmd/instantd
+          go build -o bin/benchrun ./tools/benchrun
+          go build -o bin/benchreport ./tools/benchreport
+          go build -o bin/soaksetup ./tools/soaksetup
+          go build -o bin/soak ./tools/soak
+      - name: Provision fixture and capture setup record
+        run: |
+          mkdir -p "$BUNDLE/raw"
+          ./bin/soaksetup -database-url "$DATABASE_URL" -marker "$BENCHMARK_MARKER" | tee "$BUNDLE/raw/soaksetup.out"
+          APP=$(awk -F= '$1 == "APP" {print $2}' "$BUNDLE/raw/soaksetup.out")
+          ATTR=$(awk -F= '$1 == "ATTR" {print $2}' "$BUNDLE/raw/soaksetup.out")
+          test -n "$APP" && test -n "$ATTR"
+          jq -n --arg app "$APP" --arg attr "$ATTR" --arg database "$DB_NAME" --arg marker "$BENCHMARK_MARKER" \
+            '{app:$app, attr:$attr, database:$database, marker:$marker, setup:"soaksetup"}' > "$BUNDLE/raw/soak-setup.json"
+          echo "SOAK_APP=$APP" >> "$GITHUB_ENV"
+          echo "SOAK_ATTR=$ATTR" >> "$GITHUB_ENV"
+      - name: Start instantd on loopback
+        env:
+          INSTANT_V2_HTTP_ADDR: 127.0.0.1:8888
+          INSTANT_V2_INSECURE_DEV_SECRETS: "1"
+        run: |
+          ./bin/instantd > "$BUNDLE/instantd.log" 2>&1 &
+          echo $! > server.pid
+          ready=0
+          for i in $(seq 1 60); do
+            # /runtime/sse requires app_id; /health is the unauthenticated
+            # liveness endpoint used for startup qualification.
+            if curl --fail --max-time 3 -sS -o /dev/null http://127.0.0.1:8888/health; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" = 1
+      - name: Run bounded V2 smoke with structured events
+        run: |
+          ./bin/soak \
+            -url ws://127.0.0.1:8888/runtime/session \
+            -app "$SOAK_APP" -attr "$SOAK_ATTR" \
+            -sessions "$REQUESTED_SESSIONS" -ramp 10s -settle 30s -duration "$REQUESTED_DURATION" \
+            -global-tx-rate 8 -tx-interval 2s -max-p99-lag 10s \
+            -events "$BUNDLE/raw/soak-events.jsonl" 2>&1 | tee "$BUNDLE/soak.log"
+      - name: Run configured pair and finalize raw bundle
+        run: |
+          ./bin/benchrun \
+            -synthetic \
+            -output "$BUNDLE/raw" \
+            -seed "$REQUESTED_SEED" \
+            -pair "perf-smoke" \
+            -family "$REQUESTED_FAMILY" \
+            -scale "$REQUESTED_SCALE"
+      - name: Render offline report from raw bundle
+        run: |
+          ./bin/benchreport -input "$BUNDLE/raw" -output "$BUNDLE/report.md"
+          test -s "$BUNDLE/report.md"
+          if grep -q "Claim eligible: true" "$BUNDLE/report.md"; then
+            echo "performance workflow is not a Wave 6 claim run" >&2
+            exit 1
+          fi
+      - name: Upload performance bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: benchmarks/results/perf-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Stop server and disposable postgres
+        if: always()
+        run: |
+          if test -s server.pid; then kill "$(cat server.pid)" 2>/dev/null || true; fi
+          docker rm -f perf-pg 2>/dev/null || true

@@ -64,8 +64,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      DATABASE_URL: postgres://instant:instant@localhost:5432/instant_v2_soak?sslmode=disable
+      DATABASE_URL: postgres://instant:instant@localhost:5432/instant_bench_ci_${{ github.run_id }}_${{ github.run_attempt }}?sslmode=disable
+      BENCHMARK_DB_NAME: instant_bench_ci_${{ github.run_id }}_${{ github.run_attempt }}
       PGPASSWORD: instant
+      BENCHMARK_MARKER: ci-soak-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -75,13 +77,20 @@ jobs:
         run: |
           docker rm -f soak-pg 2>/dev/null || true
           docker run -d --name soak-pg \
-            -e POSTGRES_USER=instant -e POSTGRES_PASSWORD=instant -e POSTGRES_DB=instant_v2_soak \
+            -e POSTGRES_USER=instant -e POSTGRES_PASSWORD=instant -e POSTGRES_DB=postgres \
             -p 5432:5432 postgres:17
+          ready=0
           for i in $(seq 1 30); do
-            ok=$(docker exec soak-pg pg_isready -U instant || true)
-            case "$ok" in *"accepting connections") break;; esac
+            if docker exec soak-pg pg_isready -U instant -d postgres | grep -q "accepting connections"; then
+              ready=1
+              break
+            fi
             sleep 1
           done
+          test "$ready" = 1
+          # Connect through the bootstrap database; the benchmark database is
+          # created with the exact name used by DATABASE_URL above.
+          docker exec soak-pg createdb -U instant -d postgres "$BENCHMARK_DB_NAME"
       - name: Build server + harness
         run: |
           go build -o instantd ./cmd/instantd
@@ -89,9 +98,16 @@ jobs:
           go build -o soak ./tools/soak
       - name: Seed app + attr
         run: |
-          OUT=$(./soaksetup)
-          echo "SOAK_APP=$(echo "$OUT" | grep '^APP=' | cut -d= -f2)" >> "$GITHUB_ENV"
-          echo "SOAK_ATTR=$(echo "$OUT" | grep '^ATTR=' | cut -d= -f2)" >> "$GITHUB_ENV"
+          ./soaksetup -database-url "$DATABASE_URL" -marker "$BENCHMARK_MARKER" | tee soaksetup.out
+          APP=$(awk -F= '$1 == "APP" {print $2}' soaksetup.out)
+          ATTR=$(awk -F= '$1 == "ATTR" {print $2}' soaksetup.out)
+          test -n "$APP" && test -n "$ATTR"
+          DB_NAME="${DATABASE_URL##*/}"
+          DB_NAME="${DB_NAME%%\?*}"
+          jq -n --arg app "$APP" --arg attr "$ATTR" --arg database "$DB_NAME" --arg marker "$BENCHMARK_MARKER" \
+            '{app:$app, attr:$attr, database:$database, marker:$marker, setup:"soaksetup"}' > soak-setup.json
+          echo "SOAK_APP=$APP" >> "$GITHUB_ENV"
+          echo "SOAK_ATTR=$ATTR" >> "$GITHUB_ENV"
       - name: Start instantd
         env:
           INSTANT_V2_HTTP_ADDR: "127.0.0.1:8888"
@@ -100,19 +116,21 @@ jobs:
           ./instantd > instantd.log 2>&1 &
           echo $! > server.pid
           for i in $(seq 1 60); do
-            curl -s -o /dev/null http://127.0.0.1:8888/runtime/sse && exit 0
+            # /runtime/sse requires app_id; /health is the unauthenticated
+            # liveness endpoint and therefore catches a real server startup.
+            curl --fail --max-time 3 -sS -o /dev/null http://127.0.0.1:8888/health && exit 0
             sleep 1
           done
           echo "instantd did not become ready"; tail -50 instantd.log; exit 1
-      - name: Soak (150 sessions, 90s hold — writes start at ramp+30s)
+      - name: Soak (150 sessions, 10s ramp + 30s warm-up + 60s measurement)
         timeout-minutes: 6
         run: |
           ./soak \
             -url ws://127.0.0.1:8888/runtime/session \
             -app "$SOAK_APP" -attr "$SOAK_ATTR" \
-            -sessions 150 -ramp 10s -duration 90s \
+            -sessions 150 -ramp 10s -settle 30s -duration 100s \
             -global-tx-rate 8 -tx-interval 2s \
-            -max-p99-lag 10s
+            -max-p99-lag 10s -events soak-events.jsonl 2>&1 | tee soak.log
       - name: RSS ceiling (1 GiB)
         if: always()
         run: |
@@ -125,3 +143,19 @@ jobs:
       - name: Dump server log on failure
         if: failure()
         run: tail -100 instantd.log
+      - name: Upload short soak artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-soak-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            soaksetup.out
+            soak-setup.json
+            soak-events.jsonl
+            soak.log
+            instantd.log
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Stop disposable postgres
+        if: always()
+        run: docker rm -f soak-pg 2>/dev/null || true

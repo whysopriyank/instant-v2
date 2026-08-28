@@ -1,0 +1,1 @@
+{"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"instant-v2/bench-v1/db","type":"object","required":["at","connections","commits","rollbacks"],"properties":{}}

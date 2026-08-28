@@ -1,7 +1,7 @@
 # Audit Remediation Plan
 
-Status: Waves 0–3 complete; Wave 4 benchmark contract complete; Wave 5
-implementation and Wave 6 measurement remain open. Based on the 2026-08-28
+Status: Waves 0–3 complete; Wave 4 benchmark contract and Wave 5 harness
+complete; Wave 6 measurement remains open. Based on the 2026-08-28
 committed-code, working-tree, architecture, conformance, and performance audit.
 
 ## Objectives
@@ -208,7 +208,7 @@ matrix, provenance, statistics, safety, and Wave 5 ownership boundaries.
 
 Gate: complete. Wave 5 must implement docs/13 before Wave 6 measurement starts.
 
-## Wave 5 — Benchmark harness hardening
+## Wave 5 — Benchmark harness hardening — COMPLETE
 
 Exact disjoint Luna work packages and their ownership are defined in
 [docs/13-benchmark-contract.md](13-benchmark-contract.md) §12:
@@ -236,10 +236,12 @@ Keep product hot-path code out of this wave.
 7. Keep CI's short soak as a correctness/resource guard; add a separate,
    scheduled or explicitly invoked performance suite with tighter budgets.
 
-Gate: the harness can reproduce a checked-in results bundle and distinguish
+Gate: complete. The harness produces a deterministic 14-run/seven-pair bundle
+and distinguishes
 delivery, convergence, latency, throughput, CPU, memory, and wire cost, while
-passing the Luna test-worker acceptance in docs/13 §13. Wave 5 is not complete
-until that evidence exists.
+passing the Luna test-worker acceptance in docs/13 §13. Offline replay is
+byte-identical; correctness and Sol security gates pass. Live V1/V2 execution
+and any comparative percentage remain Wave 6 work.
 
 ## Wave 6 — Remeasure before further tuning — MEASUREMENT ONLY
 

@@ -1,0 +1,8 @@
+{
+  "revision": "REPLACE_WITH_REVIEWED_V1_COMMIT_SHA",
+  "database_name": "instant_bench_v1",
+  "postgres_version": "REPLACE_WITH_POSTGRES_VERSION",
+  "invalidation_mode": "wal2json",
+  "output_plugin": "wal2json",
+  "dirty_tree_hash": ""
+}
