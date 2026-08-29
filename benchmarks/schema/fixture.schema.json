@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "instant-v2/bench-v1/fixture",
+  "title": "instant-v2 canonical benchmark fixture evidence",
+  "type": "object",
+  "required": [
+    "id_attr",
+    "id_attr_id",
+    "value_attr_id",
+    "bucket_attr_id",
+    "rank_attr_id",
+    "id_attr_value_type",
+    "id_attr_value_encoding",
+    "id_attr_cardinality",
+    "id_attr_unique",
+    "id_attr_indexed",
+    "id_attr_required",
+    "id_attr_primary",
+    "id_attr_identity",
+    "entity_type",
+    "value_attr",
+    "bucket_attr",
+    "rank_attr",
+    "family",
+    "scale",
+    "seed",
+    "seed_entities",
+    "entity_ids",
+    "query_assignments",
+    "initial_semantic_hashes"
+  ],
+  "properties": {
+    "entity_type": {"type": "string", "minLength": 1},
+    "id_attr": {"const": "id"},
+    "id_attr_value_type": {"const": "blob"},
+    "id_attr_value_encoding": {"const": "string"},
+    "id_attr_cardinality": {"const": "one"},
+    "id_attr_unique": {"const": true},
+    "id_attr_indexed": {"const": true},
+    "id_attr_required": {"const": true},
+    "id_attr_primary": {"const": true},
+    "id_attr_identity": {"const": true},
+    "value_attr": {"type": "string", "minLength": 1},
+    "bucket_attr": {"type": "string"},
+    "rank_attr": {"type": "string"},
+    "query_entity": {"type": "string"},
+    "query_bucket_attr": {"type": "string"},
+    "query_rank_attr": {"type": "string"},
+    "id_attr_id": {"allOf": [{"$ref": "#/$defs/uuid"}, {"const": "00000000-0000-0000-0000-000000000100"}]},
+    "value_attr_id": {"allOf": [{"$ref": "#/$defs/uuid"}, {"const": "00000000-0000-0000-0000-000000000101"}]},
+    "bucket_attr_id": {"allOf": [{"$ref": "#/$defs/uuid"}, {"const": "00000000-0000-0000-0000-000000000102"}]},
+    "rank_attr_id": {"allOf": [{"$ref": "#/$defs/uuid"}, {"const": "00000000-0000-0000-0000-000000000103"}]},
+    "family": {"type": "string", "minLength": 1},
+    "scale": {"type": "integer", "minimum": 1},
+    "seed": {"type": "integer", "not": {"const": 0}},
+    "seed_entities": {"type": "integer", "minimum": 0},
+    "entity_ids": {"type": "array", "items": {"$ref": "#/$defs/uuid"}},
+    "query_assignments": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "bucket", "match_all", "top_n"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "bucket": {"type": "integer"},
+          "match_all": {"type": "boolean"},
+          "top_n": {"type": "integer", "minimum": 0}
+        },
+        "additionalProperties": false
+      }
+    },
+    "initial_semantic_hashes": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"}
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "uuid": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"}
+  }
+}

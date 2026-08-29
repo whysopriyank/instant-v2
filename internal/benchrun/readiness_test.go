@@ -44,10 +44,14 @@ func readinessLiveConfig(processPIDFile bool) LiveConfig {
 		V1SHA: "v1-rev", V2SHA: "v2-current-rev", V2ReferenceSHA: "v2-reference-rev",
 		FixturePath: "/tmp/fixture.json", FixtureHash: strings.Repeat("b", 64),
 		Fixture: FixtureIDs{
-			EntityType: "todos", ValueAttr: "value", BucketAttr: "bucket", RankAttr: "rank",
-			ValueAttrID:  "00000000-0000-0000-0000-000000000010",
-			BucketAttrID: "00000000-0000-0000-0000-000000000011",
-			RankAttrID:   "00000000-0000-0000-0000-000000000012",
+			EntityType: "todos", IDAttr: "id", ValueAttr: "value", BucketAttr: "bucket", RankAttr: "rank",
+			IDAttrID:        CanonicalFixtureIDAttrID,
+			ValueAttrID:     CanonicalFixtureValueAttrID,
+			BucketAttrID:    CanonicalFixtureBucketAttrID,
+			RankAttrID:      CanonicalFixtureRankAttrID,
+			IDAttrValueType: "blob", IDAttrValueEncoding: "string", IDAttrCardinality: "one",
+			IDAttrUnique: true, IDAttrIndexed: true, IDAttrPrimary: true, IDAttrIdentity: true,
+			IDAttrRequired: true,
 		},
 		Targets: []LiveTargetConfig{
 			readinessFixtureTarget("v1", "v1", "v1-rev", "instant_bench_v1", processPIDFile),

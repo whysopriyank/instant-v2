@@ -601,6 +601,7 @@ func TestDecodeWireRefreshNormalizesUUIDNodeListAttributes(t *testing.T) {
 		"computations": [{
 			"instaql-query": {"todos": {}},
 			"instaql-result": [{"data":{"datalog-result":{"join-rows":[[
+				["00000000-0000-4000-8000-000000000010","00000000-0000-4000-8000-000000000100","00000000-0000-4000-8000-000000000010"],
 				["00000000-0000-4000-8000-000000000010","00000000-0000-4000-8000-000000000001","marker"],
 				["00000000-0000-4000-8000-000000000010","00000000-0000-4000-8000-000000000002",7],
 				["00000000-0000-4000-8000-000000000010","00000000-0000-4000-8000-000000000003",2]
@@ -608,6 +609,7 @@ func TestDecodeWireRefreshNormalizesUUIDNodeListAttributes(t *testing.T) {
 		}]
 	}`)}
 	aliases := map[string]string{
+		"id":     "00000000-0000-4000-8000-000000000100",
 		"value":  "00000000-0000-4000-8000-000000000001",
 		"bucket": "00000000-0000-4000-8000-000000000002",
 		"rank":   "00000000-0000-4000-8000-000000000003",
@@ -620,10 +622,138 @@ func TestDecodeWireRefreshNormalizesUUIDNodeListAttributes(t *testing.T) {
 	if entity.Attributes["value"] != "marker" || entity.Bucket != 7 || entity.Rank != 2 {
 		t.Fatalf("UUID attributes were not normalized: %#v", entity)
 	}
+	if _, present := entity.Attributes["id"]; present {
+		t.Fatalf("identity UUID leaked into semantic attributes: %#v", entity.Attributes)
+	}
 	for _, wireKey := range []string{aliases["value"], aliases["bucket"], aliases["rank"]} {
 		if _, present := entity.Attributes[wireKey]; present {
 			t.Fatalf("wire UUID leaked into semantic attributes: %#v", entity.Attributes)
 		}
+	}
+}
+
+func TestNormalizeWireAttributeCanonicalizesUUIDAliases(t *testing.T) {
+	alias := "00000000-0000-4000-8000-000000000100"
+	if got := normalizeWireAttribute(strings.ToUpper(alias), map[string]string{"id": alias}); got != "id" {
+		t.Fatalf("uppercase UUID alias normalized as %q, want id", got)
+	}
+}
+
+func TestDecodeWireRefreshRejectsNonCanonicalEntityUUIDCasing(t *testing.T) {
+	entityID := "ABCDEFAB-CDEF-ABCD-EFAB-CDEFABCDEFAB"
+	idAttr := "00000000-0000-4000-8000-000000000100"
+	event := SessionEvent{Op: "refresh-ok", Payload: json.RawMessage(fmt.Sprintf(`{
+		"computations": [{"instaql-query":{"todos":{}},"instaql-result":[{"data":{"datalog-result":{"join-rows":[[
+			[%q,%q,%q]
+		]]}}}]}]
+	}`, entityID, idAttr, entityID))}
+	_, err := DecodeWireRefreshWithAliases(event, "q-1", map[string]string{"id": strings.ToLower(idAttr)})
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "lowercase") {
+		t.Fatalf("noncanonical entity UUID casing was accepted: %v", err)
+	}
+}
+
+func TestCompareMetadataRejectsWeakIdentityCatalog(t *testing.T) {
+	want := IdentityAttributeMetadata{ID: "00000000-0000-0000-0000-000000000100", EntityType: "bench_items", Label: "id", ValueType: "blob", Cardinality: "one", Unique: true, Indexed: true, Required: true, Primary: true, Identity: true}
+	cfg := TargetConfig{Kind: TargetV1, Revision: "rev", DatabaseName: "instant_bench_v1", PostgresVersion: "17", InvalidationMode: "logical", OutputPlugin: "wal2json", IdentityAttribute: want}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*IdentityAttributeMetadata)
+		want   string
+	}{
+		{name: "missing", mutate: func(got *IdentityAttributeMetadata) { *got = IdentityAttributeMetadata{} }, want: "identity"},
+		{name: "unindexed", mutate: func(got *IdentityAttributeMetadata) { got.Indexed = false }, want: "indexed"},
+		{name: "optional", mutate: func(got *IdentityAttributeMetadata) { got.Required = false }, want: "required"},
+		{name: "required without primary", mutate: func(got *IdentityAttributeMetadata) { got.Primary = false }, want: "primary"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := want
+			tc.mutate(&got)
+			err := compareMetadata(cfg, TargetMetadata{Revision: "rev", DatabaseName: "instant_bench_v1", PostgresVersion: "17", InvalidationMode: "logical", OutputPlugin: "wal2json", IdentityAttribute: got}, func(string, bool, string) {})
+			if err == nil || !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(tc.want)) {
+				t.Fatalf("weak identity catalog was accepted: %v", err)
+			}
+		})
+	}
+	if err := compareMetadata(cfg, TargetMetadata{Revision: "rev", DatabaseName: "instant_bench_v1", PostgresVersion: "17", InvalidationMode: "logical", OutputPlugin: "wal2json", IdentityAttribute: want}, func(string, bool, string) {}); err != nil {
+		t.Fatalf("exact identity catalog was rejected: %v", err)
+	}
+}
+
+func TestDecodeWireRefreshRejectsMissingIdentityForResultEntity(t *testing.T) {
+	entityID := "00000000-0000-4000-8000-000000000010"
+	idAttr := "00000000-0000-4000-8000-000000000100"
+	valueAttr := "00000000-0000-4000-8000-000000000001"
+	event := SessionEvent{Op: "refresh-ok", Payload: json.RawMessage(fmt.Sprintf(`{
+		"computations": [{
+			"instaql-query": {"todos": {}},
+			"instaql-result": [{"data":{"datalog-result":{"join-rows":[[
+				[%q,%q,"marker"]
+			]]}}}]
+		}]
+	}`, entityID, valueAttr))}
+	_, err := DecodeWireRefreshWithAliases(event, "q-1", map[string]string{"id": idAttr, "value": valueAttr})
+	if err == nil || !strings.Contains(err.Error(), "identity") {
+		t.Fatalf("missing identity row was accepted: %v", err)
+	}
+}
+
+func TestDecodeWireRefreshRejectsInvalidDuplicateAndConflictingIdentity(t *testing.T) {
+	entityID := "00000000-0000-4000-8000-000000000010"
+	idAttr := "00000000-0000-4000-8000-000000000100"
+	valueAttr := "00000000-0000-4000-8000-000000000001"
+	aliases := map[string]string{"id": idAttr, "value": valueAttr}
+	for _, tc := range []struct {
+		name string
+		rows string
+		want string
+	}{
+		{name: "invalid", rows: fmt.Sprintf(`[%q,%q,"not-a-uuid"]`, entityID, idAttr), want: "UUID"},
+		{name: "duplicate", rows: fmt.Sprintf(`[%q,%q,%q],[%q,%q,%q]`, entityID, idAttr, entityID, entityID, idAttr, entityID), want: "duplicate"},
+		{name: "conflicting", rows: fmt.Sprintf(`[%q,%q,%q],[%q,%q,%q]`, entityID, idAttr, entityID, entityID, idAttr, "00000000-0000-4000-8000-000000000011"), want: "identity"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			event := SessionEvent{Op: "refresh-ok", Payload: json.RawMessage(fmt.Sprintf(`{
+				"computations": [{"instaql-query":{"todos":{}},"instaql-result":[{"data":{"datalog-result":{"join-rows":[[%s]]}}}]}]
+			}`, tc.rows))}
+			_, err := DecodeWireRefreshWithAliases(event, "q-1", aliases)
+			if err == nil || !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(tc.want)) {
+				t.Fatalf("%s identity was accepted: %v", tc.name, err)
+			}
+		})
+	}
+}
+
+func TestDecodeWireRefreshNormalizesObjectIdentityAliasBeforeOmitting(t *testing.T) {
+	entityID := "00000000-0000-4000-8000-000000000010"
+	idAttr := "00000000-0000-4000-8000-000000000100"
+	valueAttr := "00000000-0000-4000-8000-000000000001"
+	event := SessionEvent{Op: "refresh-ok", Payload: json.RawMessage(fmt.Sprintf(`{
+		"computations": [{"instaql-query":{"todos":{}},"instaql-result":{"data":{"todos":[{"id":%q,%q:%q,%q:"marker"}]}}}]
+	}`, entityID, idAttr, entityID, valueAttr))}
+	refresh, err := DecodeWireRefreshWithAliases(event, "q-1", map[string]string{"id": idAttr, "value": valueAttr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entity := refresh.Full.Entities[entityID]
+	if entity.Attributes["value"] != "marker" {
+		t.Fatalf("object value was not normalized: %#v", entity)
+	}
+	if _, ok := entity.Attributes["id"]; ok {
+		t.Fatalf("object identity leaked into attributes: %#v", entity.Attributes)
+	}
+	if _, ok := entity.Attributes[idAttr]; ok {
+		t.Fatalf("object identity alias leaked into attributes: %#v", entity.Attributes)
+	}
+}
+
+func TestDecodeWireRefreshRejectsInvalidObjectIdentity(t *testing.T) {
+	event := SessionEvent{Op: "refresh-ok", Payload: json.RawMessage(`{
+		"computations": [{"instaql-query":{"todos":{}},"instaql-result":{"data":{"todos":[{"id":"not-a-uuid","value":"marker"}]}}}]
+	}`)}
+	_, err := DecodeWireRefreshWithAliases(event, "q-1", map[string]string{"id": "00000000-0000-4000-8000-000000000100"})
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "identity") {
+		t.Fatalf("invalid object identity was accepted: %v", err)
 	}
 }
 

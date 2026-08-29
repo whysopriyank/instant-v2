@@ -85,8 +85,16 @@ type PairRunner struct {
 	Manifest    Manifest
 	Plan        Plan
 	Targets     []Target
+	Fixture     FixtureIDs
 	Environment Environment
 	Now         func() time.Time
+}
+
+func (r *PairRunner) fixtureIDs() FixtureIDs {
+	if r.Fixture == (FixtureIDs{}) {
+		return DefaultFixtureIDs
+	}
+	return r.Fixture
 }
 
 func (r *PairRunner) Run(ctx context.Context) (Summary, error) {
@@ -159,7 +167,8 @@ func (r *PairRunner) Run(ctx context.Context) (Summary, error) {
 	// offline replay can reconstruct entity IDs, query assignments, and initial
 	// semantic hashes even for synthetic tests.
 	if _, statErr := os.Stat(filepath.Join(r.Writer.Root, "fixture.json")); os.IsNotExist(statErr) {
-		fixtureEvidence, fixtureErr := BuildFixtureEvidence(FixtureIDs{}, r.Manifest.Family, r.Manifest.SubscriberScale, r.Plan.Seed)
+		fixtureIDs := r.fixtureIDs()
+		fixtureEvidence, fixtureErr := BuildFixtureEvidence(fixtureIDs, r.Manifest.Family, r.Manifest.SubscriberScale, r.Plan.Seed)
 		if fixtureErr != nil {
 			return Summary{}, fixtureErr
 		}
@@ -173,7 +182,7 @@ func (r *PairRunner) Run(ctx context.Context) (Summary, error) {
 		}
 	}
 	if _, statErr := os.Stat(filepath.Join(r.Writer.Root, "config.json")); os.IsNotExist(statErr) {
-		configEvidence := LiveConfig{PairID: r.Manifest.PairID, Seed: r.Manifest.Seed, Family: r.Manifest.Family, Scale: r.Manifest.SubscriberScale}
+		configEvidence := LiveConfig{PairID: r.Manifest.PairID, Seed: r.Manifest.Seed, Family: r.Manifest.Family, Scale: r.Manifest.SubscriberScale, Fixture: r.fixtureIDs()}
 		configHash, hashErr := DigestJSON(configEvidence)
 		if hashErr != nil {
 			return Summary{}, hashErr
@@ -366,7 +375,8 @@ func (r *PairRunner) runThreeTarget(ctx context.Context) (Summary, error) {
 		return Summary{}, err
 	}
 	if _, statErr := os.Stat(filepath.Join(r.Writer.Root, "fixture.json")); os.IsNotExist(statErr) {
-		fixtureEvidence, fixtureErr := BuildFixtureEvidence(FixtureIDs{}, r.Manifest.Family, r.Manifest.SubscriberScale, r.Plan.Seed)
+		fixtureIDs := r.fixtureIDs()
+		fixtureEvidence, fixtureErr := BuildFixtureEvidence(fixtureIDs, r.Manifest.Family, r.Manifest.SubscriberScale, r.Plan.Seed)
 		if fixtureErr != nil {
 			return Summary{}, fixtureErr
 		}
@@ -380,7 +390,7 @@ func (r *PairRunner) runThreeTarget(ctx context.Context) (Summary, error) {
 		}
 	}
 	if _, statErr := os.Stat(filepath.Join(r.Writer.Root, "config.json")); os.IsNotExist(statErr) {
-		configEvidence := LiveConfig{PairID: r.Manifest.PairID, Seed: r.Manifest.Seed, Family: r.Manifest.Family, Scale: r.Manifest.SubscriberScale}
+		configEvidence := LiveConfig{PairID: r.Manifest.PairID, Seed: r.Manifest.Seed, Family: r.Manifest.Family, Scale: r.Manifest.SubscriberScale, Fixture: r.fixtureIDs()}
 		configHash, hashErr := DigestJSON(configEvidence)
 		if hashErr != nil {
 			return Summary{}, hashErr

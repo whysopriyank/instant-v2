@@ -179,6 +179,7 @@ func reportThreeTargetArtifacts(root string, m Manifest) (Summary, error) {
 }
 
 func validateThreeTargetSharedEvidence(root string, m Manifest) error {
+	var bundledFixtureIDs *FixtureIDs
 	var environment Environment
 	b, err := readBounded(filepath.Join(root, "environment.json"), SmallArtifactBytes)
 	if err != nil {
@@ -199,6 +200,8 @@ func validateThreeTargetSharedEvidence(root string, m Manifest) error {
 		if digest, digestErr := DigestJSON(CanonicalConfigEvidence(cfg)); digestErr != nil || !strings.EqualFold(digest, m.ConfigHash) {
 			return errors.New("bundled live config hash mismatch")
 		}
+		fixtureIDs := cfg.Fixture
+		bundledFixtureIDs = &fixtureIDs
 	}
 	b, err = readBounded(filepath.Join(root, "fixture.json"), SmallArtifactBytes)
 	if err != nil {
@@ -207,6 +210,9 @@ func validateThreeTargetSharedEvidence(root string, m Manifest) error {
 	var fixture FixtureEvidence
 	if err = json.Unmarshal(b, &fixture); err != nil {
 		return fmt.Errorf("invalid bundled fixture evidence: %w", err)
+	}
+	if bundledFixtureIDs != nil && *bundledFixtureIDs != fixture.FixtureIDs {
+		return errors.New("bundled live config fixture does not match fixture evidence")
 	}
 	if fixture.Family != canonicalBenchmarkFamily(m.Family) || fixture.Scale != m.SubscriberScale || fixture.Seed != m.Seed || len(fixture.EntityIDs) != fixture.SeedEntities || len(fixture.QueryAssignments) == 0 || len(fixture.InitialSemanticHashes) != len(fixture.QueryAssignments) {
 		return errors.New("bundled fixture evidence does not match manifest")

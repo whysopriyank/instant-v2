@@ -139,6 +139,9 @@ func (c LiveConfig) Validate() error {
 		if t.SessionURL == "" || t.HealthURL == "" || t.AppID == "" || t.Revision == "" || t.DatabaseName == "" || t.PostgresVersion == "" || t.InvalidationMode == "" || t.MetadataFile == "" || t.ProvisionedMarker == "" || t.DatabaseURLEnv == "" || t.ProbeEntityID == "" || len(t.ProvisionCommand) == 0 {
 			return fmt.Errorf("target %s missing required provenance/config", t.ID)
 		}
+		if err := validateCanonicalUUID(t.ProbeEntityID); err != nil {
+			return fmt.Errorf("target %s probe entity ID: %w", t.ID, err)
+		}
 		if !strings.HasPrefix(t.DatabaseName, "instant_bench_") {
 			return fmt.Errorf("target %s database must be disposable", t.ID)
 		}
@@ -368,6 +371,12 @@ func (c LiveConfig) Executor() (TargetExecutor, error) {
 	return &BenchharnessPairExecutor{Drivers: drivers, Specs: specs}, nil
 }
 func (s LiveTargetConfig) driverConfig(ids FixtureIDs, fixturePath, fixtureHash, family string, scale int, seed int64) (benchharness.TargetConfig, error) {
+	if err := ids.validate(); err != nil {
+		return benchharness.TargetConfig{}, err
+	}
+	if err := validateCanonicalUUID(s.ProbeEntityID); err != nil {
+		return benchharness.TargetConfig{}, fmt.Errorf("probe entity ID: %w", err)
+	}
 	metaBytes, e := readBounded(s.MetadataFile, SmallArtifactBytes)
 	if e != nil {
 		return benchharness.TargetConfig{}, fmt.Errorf("metadata evidence %s: %w", s.ID, e)
@@ -393,12 +402,21 @@ func (s LiveTargetConfig) driverConfig(ids FixtureIDs, fixturePath, fixtureHash,
 		transport = benchharness.TransportSSE
 	}
 	probeMutation := benchharness.Mutation{Sequence: 1, EventID: "bench/probe/1", Kind: benchharness.MutationAppend, EntityID: s.ProbeEntityID, Bucket: 0, Rank: 1, Marker: "bench/probe"}
+	entityType := ids.EntityType
+	if entityType == "" {
+		entityType = ids.queryEntity()
+	}
 	tc := benchharness.TargetConfig{ID: s.ID, Kind: kind, Transport: transport, SessionURL: s.SessionURL, HealthURL: s.HealthURL, AdminBaseURL: s.AdminBaseURL, AppID: s.AppID, Revision: s.Revision, DirtyTreeHash: s.DirtyTreeHash, DatabaseName: s.DatabaseName, PostgresVersion: s.PostgresVersion, InvalidationMode: s.InvalidationMode, OutputPlugin: s.OutputPlugin, Versions: s.Versions, AdminToken: os.Getenv(s.AdminTokenEnv), RefreshToken: os.Getenv(s.RefreshTokenEnv), AttributeAliases: map[string]string{
+		"id":     ids.IDAttrID,
 		"value":  ids.ValueAttrID,
 		"bucket": ids.BucketAttrID,
 		"rank":   ids.RankAttrID,
+	}, IdentityAttribute: benchharness.IdentityAttributeMetadata{
+		ID: ids.IDAttrID, EntityType: entityType, Label: ids.IDAttr, ValueType: ids.IDAttrValueType,
+		Cardinality: ids.IDAttrCardinality, Unique: ids.IDAttrUnique, Indexed: ids.IDAttrIndexed, Required: ids.IDAttrRequired,
+		Primary: ids.IDAttrPrimary, Identity: ids.IDAttrIdentity,
 	}, MetadataProbe: func(ctx context.Context) (benchharness.TargetMetadata, error) {
-		actual, e := queryDatabaseEvidence(ctx, s)
+		actual, e := queryDatabaseEvidence(ctx, s, ids)
 		if e != nil {
 			return benchharness.TargetMetadata{}, e
 		}
@@ -448,13 +466,13 @@ func (s LiveTargetConfig) driverConfig(ids FixtureIDs, fixturePath, fixtureHash,
 		// inherited as descriptor 3; no path lookup occurs after hashing.
 		cmd := exec.CommandContext(ctx, "/proc/self/fd/3", s.ProvisionCommand[1:]...)
 		cmd.ExtraFiles = []*os.File{executable}
-		cmd.Env = provisionEnvironment(s, fixturePath, fixtureHash, family, scale, seed)
+		cmd.Env = provisionEnvironment(s, ids, fixturePath, fixtureHash, family, scale, seed)
 		stdout, stderr := &cappedBuffer{max: 1 << 20}, &cappedBuffer{max: 1 << 20}
 		cmd.Stdout, cmd.Stderr = stdout, stderr
 		if e = cmd.Run(); e != nil || stdout.truncated || stderr.truncated {
 			return fmt.Errorf("provision command failed: %s", Redact(provisionFailure(e, stdout.String(), stderr.String())))
 		}
-		_, e = queryDatabaseEvidence(ctx, s)
+		_, e = queryDatabaseEvidence(ctx, s, ids)
 		return e
 	}}
 	if e := ApplyDefaultBuilders(&tc, ids); e != nil {
@@ -519,7 +537,7 @@ func provisionFailure(err error, stdout, stderr string) string {
 	return "output limit exceeded stdout=" + stdout + " stderr=" + stderr
 }
 
-func queryDatabaseEvidence(ctx context.Context, s LiveTargetConfig) (benchharness.TargetMetadata, error) {
+func queryDatabaseEvidence(ctx context.Context, s LiveTargetConfig, ids FixtureIDs) (benchharness.TargetMetadata, error) {
 	dsn := os.Getenv(s.DatabaseURLEnv)
 	if e := ValidateBenchmarkDSN(dsn); e != nil {
 		return benchharness.TargetMetadata{}, e
@@ -545,10 +563,43 @@ func queryDatabaseEvidence(ctx context.Context, s LiveTargetConfig) (benchharnes
 	if marker != s.ProvisionedMarker {
 		return benchharness.TargetMetadata{}, fmt.Errorf("benchmark marker mismatch")
 	}
-	return benchharness.TargetMetadata{DatabaseName: name, PostgresVersion: version, InvalidationMode: s.InvalidationMode}, nil
+	identity, err := queryIdentityAttributeEvidence(ctx, db, s, ids)
+	if err != nil {
+		return benchharness.TargetMetadata{}, err
+	}
+	return benchharness.TargetMetadata{DatabaseName: name, PostgresVersion: version, InvalidationMode: s.InvalidationMode, IdentityAttribute: identity}, nil
 }
 
-func provisionEnvironment(s LiveTargetConfig, fixturePath, fixtureHash, family string, scale int, seed int64) []string {
+func queryIdentityAttributeEvidence(ctx context.Context, db *sql.DB, s LiveTargetConfig, ids FixtureIDs) (benchharness.IdentityAttributeMetadata, error) {
+	var evidence benchharness.IdentityAttributeMetadata
+	var identity bool
+	err := db.QueryRowContext(ctx, `
+		SELECT a.id::text, COALESCE(a.etype, ''), COALESCE(a.label, ''),
+		       a.value_type, a.cardinality, a.is_unique, a.is_indexed,
+		       a.is_required,
+		       a.label = 'id',
+		       EXISTS (
+		           SELECT 1 FROM idents i
+		           WHERE i.app_id = a.app_id AND i.attr_id = a.id
+		             AND i.etype = a.etype AND i.label = a.label
+		       )
+		  FROM attrs a
+		 WHERE a.app_id = $1::uuid AND a.id = $2::uuid
+		   AND a.deletion_marked_at IS NULL`, s.AppID, ids.IDAttrID).Scan(
+		&evidence.ID, &evidence.EntityType, &evidence.Label, &evidence.ValueType,
+		&evidence.Cardinality, &evidence.Unique, &evidence.Indexed,
+		&evidence.Required, &evidence.Primary, &identity)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return benchharness.IdentityAttributeMetadata{}, fmt.Errorf("identity attribute catalog row is missing")
+		}
+		return benchharness.IdentityAttributeMetadata{}, fmt.Errorf("identity attribute catalog query: %s", Redact(err.Error()))
+	}
+	evidence.Identity = identity
+	return evidence, nil
+}
+
+func provisionEnvironment(s LiveTargetConfig, ids FixtureIDs, fixturePath, fixtureHash, family string, scale int, seed int64) []string {
 	names := []string{"PATH"}
 	names = append(names, s.DatabaseURLEnv)
 	seen := make(map[string]bool, len(names))
@@ -569,6 +620,16 @@ func provisionEnvironment(s LiveTargetConfig, fixturePath, fixtureHash, family s
 		"BENCH_REVISION="+s.Revision,
 		"BENCH_FIXTURE_PATH="+fixturePath,
 		"BENCH_FIXTURE_SHA256="+fixtureHash,
+		"BENCH_FIXTURE_ID_ATTR="+ids.IDAttr,
+		"BENCH_FIXTURE_ID_ATTR_ID="+ids.IDAttrID,
+		"BENCH_FIXTURE_ID_VALUE_TYPE="+ids.IDAttrValueType,
+		"BENCH_FIXTURE_ID_VALUE_ENCODING="+ids.IDAttrValueEncoding,
+		"BENCH_FIXTURE_ID_CARDINALITY="+ids.IDAttrCardinality,
+		"BENCH_FIXTURE_ID_UNIQUE="+strconv.FormatBool(ids.IDAttrUnique),
+		"BENCH_FIXTURE_ID_INDEXED="+strconv.FormatBool(ids.IDAttrIndexed),
+		"BENCH_FIXTURE_ID_REQUIRED="+strconv.FormatBool(ids.IDAttrRequired),
+		"BENCH_FIXTURE_ID_PRIMARY="+strconv.FormatBool(ids.IDAttrPrimary),
+		"BENCH_FIXTURE_IDENTITY="+strconv.FormatBool(ids.IDAttrIdentity),
 		"BENCH_FAMILY="+family,
 		"BENCH_SCALE="+strconv.Itoa(scale),
 		"BENCH_SEED="+strconv.FormatInt(seed, 10),

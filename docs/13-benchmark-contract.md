@@ -107,6 +107,29 @@ transaction id. The server transaction id is recorded when observable, but it
 is nullable and cannot be fabricated. The client protocol adapter records the
 processed transaction id when the target exposes it.
 
+Every live fixture also provisions a unique, cardinality-one blob identity
+attribute (`id`) and seeds one identity triple per entity with the entity UUID
+as its value. The signed fixture contract records the exact metadata tuple:
+`id_attr=id`, `id_attr_value_type=blob`, `id_attr_value_encoding=string`,
+`id_attr_cardinality=one`, `id_attr_unique=true`, `id_attr_indexed=true`,
+`id_attr_required=true`, `id_attr_primary=true`, and `id_attr_identity=true`.
+Creation mutations carry
+that same identity triple;
+updates, reorders, and retracts operate only on the existing entity and do not
+invent a new identity change. The identity label, UUID, and metadata are part
+of canonical signed fixture evidence and are passed to provisioners through
+the fixed `BENCH_FIXTURE_ID_ATTR`, `BENCH_FIXTURE_ID_ATTR_ID`,
+`BENCH_FIXTURE_ID_VALUE_TYPE`, `BENCH_FIXTURE_ID_VALUE_ENCODING`,
+`BENCH_FIXTURE_ID_CARDINALITY`, `BENCH_FIXTURE_ID_UNIQUE`,
+`BENCH_FIXTURE_ID_INDEXED`, `BENCH_FIXTURE_ID_REQUIRED`,
+`BENCH_FIXTURE_ID_PRIMARY`, and
+`BENCH_FIXTURE_IDENTITY` environment fields.
+The canonical example reserves UUID `00000000-0000-0000-0000-000000000100`
+for the identity attribute, alongside `...101`, `...102`, and `...103` for
+value, bucket, and rank. These four attribute UUIDs and every entity/probe UUID
+are lowercase canonical UUID strings; the live adapter rejects noncanonical
+casing before aliasing or map indexing.
+
 The adapter canonicalizes each refresh by sorting entities and attributes
 according to the protocol's stable ordering, removing only documented volatile
 fields, and hashing the resulting materialized query tree. It stores the digest
@@ -204,9 +227,10 @@ own fixture, oracle, and report. Its byte/reconciliation result must not be
 combined with the eight comparative V1/V2 sync families.
 
 The fixture contains a stable set of entities, attributes, and query groups.
-Seed counts, entity ids, attribute ids, query definitions, and initial semantic
-hashes are part of the artifact. No cell may add an unrecorded random fixture
-or select a different query after qualification.
+Seed counts, entity ids, identity/value/bucket/rank attribute ids, query
+definitions, and initial semantic hashes are part of the artifact. No cell may
+add an unrecorded random fixture or select a different query after
+qualification.
 
 The historical 5,000-session/30-minute V2-only soak remains a resource guard,
 not a required comparative V1/V2 cell. It cannot establish a comparative

@@ -221,7 +221,7 @@ func TestLoadLiveConfigAndDefaultBuilders(t *testing.T) {
 		prefix := "BENCH_" + strings.ToUpper(id) + "_"
 		return LiveTargetConfig{ID: id, Kind: id, Transport: transport, SessionURL: map[string]string{"v1": "ws://127.0.0.1/runtime/session", "v2": "http://127.0.0.1/runtime/sse"}[id], HealthURL: "http://127.0.0.1/health", AppID: "00000000-0000-0000-0000-00000000000" + id[len(id)-1:], Revision: "abc", DirtyTreeHash: "clean", DatabaseName: db, PostgresVersion: "17.1", InvalidationMode: "direct", OutputPlugin: map[string]string{"v1": "wal2json", "v2": ""}[id], MetadataFile: metadata, ProvisionedMarker: db, ProvisionCommand: []string{"/usr/bin/true"}, ProvisionCommandSHA256: sha, DatabaseURLEnv: prefix + "DATABASE_URL", AdminTokenEnv: prefix + "ADMIN_TOKEN", RefreshTokenEnv: prefix + "REFRESH_TOKEN", RuntimeTokenEnv: prefix + "RUNTIME_TOKEN", ProcessPIDEnv: prefix + "PID", ProcessExecutablePath: "/usr/bin/true", ProcessExecutableSHA256: sha, MarkerQuery: "SELECT current_database(), current_setting('server_version'), $1", ProbeEntityID: "00000000-0000-0000-0000-000000000003"}
 	}
-	ids := FixtureIDs{EntityType: "bench_items", ValueAttr: "value", BucketAttr: "bucket", RankAttr: "rank", ValueAttrID: "00000000-0000-0000-0000-000000000001", BucketAttrID: "00000000-0000-0000-0000-000000000002", RankAttrID: "00000000-0000-0000-0000-000000000003"}
+	ids := DefaultFixtureIDs
 	fixture, err := BuildFixtureEvidence(ids, "H-append", 300, 1)
 	if err != nil {
 		t.Fatal(err)
@@ -254,8 +254,8 @@ func TestLoadLiveConfigAndDefaultBuilders(t *testing.T) {
 	if e != nil || q == nil {
 		t.Fatalf("default query: %#v %v", q, e)
 	}
-	steps, e := DefaultTransactionSteps(loaded.Fixture, benchharness.Mutation{EntityID: "e", Marker: "bench/m", Kind: benchharness.MutationAppend})
-	if e != nil || len(steps) != 3 {
+	steps, e := DefaultTransactionSteps(loaded.Fixture, benchharness.Mutation{EntityID: "00000000-0000-0000-0000-000000000201", Marker: "bench/m", Kind: benchharness.MutationAppend})
+	if e != nil || len(steps) != 4 {
 		t.Fatalf("default tx steps: %#v %v", steps, e)
 	}
 }
@@ -268,13 +268,18 @@ func TestProbeValidatorRequiresMutationChangeAndMarker(t *testing.T) {
 	if err := os.WriteFile(path, b, 0600); err != nil {
 		t.Fatal(err)
 	}
-	cfg := LiveTargetConfig{ID: "v1", Revision: "abc", DatabaseName: "instant_bench_v1", PostgresVersion: "17.1", InvalidationMode: "direct", OutputPlugin: "wal2json", MetadataFile: path, ProbeEntityID: "probe-id"}
-	tc, err := cfg.driverConfig(FixtureIDs{EntityType: "x", ValueAttr: "value", ValueAttrID: "00000000-0000-0000-0000-000000000001"}, "", "", "H", 1, 1)
+	cfg := LiveTargetConfig{ID: "v1", Revision: "abc", DatabaseName: "instant_bench_v1", PostgresVersion: "17.1", InvalidationMode: "direct", OutputPlugin: "wal2json", MetadataFile: path, ProbeEntityID: "00000000-0000-0000-0000-000000000003"}
+	customIDs := DefaultFixtureIDs
+	customIDs.EntityType = "x"
+	tc, err := cfg.driverConfig(customIDs, "", "", "H", 1, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := tc.AttributeAliases["value"]; got != "00000000-0000-0000-0000-000000000001" {
+	if got := tc.AttributeAliases["value"]; got != CanonicalFixtureValueAttrID {
 		t.Fatalf("value attribute alias = %q", got)
+	}
+	if tc.IdentityAttribute.ID != CanonicalFixtureIDAttrID || tc.IdentityAttribute.Label != "id" || tc.IdentityAttribute.ValueType != "blob" || tc.IdentityAttribute.Cardinality != "one" || !tc.IdentityAttribute.Unique || !tc.IdentityAttribute.Indexed || !tc.IdentityAttribute.Required || !tc.IdentityAttribute.Primary || !tc.IdentityAttribute.Identity {
+		t.Fatalf("identity catalog contract not bound to live target: %#v", tc.IdentityAttribute)
 	}
 	initial := benchharness.Refresh{QueryID: "probe-query", Kind: benchharness.RefreshFull, Full: &benchharness.Materialized{QueryID: "probe-query", Entities: map[string]benchharness.Entity{}}}
 	unchanged := benchharness.Refresh{QueryID: "probe-query", Kind: benchharness.RefreshFull, Full: &benchharness.Materialized{QueryID: "probe-query", Entities: map[string]benchharness.Entity{}}}
@@ -282,14 +287,14 @@ func TestProbeValidatorRequiresMutationChangeAndMarker(t *testing.T) {
 		t.Fatal("unchanged probe was accepted")
 	}
 	changed := unchanged
-	changed.Full = &benchharness.Materialized{QueryID: "probe-query", Entities: map[string]benchharness.Entity{"probe-id": {ID: "probe-id", Attributes: map[string]any{"value": "bench/probe"}}}}
+	changed.Full = &benchharness.Materialized{QueryID: "probe-query", Entities: map[string]benchharness.Entity{cfg.ProbeEntityID: {ID: cfg.ProbeEntityID, Attributes: map[string]any{"value": "bench/probe"}}}}
 	if err := tc.Probe.Validate(initial, changed); err != nil {
 		t.Fatalf("valid probe rejected: %v", err)
 	}
 }
 
 func TestDefaultMutationShapesCoverAllFamilies(t *testing.T) {
-	ids := FixtureIDs{EntityType: "bench_items", ValueAttr: "value", BucketAttr: "bucket", RankAttr: "rank", ValueAttrID: "00000000-0000-0000-0000-000000000001", BucketAttrID: "00000000-0000-0000-0000-000000000002", RankAttrID: "00000000-0000-0000-0000-000000000003"}
+	ids := DefaultFixtureIDs
 	families := []benchharness.Family{benchharness.FamilyH, benchharness.FamilyX, benchharness.FamilyM, benchharness.FamilyO, benchharness.FamilyS, benchharness.FamilyR, benchharness.FamilyC, benchharness.FamilyT}
 	for _, family := range families {
 		w, e := benchharness.NewWorkload(family, 300, 7)

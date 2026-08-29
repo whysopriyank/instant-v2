@@ -578,6 +578,7 @@ func reportFromArtifacts(root string, verify bool) (Summary, error) {
 	// Bundles with a config hash carry the exact redacted config evidence. A
 	// manifest hash alone is insufficient for offline replay, including for
 	// synthetic runs where the equivalent minimal config is persisted.
+	var bundledFixtureIDs *FixtureIDs
 	if m.ConfigHash != "" {
 		configBytes, configErr := readBounded(filepath.Join(root, "config.json"), SmallArtifactBytes)
 		if configErr != nil {
@@ -590,6 +591,8 @@ func reportFromArtifacts(root string, verify bool) (Summary, error) {
 		if digest, err := DigestJSON(CanonicalConfigEvidence(cfg)); err != nil || !strings.EqualFold(digest, m.ConfigHash) {
 			return Summary{}, errors.New("bundled live config hash mismatch")
 		}
+		fixtureIDs := cfg.Fixture
+		bundledFixtureIDs = &fixtureIDs
 	}
 	fixtureBytes, fixtureErr := readBounded(filepath.Join(root, "fixture.json"), SmallArtifactBytes)
 	if fixtureErr != nil {
@@ -598,6 +601,9 @@ func reportFromArtifacts(root string, verify bool) (Summary, error) {
 	var fixture FixtureEvidence
 	if err := json.Unmarshal(fixtureBytes, &fixture); err != nil {
 		return Summary{}, fmt.Errorf("invalid bundled fixture evidence: %w", err)
+	}
+	if bundledFixtureIDs != nil && *bundledFixtureIDs != fixture.FixtureIDs {
+		return Summary{}, errors.New("bundled live config fixture does not match fixture evidence")
 	}
 	if fixture.Family != canonicalBenchmarkFamily(m.Family) || fixture.Scale != m.SubscriberScale || fixture.Seed != m.Seed || len(fixture.EntityIDs) != fixture.SeedEntities || len(fixture.QueryAssignments) == 0 || len(fixture.InitialSemanticHashes) != len(fixture.QueryAssignments) {
 		return Summary{}, errors.New("bundled fixture evidence does not match manifest")

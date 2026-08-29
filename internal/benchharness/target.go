@@ -16,6 +16,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,12 +41,29 @@ const (
 // claim must not rely on a value copied from the command line: MetadataProbe
 // should query the target/control plane or the connected benchmark database.
 type TargetMetadata struct {
-	Revision         string
-	DirtyTreeHash    string
-	DatabaseName     string
-	PostgresVersion  string
-	InvalidationMode string
-	OutputPlugin     string
+	Revision          string
+	DirtyTreeHash     string
+	DatabaseName      string
+	PostgresVersion   string
+	InvalidationMode  string
+	OutputPlugin      string
+	IdentityAttribute IdentityAttributeMetadata
+}
+
+// IdentityAttributeMetadata is read-only catalog evidence for the canonical
+// fixture identity attribute. It is populated by the live DB probe and is
+// compared against the signed target contract before qualification.
+type IdentityAttributeMetadata struct {
+	ID          string
+	EntityType  string
+	Label       string
+	ValueType   string
+	Cardinality string
+	Unique      bool
+	Indexed     bool
+	Required    bool
+	Primary     bool
+	Identity    bool
 }
 
 type QualificationCheck struct {
@@ -225,18 +243,19 @@ type TargetConfig struct {
 	RefreshToken string
 	Versions     map[string]string
 	Headers      http.Header
-	// AttributeAliases maps semantic oracle names (value, bucket, rank) to
+	// AttributeAliases maps semantic oracle names (id, value, bucket, rank) to
 	// their wire attribute labels/UUIDs. Label-shaped results work with the
 	// empty map; UUID-shaped results require the explicit aliases supplied by
 	// the live-config adapter.
 	AttributeAliases map[string]string
 
-	Revision         string
-	DirtyTreeHash    string
-	DatabaseName     string
-	PostgresVersion  string
-	InvalidationMode string
-	OutputPlugin     string
+	Revision          string
+	DirtyTreeHash     string
+	DatabaseName      string
+	PostgresVersion   string
+	InvalidationMode  string
+	OutputPlugin      string
+	IdentityAttribute IdentityAttributeMetadata
 
 	MetadataProbe      func(context.Context) (TargetMetadata, error)
 	Provisioner        func(context.Context) error
@@ -644,11 +663,56 @@ func compareMetadata(cfg TargetConfig, got TargetMetadata, mark func(string, boo
 		}
 		mark(check.name, true, check.actual)
 	}
+	if cfg.IdentityAttribute.ID != "" {
+		if err := compareIdentityAttribute(cfg.IdentityAttribute, got.IdentityAttribute, mark); err != nil {
+			return err
+		}
+	}
 	if cfg.DirtyTreeHash != "" || got.DirtyTreeHash != "" {
 		mark("clean_revision", false, "dirty product tree is not claim-eligible")
 		return fmt.Errorf("target revision is dirty")
 	}
 	mark("clean_revision", true, "clean revision evidence")
+	return nil
+}
+
+func compareIdentityAttribute(want, got IdentityAttributeMetadata, mark func(string, bool, string)) error {
+	if got.ID == "" {
+		mark("identity_attribute", false, "metadata probe returned no identity attribute")
+		return &UnsupportedTargetError{Check: "identity_attribute", Reason: "independent identity catalog evidence is unavailable"}
+	}
+	stringsChecks := []struct {
+		name, want, actual string
+	}{
+		{"identity_attribute_id", want.ID, got.ID},
+		{"identity_attribute_entity_type", want.EntityType, got.EntityType},
+		{"identity_attribute_label", want.Label, got.Label},
+		{"identity_attribute_value_type", want.ValueType, got.ValueType},
+		{"identity_attribute_cardinality", want.Cardinality, got.Cardinality},
+	}
+	for _, check := range stringsChecks {
+		if check.actual != check.want {
+			mark("identity_attribute", false, fmt.Sprintf("%s configured %q, observed %q", check.name, check.want, check.actual))
+			return fmt.Errorf("identity attribute %s mismatch: configured %q, observed %q", check.name, check.want, check.actual)
+		}
+	}
+	boolChecks := []struct {
+		name         string
+		want, actual bool
+	}{
+		{"unique", want.Unique, got.Unique},
+		{"indexed", want.Indexed, got.Indexed},
+		{"required", want.Required, got.Required},
+		{"primary", want.Primary, got.Primary},
+		{"identity", want.Identity, got.Identity},
+	}
+	for _, check := range boolChecks {
+		if check.actual != check.want {
+			mark("identity_attribute", false, fmt.Sprintf("identity attribute %s configured %t, observed %t", check.name, check.want, check.actual))
+			return fmt.Errorf("identity attribute %s mismatch: configured %t, observed %t", check.name, check.want, check.actual)
+		}
+	}
+	mark("identity_attribute", true, "catalog identity metadata matches signed fixture contract")
 	return nil
 }
 
@@ -2298,8 +2362,8 @@ func DecodeWireRefresh(ev SessionEvent, queryID string) (Refresh, error) {
 }
 
 // DecodeWireRefreshWithAliases parses a refresh where the target may encode
-// semantic attributes as UUIDs. aliases maps semantic names (value, bucket,
-// rank) to their wire labels/UUIDs. Unknown attributes remain lossless.
+// semantic attributes as UUIDs. aliases maps semantic names (id, value,
+// bucket, rank) to their wire labels/UUIDs. Unknown attributes remain lossless.
 func DecodeWireRefreshWithAliases(ev SessionEvent, queryID string, aliases map[string]string) (Refresh, error) {
 	return decodeWireRefresh(ev, queryID, aliases, nil)
 }
@@ -2663,6 +2727,8 @@ func decodeWireResult(raw json.RawMessage, queryID string, aliases map[string]st
 	}
 	if json.Unmarshal(raw, &nodes) == nil && len(nodes) > 0 {
 		out := Materialized{QueryID: queryID, Entities: map[string]Entity{}}
+		identityRequired := identityAliasConfigured(aliases)
+		identitySeen := make(map[string]bool)
 		for _, node := range nodes {
 			for _, row := range node.Data.DatalogResult.JoinRows {
 				for _, triple := range row {
@@ -2674,6 +2740,14 @@ func decodeWireResult(raw json.RawMessage, queryID string, aliases map[string]st
 					if id == "" || attr == "" {
 						continue
 					}
+					if err := rejectNoncanonicalWireUUID(id); err != nil {
+						return Materialized{}, err
+					}
+					if identityRequired {
+						if err := validateWireEntityID(id); err != nil {
+							return Materialized{}, err
+						}
+					}
 					value, err := rawValue(triple[2])
 					if err != nil {
 						return Materialized{}, err
@@ -2684,6 +2758,19 @@ func decodeWireResult(raw json.RawMessage, queryID string, aliases map[string]st
 						entity.Attributes = map[string]any{}
 					}
 					semantic := normalizeWireAttribute(attr, aliases)
+					if semantic == "id" {
+						if identityRequired {
+							if identitySeen[id] {
+								return Materialized{}, fmt.Errorf("duplicate identity triple for entity %s", id)
+							}
+							if err := validateWireIdentityValue(id, value); err != nil {
+								return Materialized{}, err
+							}
+							identitySeen[id] = true
+							out.Entities[id] = entity
+						}
+						continue
+					}
 					switch semantic {
 					case "bucket":
 						if n, ok := numericInt(value); ok {
@@ -2700,6 +2787,13 @@ func decodeWireResult(raw json.RawMessage, queryID string, aliases map[string]st
 					}
 					entity.Attributes[semantic] = value
 					out.Entities[id] = entity
+				}
+			}
+		}
+		if identityRequired {
+			for id := range out.Entities {
+				if !identitySeen[id] {
+					return Materialized{}, fmt.Errorf("missing identity triple for entity %s", id)
 				}
 			}
 		}
@@ -2721,13 +2815,14 @@ func decodeWireResult(raw json.RawMessage, queryID string, aliases map[string]st
 			continue
 		}
 		for _, rawEntity := range entities {
-			var idProbe struct {
-				ID string `json:"id"`
+			id, err := wireObjectEntityID(rawEntity, aliases)
+			if err != nil {
+				return Materialized{}, err
 			}
-			if json.Unmarshal(rawEntity, &idProbe) != nil || idProbe.ID == "" {
+			if id == "" {
 				continue
 			}
-			entity, err := wireEntity(idProbe.ID, rawEntity, aliases)
+			entity, err := wireEntity(id, rawEntity, aliases)
 			if err != nil {
 				return Materialized{}, err
 			}
@@ -2737,6 +2832,71 @@ func decodeWireResult(raw json.RawMessage, queryID string, aliases map[string]st
 	return out, nil
 }
 
+var wireUUIDRE = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+func identityAliasConfigured(aliases map[string]string) bool {
+	return aliases != nil && aliases["id"] != ""
+}
+
+func validateWireEntityID(id string) error {
+	if !wireUUIDRE.MatchString(id) {
+		return fmt.Errorf("identity entity id %q is not a UUID", id)
+	}
+	if id != strings.ToLower(id) {
+		return fmt.Errorf("identity entity id %q must be a lowercase canonical UUID", id)
+	}
+	return nil
+}
+
+func rejectNoncanonicalWireUUID(value string) error {
+	if wireUUIDRE.MatchString(value) && value != strings.ToLower(value) {
+		return fmt.Errorf("entity UUID %q must be a lowercase canonical UUID", value)
+	}
+	return nil
+}
+
+func validateWireIdentityValue(entityID string, value any) error {
+	identity, ok := value.(string)
+	if !ok || !wireUUIDRE.MatchString(identity) || identity != strings.ToLower(identity) {
+		return fmt.Errorf("identity value for entity %s must be a UUID string", entityID)
+	}
+	if identity != entityID {
+		return fmt.Errorf("identity value for entity %s does not equal entity UUID", entityID)
+	}
+	return nil
+}
+
+func wireObjectEntityID(raw json.RawMessage, aliases map[string]string) (string, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return "", err
+	}
+	idRaw, ok := fields["id"]
+	if !ok {
+		if identityAliasConfigured(aliases) {
+			return "", errors.New("object result entity is missing identity id")
+		}
+		return "", nil
+	}
+	value, err := rawValue(idRaw)
+	if err != nil {
+		return "", err
+	}
+	id, ok := value.(string)
+	if !ok || id == "" {
+		return "", errors.New("object result entity id must be a non-empty string")
+	}
+	if err := rejectNoncanonicalWireUUID(id); err != nil {
+		return "", err
+	}
+	if identityAliasConfigured(aliases) {
+		if err := validateWireEntityID(id); err != nil {
+			return "", err
+		}
+	}
+	return id, nil
+}
+
 func wireEntity(id string, raw json.RawMessage, aliases map[string]string) (Entity, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil {
@@ -2744,14 +2904,21 @@ func wireEntity(id string, raw json.RawMessage, aliases map[string]string) (Enti
 	}
 	entity := Entity{ID: id, Attributes: map[string]any{}}
 	for key, value := range fields {
-		if key == "id" {
-			continue
-		}
 		decoded, err := rawValue(value)
 		if err != nil {
 			return Entity{}, err
 		}
 		semantic := normalizeWireAttribute(key, aliases)
+		if semantic == "id" {
+			// The object envelope's literal id and any explicit UUID alias
+			// represent the row identity. Validate and omit both.
+			if identityAliasConfigured(aliases) {
+				if err := validateWireIdentityValue(id, decoded); err != nil {
+					return Entity{}, err
+				}
+			}
+			continue
+		}
 		switch semantic {
 		case "bucket":
 			if n, ok := numericInt(decoded); ok {
@@ -2770,12 +2937,24 @@ func wireEntity(id string, raw json.RawMessage, aliases map[string]string) (Enti
 }
 
 func normalizeWireAttribute(key string, aliases map[string]string) string {
-	for _, semantic := range []string{"value", "bucket", "rank"} {
-		if key == semantic || (aliases != nil && aliases[semantic] != "" && aliases[semantic] == key) {
+	key = canonicalWireUUID(key)
+	for _, semantic := range []string{"id", "value", "bucket", "rank"} {
+		alias := ""
+		if aliases != nil {
+			alias = canonicalWireUUID(aliases[semantic])
+		}
+		if key == semantic || (alias != "" && alias == key) {
 			return semantic
 		}
 	}
 	return key
+}
+
+func canonicalWireUUID(value string) string {
+	if wireUUIDRE.MatchString(value) {
+		return strings.ToLower(value)
+	}
+	return value
 }
 
 func numericInt(v any) (int, bool) {

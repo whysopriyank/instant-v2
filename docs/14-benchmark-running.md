@@ -121,8 +121,24 @@ with matching metadata examples beside it. It requires these top-level fields:
 equals `fixture_hash`. Query labels and transaction
 attribute UUIDs are separate namespaces:
 use `query_entity`, `query_bucket_attr`, and `query_rank_attr` for query labels,
-and `value_attr_id`, `bucket_attr_id`, and `rank_attr_id` for provisioned UUID
-attribute IDs. These identifiers must be recorded in the fixture evidence.
+`id_attr` for the identity attribute label, and `id_attr_id`, `value_attr_id`,
+`bucket_attr_id`, and `rank_attr_id` for provisioned UUID attribute IDs. These
+identifiers must be recorded in the fixture evidence. The identity attribute
+metadata must be exactly `id_attr=id`, `id_attr_value_type=blob`,
+`id_attr_value_encoding=string`, `id_attr_cardinality=one`,
+`id_attr_unique=true`, `id_attr_indexed=true`, `id_attr_required=true`,
+`id_attr_primary=true`, and `id_attr_identity=true`.
+Every seeded entity receives an identity triple whose value is that entity's
+UUID. The provisioner receives the same bounded metadata through
+`BENCH_FIXTURE_ID_ATTR`, `BENCH_FIXTURE_ID_ATTR_ID`,
+`BENCH_FIXTURE_ID_VALUE_TYPE`, `BENCH_FIXTURE_ID_VALUE_ENCODING`,
+`BENCH_FIXTURE_ID_CARDINALITY`, `BENCH_FIXTURE_ID_UNIQUE`,
+`BENCH_FIXTURE_ID_INDEXED`, `BENCH_FIXTURE_ID_REQUIRED`,
+`BENCH_FIXTURE_ID_PRIMARY`, and
+`BENCH_FIXTURE_IDENTITY`; it must create a
+unique cardinality-one blob `id` attribute and seed exactly one identity triple
+per entity. Fixture entity IDs and target `probe_entity_id` values must use
+lowercase canonical UUID spelling.
 
 Each target requires `id` (`v1`, `v2`, `v2_reference`, or `v2_current`), an explicit `kind` (`v1` for V1 and
 `v2` for every V2 role), `transport`, `session_url`,
@@ -153,8 +169,21 @@ fixed provisioned marker. `provision_command` is an argv array executed
 directly—and must provision the exact database, marker, and canonical fixture
 before qualification. Before every execution the runner rehashes, parses, and
 deterministically reconstructs the fixture, then passes only fixed
-`BENCH_FIXTURE_PATH`, `BENCH_FIXTURE_SHA256`, `BENCH_FAMILY`, `BENCH_SCALE`, and
-`BENCH_SEED` fields alongside the fixed database/target environment.
+`BENCH_FIXTURE_PATH`, `BENCH_FIXTURE_SHA256`, `BENCH_FIXTURE_ID_ATTR`,
+`BENCH_FIXTURE_ID_ATTR_ID`, `BENCH_FIXTURE_ID_VALUE_TYPE`,
+`BENCH_FIXTURE_ID_VALUE_ENCODING`, `BENCH_FIXTURE_ID_CARDINALITY`,
+`BENCH_FIXTURE_ID_UNIQUE`, `BENCH_FIXTURE_ID_INDEXED`,
+`BENCH_FIXTURE_ID_REQUIRED`,
+`BENCH_FIXTURE_ID_PRIMARY`, `BENCH_FIXTURE_IDENTITY`, `BENCH_FAMILY`,
+`BENCH_SCALE`, and `BENCH_SEED`
+fields alongside the fixed database/target environment. The provisioner must
+use the identity fields to create the exact unique, cardinality-one blob
+attribute and seed one UUID-valued identity triple for every entity before
+qualification.
+The product's generic high-level implicit-id creation path is intentionally not
+changed by this benchmark contract; the dedicated provisioner must create and
+index this fixture attribute explicitly, and the independent catalog probe
+rejects any provisioned id attribute that is not indexed.
 The fixed environment fields must use `BENCH_<ID>_DATABASE_URL`,
 `BENCH_<ID>_ADMIN_TOKEN`, `BENCH_<ID>_REFRESH_TOKEN`,
 `BENCH_<ID>_RUNTIME_TOKEN`, and `BENCH_<ID>_PID` (for `v1`/`v2`). They carry

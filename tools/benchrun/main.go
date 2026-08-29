@@ -123,7 +123,7 @@ func main() {
 	if *family == "T-saturation" && plan.MeasureSeconds > 600 {
 		plan.MeasureSeconds = 600
 	}
-	fixtureIDs := benchrun.FixtureIDs{}
+	fixtureIDs := benchrun.DefaultFixtureIDs
 	if liveConfig != nil {
 		fixtureIDs = liveConfig.Fixture
 	}
@@ -217,7 +217,7 @@ func main() {
 	if err := w.WriteJSON("config.json", configEvidence); err != nil {
 		fail(1, err.Error())
 	}
-	runner := benchrun.PairRunner{Writer: w, Executor: executor, Manifest: manifest, Plan: plan, Targets: targets, Environment: environment}
+	runner := benchrun.PairRunner{Writer: w, Executor: executor, Manifest: manifest, Plan: plan, Targets: targets, Fixture: fixtureIDs, Environment: environment}
 	timeout := benchmarkTimeoutForTargets(*family, plan, liveConfig, targetCount)
 	runCtx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
