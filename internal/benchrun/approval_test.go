@@ -58,6 +58,31 @@ func TestApprovalTupleBindsArtifactBudget(t *testing.T) {
 	}
 }
 
+func TestApprovalTupleBindsTargetKindProvenance(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(TrustedApprovalPublicKeyEnv, hex.EncodeToString(pub))
+	m := Manifest{
+		SchemaVersion: SchemaVersion, BundleID: "kind-bound", PairID: "p", Family: "H-append", SubscriberScale: 300, Seed: 7,
+		RunOrder: []string{"AB", "BA", "AB", "BA", "AB", "BA", "AB"}, StartedAt: time.Unix(1, 0).UTC(),
+		ContentRoot: strings.Repeat("a", 64), TargetProvenance: map[string]string{"v1": "v1|rev|clean"},
+	}
+	tuple, err := ApprovalTuple(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.ApprovalSignature = hex.EncodeToString(ed25519.Sign(priv, tuple))
+	if err := VerifyApproval(m); err != nil {
+		t.Fatal(err)
+	}
+	m.TargetProvenance["v1"] = "v2|rev|clean"
+	if err := VerifyApproval(m); err == nil {
+		t.Fatal("target kind provenance forgery passed detached approval")
+	}
+}
+
 func TestUnsignedReplayOfLargerContractBudgetStaysConservative(t *testing.T) {
 	root := t.TempDir()
 	plan300 := Plan{SchemaVersion: SchemaVersion, Seed: 7, Families: []string{"H-append"}, Scales: []int{300}, Pairs: 7, MeasureSeconds: 180}

@@ -97,6 +97,11 @@ update-attr parity remains follow-up work.
 `refresh-ok` currently ships **full `instaql-result` envelopes** (see §6). A wire-level delta
 is an additive v2 optimisation (new feature flag), not a breaking change.
 
+The frozen V1 server serializes `processed-isn` as an ISN string. Its wire form has three
+hex components (`slot/high/low`, for example `0/0/17`) because the PostgreSQL LSN itself
+contains two slash-separated hex components. V1 may also send `computations: []` together
+with `attrs` for a metadata-only refresh; that frame changes no query snapshot.
+
 Batching: when the session negotiates `batch-messages`, server may coalesce multiple `refresh`es
 into one frame; clients that understand it read an array envelope, others receive singular frames.
 

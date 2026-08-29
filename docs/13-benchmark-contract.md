@@ -358,7 +358,11 @@ benchmarks/results/<bundle-id>/
 V1/V2 SHAs and dirty hashes, source tree paths, executable hashes, command
 lines, random seeds, AB/BA order, host and database identifiers,
 PostgreSQL/toolchain versions, schema/fixture/config hashes, start/end times,
-and artifact hashes. Three-target manifests additionally record the seven
+and artifact hashes. Each target artifact records an explicit protocol `kind`
+bound to its identity (`v1` for `v1`; `v2` for `v2`, `v2_reference`, and
+`v2_current`). The manifest `target_provenance` tuple includes that kind and
+is covered by detached approval, so relabeling a target invalidates the
+offline claim gate. Three-target manifests additionally record the seven
 `target_order` blocks, exact `target_revisions`, and explicit `comparisons`.
 The raw bundle is an immutable, content-addressed bundle
 of metadata, event ids, timing observations, semantic digests, and references;

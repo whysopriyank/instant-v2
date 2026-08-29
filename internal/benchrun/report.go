@@ -738,10 +738,13 @@ func reportFromArtifacts(root string, verify bool) (Summary, error) {
 		if target.SchemaVersion != SchemaVersion || target.ID == "" || target.Role == "" || len(target.Qualification.Checks) == 0 {
 			return Summary{}, fmt.Errorf("incomplete target qualification: %s", name)
 		}
+		if err := validateTargetBinding(target); err != nil {
+			missingProvenance = append(missingProvenance, "target "+name+" kind binding")
+		}
 		if target.Revision == "" || target.DatabaseName == "" || target.PostgresVersion == "" || target.InvalidationMode == "" || target.MetadataHash == "" {
 			missingProvenance = append(missingProvenance, "target "+name+" provenance")
 		}
-		mapped := strings.Join([]string{target.Revision, target.DirtyHash, target.OutputPlugin, target.InvalidationMode, target.DatabaseName, target.PostgresVersion, target.ProcessPIDEnv, target.ProcessPIDFile, target.FixturePath, target.FixtureHash, target.ExecutablePath, target.ExecutableHash, target.MetadataHash}, "|")
+		mapped := TargetProvenanceTuple(target)
 		if m.TargetProvenance[target.ID] != mapped || m.DatabaseIDs[target.ID] != target.DatabaseName {
 			missingProvenance = append(missingProvenance, "target "+name+" manifest mapping")
 		}
@@ -782,7 +785,7 @@ func reportFromArtifacts(root string, verify bool) (Summary, error) {
 			}
 		}
 	}
-	if len(missingProvenance) > 0 && len(s.ClaimGate.Reasons) == 0 {
+	if len(missingProvenance) > 0 {
 		s.ClaimGate.Reasons = append(s.ClaimGate.Reasons, "missing manifest/target provenance: "+strings.Join(missingProvenance, ", "))
 	}
 	expected := map[string]bool{}

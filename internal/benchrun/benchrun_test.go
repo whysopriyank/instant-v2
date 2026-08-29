@@ -1055,6 +1055,46 @@ func TestPairRunnerRetainsFourteenRunsAndFailedAttempt(t *testing.T) {
 	}
 }
 
+func TestPairOfflineReportFlagsForgedTargetKind(t *testing.T) {
+	root := t.TempDir()
+	w, err := NewArtifactWriter(root, 1<<26)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := PairRunner{
+		Writer: w, Executor: SyntheticExecutor{},
+		Manifest: Manifest{SchemaVersion: SchemaVersion, BundleID: "kind-pair", PairID: "kind-pair", Family: "H-append", SubscriberScale: 300, Seed: 7, RunOrder: []string{"AB", "BA", "AB", "BA", "AB", "BA", "AB"}, StartedAt: time.Unix(1, 0).UTC()},
+		Plan:     Plan{SchemaVersion: SchemaVersion, Seed: 7, Pairs: 7},
+		Targets: []Target{
+			{SchemaVersion: SchemaVersion, ID: "v1", Role: "v1"},
+			{SchemaVersion: SchemaVersion, ID: "v2", Role: "v2_current"},
+		},
+	}
+	if _, err := runner.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "targets", "v2.json")
+	var target Target
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(b, &target); err != nil {
+		t.Fatal(err)
+	}
+	target.Kind = "v1"
+	if err := os.WriteFile(path, mustJSON(target), 0600); err != nil {
+		t.Fatal(err)
+	}
+	summary, err := reportFromArtifacts(root, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.ClaimGate.Eligible || !strings.Contains(strings.Join(summary.ClaimGate.Reasons, "\n"), "kind binding") {
+		t.Fatalf("forged pair target kind was not gated: %+v", summary.ClaimGate)
+	}
+}
+
 func TestPairRunnerRetainsProtocolAndInfrastructureFailures(t *testing.T) {
 	for _, class := range []FailureClass{TargetProtocolFailure, InfrastructureNoise} {
 		root := t.TempDir()

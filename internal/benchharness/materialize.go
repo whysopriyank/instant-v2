@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"sort"
 	"time"
 )
@@ -124,6 +125,10 @@ type RefreshKind string
 const (
 	RefreshFull  RefreshKind = "full"
 	RefreshDelta RefreshKind = "delta"
+	// RefreshNoop is a valid legacy V1 refresh frame whose only observable
+	// change is metadata (for example attrs); it carries no query computation.
+	// It must not be treated as a semantic snapshot or protocol error.
+	RefreshNoop RefreshKind = "noop"
 )
 
 // Refresh is the common semantic envelope accepted from either full or delta
@@ -141,6 +146,8 @@ type Refresh struct {
 
 func ApplyRefresh(previous Materialized, refresh Refresh) (Materialized, error) {
 	switch refresh.Kind {
+	case RefreshNoop:
+		return cloneMaterialized(previous), nil
 	case RefreshFull:
 		if refresh.Full == nil {
 			return Materialized{}, fmt.Errorf("full refresh has no materialized state")
@@ -158,6 +165,10 @@ func ApplyRefresh(previous Materialized, refresh Refresh) (Materialized, error) 
 	default:
 		return Materialized{}, fmt.Errorf("unknown refresh kind %q", refresh.Kind)
 	}
+}
+
+func cloneMaterialized(m Materialized) Materialized {
+	return Materialized{QueryID: m.QueryID, Entities: cloneEntities(m.Entities)}
 }
 
 // ApplyDelta applies a delta to a prior materialized result, returning a copy.
@@ -193,10 +204,58 @@ func ApplyDelta(previous Materialized, delta Delta) (Materialized, error) {
 func cloneEntity(e Entity) Entity {
 	attrs := make(map[string]any, len(e.Attributes))
 	for k, v := range e.Attributes {
-		attrs[k] = v
+		attrs[k] = cloneJSONValue(v)
 	}
 	e.Attributes = attrs
 	return e
+}
+
+// cloneJSONValue copies the map/slice graph used by decoded JSON attributes.
+// Scalars are immutable values and can be returned directly. Reflection keeps
+// this safe for callers that construct JSON-like values with typed maps or
+// slices instead of going through encoding/json.
+func cloneJSONValue(value any) any {
+	if value == nil {
+		return nil
+	}
+	return cloneJSONReflect(reflect.ValueOf(value)).Interface()
+}
+
+func cloneJSONReflect(value reflect.Value) reflect.Value {
+	if !value.IsValid() {
+		return value
+	}
+	switch value.Kind() {
+	case reflect.Interface:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		cloned := cloneJSONReflect(value.Elem())
+		out := reflect.New(value.Type()).Elem()
+		out.Set(cloned)
+		return out
+	case reflect.Map:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		out := reflect.MakeMapWithSize(value.Type(), value.Len())
+		iter := value.MapRange()
+		for iter.Next() {
+			out.SetMapIndex(iter.Key(), cloneJSONReflect(iter.Value()))
+		}
+		return out
+	case reflect.Slice:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		out := reflect.MakeSlice(value.Type(), value.Len(), value.Len())
+		for i := 0; i < value.Len(); i++ {
+			out.Index(i).Set(cloneJSONReflect(value.Index(i)))
+		}
+		return out
+	default:
+		return value
+	}
 }
 
 type stringError string

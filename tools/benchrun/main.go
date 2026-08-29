@@ -75,11 +75,11 @@ func main() {
 		}
 		for _, t := range cfg.Targets {
 			metadataHash, _ := hashFile(t.MetadataFile)
-			targets = append(targets, benchrun.Target{SchemaVersion: benchrun.SchemaVersion, ID: t.ID, Role: t.ID, Endpoint: t.SessionURL, Protocol: t.Transport, Revision: t.Revision, DirtyHash: t.DirtyTreeHash, InvalidationMode: t.InvalidationMode, OutputPlugin: t.OutputPlugin, DatabaseName: t.DatabaseName, PostgresVersion: t.PostgresVersion, MetadataHash: metadataHash, ProcessPIDEnv: t.ProcessPIDEnv, ProcessPIDFile: t.ProcessPIDFile, FixturePath: cfg.FixturePath, FixtureHash: cfg.FixtureHash, ExecutablePath: t.ProcessExecutablePath, ExecutableHash: t.ProcessExecutableSHA256, Qualification: benchrun.Qualification{Checks: map[string]bool{"configured": true}}})
+			targets = append(targets, benchrun.Target{SchemaVersion: benchrun.SchemaVersion, ID: t.ID, Role: t.ID, Kind: t.Kind, Endpoint: t.SessionURL, Protocol: t.Transport, Revision: t.Revision, DirtyHash: t.DirtyTreeHash, InvalidationMode: t.InvalidationMode, OutputPlugin: t.OutputPlugin, DatabaseName: t.DatabaseName, PostgresVersion: t.PostgresVersion, MetadataHash: metadataHash, ProcessPIDEnv: t.ProcessPIDEnv, ProcessPIDFile: t.ProcessPIDFile, FixturePath: cfg.FixturePath, FixtureHash: cfg.FixtureHash, ExecutablePath: t.ProcessExecutablePath, ExecutableHash: t.ProcessExecutableSHA256, Qualification: benchrun.Qualification{Checks: map[string]bool{"configured": true}}})
 		}
 	} else {
 		executor = benchrun.SyntheticExecutor{}
-		targets = []benchrun.Target{{SchemaVersion: benchrun.SchemaVersion, ID: "v1", Role: "v1"}, {SchemaVersion: benchrun.SchemaVersion, ID: "v2", Role: "v2_current"}}
+		targets = []benchrun.Target{{SchemaVersion: benchrun.SchemaVersion, ID: "v1", Role: "v1", Kind: "v1"}, {SchemaVersion: benchrun.SchemaVersion, ID: "v2", Role: "v2_current", Kind: "v2"}}
 	}
 	var order benchrun.RunOrder
 	var err error
@@ -164,10 +164,9 @@ func main() {
 		}
 		manifest.DatabaseIDs = map[string]string{}
 		manifest.TargetProvenance = map[string]string{}
-		for _, target := range liveConfig.Targets {
+		for _, target := range targets {
 			manifest.DatabaseIDs[target.ID] = target.DatabaseName
-			metadataHash, _ := hashFile(target.MetadataFile)
-			manifest.TargetProvenance[target.ID] = strings.Join([]string{target.Revision, target.DirtyTreeHash, target.OutputPlugin, target.InvalidationMode, target.DatabaseName, target.PostgresVersion, target.ProcessPIDEnv, target.ProcessPIDFile, liveConfig.FixturePath, liveConfig.FixtureHash, target.ProcessExecutablePath, target.ProcessExecutableSHA256, metadataHash}, "|")
+			manifest.TargetProvenance[target.ID] = benchrun.TargetProvenanceTuple(target)
 			if target.ID == "v1" && manifest.V1SHA == "" {
 				manifest.V1SHA = target.Revision
 			}

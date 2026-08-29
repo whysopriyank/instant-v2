@@ -23,6 +23,9 @@ type BenchharnessDriver struct {
 }
 
 func (a BenchharnessDriver) QualifyTarget(ctx context.Context, target Target) (Qualification, error) {
+	if err := validateTargetBinding(target); err != nil {
+		return Qualification{}, err
+	}
 	if a.Driver == nil {
 		return Qualification{}, errors.New("live target driver is not configured")
 	}
@@ -32,6 +35,12 @@ func (a BenchharnessDriver) QualifyTarget(ctx context.Context, target Target) (Q
 		out.Checks[name] = check.Passed
 	}
 	out.Failure = q.Failure
+	if q.Kind != "" && q.Kind != benchharness.TargetKind(target.Kind) {
+		return out, fmt.Errorf("target %s qualification kind %q does not match bound kind %q", target.ID, q.Kind, target.Kind)
+	}
+	if err == nil && q.Kind == "" {
+		return out, fmt.Errorf("target %s qualification omitted bound kind", target.ID)
+	}
 	if err != nil && out.Failure == "" {
 		out.Failure = err.Error()
 	}
@@ -39,6 +48,9 @@ func (a BenchharnessDriver) QualifyTarget(ctx context.Context, target Target) (Q
 }
 
 func (a BenchharnessDriver) RunTarget(ctx context.Context, spec RunSpec) (ExecutionResult, error) {
+	if err := validateTargetBinding(spec.Target); err != nil {
+		return ExecutionResult{}, &RunError{Class: SetupInvalid, Err: err}
+	}
 	if a.Driver == nil {
 		return ExecutionResult{}, errors.New("live target driver is not configured")
 	}

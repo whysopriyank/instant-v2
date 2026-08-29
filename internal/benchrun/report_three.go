@@ -59,7 +59,7 @@ func reportThreeTargetArtifacts(root string, m Manifest) (Summary, error) {
 	if err != nil {
 		return Summary{}, err
 	}
-	if len(missingProvenance) > 0 && len(s.ClaimGate.Reasons) == 0 {
+	if len(missingProvenance) > 0 {
 		s.ClaimGate.Reasons = append(s.ClaimGate.Reasons, "missing manifest/target provenance: "+strings.Join(missingProvenance, ", "))
 	}
 
@@ -266,10 +266,13 @@ func loadThreeTargetRecords(root string, m Manifest, missing *[]string) (map[str
 		if target.SchemaVersion != SchemaVersion || target.ID != id || target.Role != id || len(target.Qualification.Checks) == 0 {
 			return nil, false, "", fmt.Errorf("incomplete target qualification: %s", id)
 		}
+		if err := validateTargetBinding(target); err != nil {
+			*missing = append(*missing, "target "+id+" kind binding")
+		}
 		if target.Revision == "" || target.DatabaseName == "" || target.PostgresVersion == "" || target.InvalidationMode == "" || target.MetadataHash == "" {
 			*missing = append(*missing, "target "+id+" provenance")
 		}
-		mapped := strings.Join([]string{target.Revision, target.DirtyHash, target.OutputPlugin, target.InvalidationMode, target.DatabaseName, target.PostgresVersion, target.ProcessPIDEnv, target.ProcessPIDFile, target.FixturePath, target.FixtureHash, target.ExecutablePath, target.ExecutableHash, target.MetadataHash}, "|")
+		mapped := TargetProvenanceTuple(target)
 		if m.TargetProvenance[id] != mapped || m.DatabaseIDs[id] != target.DatabaseName || m.TargetRevisions[id] != target.Revision {
 			*missing = append(*missing, "target "+id+" manifest mapping")
 		}

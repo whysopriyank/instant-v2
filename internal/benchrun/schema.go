@@ -131,6 +131,7 @@ type Target struct {
 	SchemaVersion    string        `json:"schema_version"`
 	ID               string        `json:"id"`
 	Role             string        `json:"role"`
+	Kind             string        `json:"kind"`
 	Revision         string        `json:"revision,omitempty"`
 	DirtyHash        string        `json:"dirty_hash,omitempty"`
 	Endpoint         string        `json:"endpoint,omitempty"`

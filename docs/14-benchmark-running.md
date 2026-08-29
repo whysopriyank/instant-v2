@@ -124,7 +124,8 @@ use `query_entity`, `query_bucket_attr`, and `query_rank_attr` for query labels,
 and `value_attr_id`, `bucket_attr_id`, and `rank_attr_id` for provisioned UUID
 attribute IDs. These identifiers must be recorded in the fixture evidence.
 
-Each target requires `id` (`v1` or `v2`), `kind`, `transport`, `session_url`,
+Each target requires `id` (`v1`, `v2`, `v2_reference`, or `v2_current`), an explicit `kind` (`v1` for V1 and
+`v2` for every V2 role), `transport`, `session_url`,
 `health_url`, `app_id`, reviewed `revision`, `dirty_tree_hash` (empty for a
 clean target),
 `database_name`, `postgres_version`, `invalidation_mode`, `metadata_file`,

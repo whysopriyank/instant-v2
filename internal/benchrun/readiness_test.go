@@ -75,6 +75,22 @@ func TestLiveConfigAcceptsThreeTargetRolesAndDistinctEnvironmentPrefixes(t *test
 	}
 }
 
+func TestLiveConfigRejectsTargetKindRoleMismatch(t *testing.T) {
+	c := readinessLiveConfig(true)
+	c.Targets[0].Kind = "v2"
+	if err := c.Validate(); err == nil {
+		t.Fatal("V1 target with V2 kind was accepted")
+	}
+}
+
+func TestLiveConfigRequiresExplicitTargetKind(t *testing.T) {
+	c := readinessLiveConfig(true)
+	c.Targets[2].Kind = ""
+	if err := c.Validate(); err == nil {
+		t.Fatal("live config without target kind was accepted")
+	}
+}
+
 func TestLiveConfigPreservesTwoTargetV1V2Compatibility(t *testing.T) {
 	c := readinessLiveConfig(false)
 	c.Targets = []LiveTargetConfig{

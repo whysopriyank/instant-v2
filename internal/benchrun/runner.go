@@ -93,6 +93,9 @@ func (r *PairRunner) Run(ctx context.Context) (Summary, error) {
 	if r.Writer == nil || r.Executor == nil {
 		return Summary{}, errors.New("pair runner requires writer and target executor")
 	}
+	if err := bindTargetKinds(r.Targets); err != nil {
+		return Summary{}, err
+	}
 	if len(r.Targets) == 3 {
 		return r.runThreeTarget(ctx)
 	}

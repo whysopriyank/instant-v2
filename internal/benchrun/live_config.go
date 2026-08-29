@@ -126,6 +126,9 @@ func (c LiveConfig) Validate() error {
 		if err != nil {
 			return err
 		}
+		if err := validateLiveTargetKind(t, role); err != nil {
+			return err
+		}
 		if err := validateTargetIdentity(t, role, len(c.Targets)); err != nil {
 			return err
 		}
@@ -235,6 +238,20 @@ func (c LiveConfig) Validate() error {
 				return errors.New("top-level v2_reference_sha must equal the qualified v2_reference revision")
 			}
 		}
+	}
+	return nil
+}
+
+func validateLiveTargetKind(target LiveTargetConfig, role string) error {
+	want := "v2"
+	if role == "v1" {
+		want = "v1"
+	}
+	if target.Kind == "" {
+		return fmt.Errorf("target %s kind is required", target.ID)
+	}
+	if target.Kind != want {
+		return fmt.Errorf("target %s role %s requires kind %s (got %s)", target.ID, role, want, target.Kind)
 	}
 	return nil
 }
@@ -370,10 +387,7 @@ func (s LiveTargetConfig) driverConfig(ids FixtureIDs, fixturePath, fixtureHash,
 	if meta.Revision != s.Revision || meta.DatabaseName != s.DatabaseName || meta.PostgresVersion != s.PostgresVersion || meta.InvalidationMode != s.InvalidationMode || meta.DirtyTreeHash != s.DirtyTreeHash || role == "v1" && !strings.EqualFold(meta.OutputPlugin, "wal2json") {
 		return benchharness.TargetConfig{}, fmt.Errorf("metadata evidence mismatch for %s", s.ID)
 	}
-	kind := benchharness.TargetV2
-	if role == "v1" {
-		kind = benchharness.TargetV1
-	}
+	kind := benchharness.TargetKind(s.Kind)
 	transport := benchharness.TransportWebSocket
 	if s.Transport == "sse" {
 		transport = benchharness.TransportSSE
