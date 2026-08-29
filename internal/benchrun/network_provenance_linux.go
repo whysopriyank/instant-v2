@@ -180,13 +180,21 @@ func parseLoopbackOnlyRoute(value string) error {
 		if fields[0] != "lo" {
 			return fmt.Errorf("externally reachable IPv4 route uses %q", fields[0])
 		}
-		for _, index := range []int{1, 2, 3, 7} {
+		for _, index := range []int{1, 2, 7} {
 			if len(fields[index]) != 8 {
-				return errors.New("malformed IPv4 route field")
+				return errors.New("malformed IPv4 route address field")
 			}
 			if _, err := strconv.ParseUint(fields[index], 16, 32); err != nil {
-				return errors.New("malformed IPv4 route field")
+				return errors.New("malformed IPv4 route address field")
 			}
+		}
+		// The Linux proc ABI renders route flags as a four-digit hexadecimal
+		// bitmask (for example 0001), unlike the eight-digit IPv4 fields above.
+		if len(fields[3]) != 4 {
+			return errors.New("malformed IPv4 route flags field")
+		}
+		if _, err := strconv.ParseUint(fields[3], 16, 16); err != nil {
+			return errors.New("malformed IPv4 route flags field")
 		}
 		for _, index := range []int{4, 5, 6, 8, 9, 10} {
 			if _, err := strconv.ParseUint(fields[index], 10, 64); err != nil {

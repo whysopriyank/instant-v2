@@ -128,6 +128,14 @@ func TestProcEvidenceHeaderLikeRecordsAreNotHeaders(t *testing.T) {
 	}
 }
 
+func TestParseProcRouteAcceptsKernelColumnWidths(t *testing.T) {
+	route := "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n" +
+		"lo 00000000 00000000 0001 0 0 0 000000FF 0 0 0\n"
+	if err := parseLoopbackOnlyRoute(route); err != nil {
+		t.Fatalf("valid Linux /proc/net/route row was rejected: %v", err)
+	}
+}
+
 func TestWildcardListenerRejectsNonLoopbackConfiguredEndpoint(t *testing.T) {
 	root := writeNamespaceFixture(t, "net:[4026533000]", "net:[4026533001]", true, true)
 	err := pidOwnsConfiguredEndpointAt(42, []string{"http://192.0.2.1:29101/health"}, NetworkNamespaceProvenance{
