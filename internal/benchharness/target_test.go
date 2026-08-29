@@ -40,6 +40,32 @@ func TestDecodeWireRefreshUsesComputationsAndNumericWatermark(t *testing.T) {
 	}
 }
 
+func TestDecodeAddQuerySnapshotUsesInlineInitialResult(t *testing.T) {
+	query := json.RawMessage(`{"todos":{}}`)
+	event := SessionEvent{Op: "add-query-ok", At: time.Now(), Payload: json.RawMessage(`{
+		"q":{"todos":{}},
+		"processed-tx-id":17,
+		"result":{"data":{"todos":[{"id":"todo-1","value":"marker"}]}}
+	}`)}
+	refresh, available, err := decodeAddQuerySnapshot(event, "q-1", nil, query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !available || refresh.Full == nil || refresh.StateVersion != 17 {
+		t.Fatalf("inline initial snapshot not decoded: available=%t refresh=%#v", available, refresh)
+	}
+	if got := refresh.Full.Entities["todo-1"].Attributes["value"]; got != "marker" {
+		t.Fatalf("initial entity value = %#v", got)
+	}
+}
+
+func TestDecodeAddQuerySnapshotFallsBackWhenResultAbsent(t *testing.T) {
+	_, available, err := decodeAddQuerySnapshot(SessionEvent{Op: "add-query-ok", Payload: json.RawMessage(`{"op":"add-query-ok"}`)}, "q-1", nil, json.RawMessage(`{"todos":{}}`))
+	if err != nil || available {
+		t.Fatalf("result-less add-query should use refresh fallback: available=%t err=%v", available, err)
+	}
+}
+
 func TestEvidenceCollectorCountsMillionsWithoutRetainingPayloads(t *testing.T) {
 	collector := newEvidenceCollector(EvidenceBudget{MaxFrames: 2_000_000, MaxBytes: 100_000_000, MaxRetainedFrames: 8})
 	payload := json.RawMessage(`{"op":"refresh-ok","computations":[]}`)
@@ -388,6 +414,8 @@ type countingRunDialer struct {
 	ids            []string
 	transactionIDs []string
 	probePresent   atomic.Bool
+	provisions     atomic.Int64
+	staleCleanOnce atomic.Bool
 }
 
 type countingRunSession struct {
@@ -423,10 +451,17 @@ func (s *countingRunSession) Send(_ context.Context, msg SessionMessage) (Ack, e
 		s.push(SessionEvent{Op: "init-ok", ClientEventID: msg.ClientEventID})
 	case "add-query":
 		s.push(SessionEvent{Op: "add-query-ok", ClientEventID: msg.ClientEventID})
+		staleClean := strings.Contains(s.clientID, "clean-check") && s.dialer.provisions.Load() >= 2 && s.dialer.staleCleanOnce.CompareAndSwap(true, false)
+		if staleClean {
+			s.dialer.probePresent.Store(true)
+		}
 		s.mu.Lock()
 		s.snapshots = append(s.snapshots, s.dialer.probePresent.Load())
 		s.mu.Unlock()
 		s.push(s.dialer.refresh())
+		if staleClean {
+			s.dialer.probePresent.Store(false)
+		}
 	case "transact":
 		if msg.ClientEventID == "qualification-probe" {
 			s.dialer.probePresent.Store(true)
@@ -667,6 +702,90 @@ func TestTargetDriverRunProvisionsPhasesAndEightTWriterSessions(t *testing.T) {
 	}
 }
 
+func TestTargetDriverRunRetriesTransientCleanFixtureReadiness(t *testing.T) {
+	health := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer health.Close()
+	dialer := &countingRunDialer{}
+	dialer.staleCleanOnce.Store(true)
+	var provisions atomic.Int64
+	probeID := "00000000-0000-4000-8000-000000000099"
+	fixture := Fixture{Entities: map[string]Entity{"todo-1": {ID: "todo-1", Attributes: map[string]any{"value": float64(0)}}}, Queries: []Query{{ID: "q", MatchAll: true}}}
+	driver, err := NewTargetDriver(TargetConfig{
+		ID: "v2", Kind: TargetV2, Transport: TransportWebSocket,
+		SessionURL: "ws://127.0.0.1:1/runtime/session", HealthURL: health.URL,
+		AppID: "00000000-0000-0000-0000-000000000001", Revision: "rev", DatabaseName: "instant_bench_ready", PostgresVersion: "17.11", InvalidationMode: "post-commit",
+		MetadataProbe: func(context.Context) (TargetMetadata, error) {
+			return TargetMetadata{Revision: "rev", DatabaseName: "instant_bench_ready", PostgresVersion: "17.11", InvalidationMode: "post-commit"}, nil
+		},
+		Provisioner: func(context.Context) error {
+			provisions.Add(1)
+			dialer.provisions.Add(1)
+			if provisions.Load() == 1 {
+				dialer.probePresent.Store(false)
+			} else {
+				dialer.probePresent.Store(true)
+			}
+			atomic.StoreInt64(&dialer.value, 0)
+			return nil
+		},
+		Dialer: dialer, QueryBuilder: func(Query) (any, error) { return map[string]any{"todos": map[string]any{}}, nil },
+		TransactionBuilder: func(Mutation) ([]any, error) { return []any{[]any{"update", "uuid"}}, nil },
+		Probe: NewFourClientSemanticProbe(fixture.Queries[0], Mutation{EventID: "qualification-probe", EntityID: probeID, Marker: "probe-only"}, func(initial, refreshed Refresh) error {
+			if initial.Full == nil || refreshed.Full == nil || mustDigest(*initial.Full) == mustDigest(*refreshed.Full) {
+				return errors.New("probe did not observe semantic change")
+			}
+			return nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workload := Workload{Family: FamilyH, Subscribers: 1, Seed: 37, Fixture: fixture, Measured: 1}
+	_, err = driver.Run(context.Background(), RunPlan{PairID: "p", RunID: "ready", Workload: workload, Mutations: 1, Rate: 1000})
+	if err != nil {
+		t.Fatalf("transient clean fixture state was not retried: %v", err)
+	}
+	if got := dialer.provisions.Load(); got != 2 {
+		t.Fatalf("provision count = %d, want 2", got)
+	}
+	if got := dialer.staleCleanOnce.Load(); got {
+		t.Fatal("test did not exercise transient stale clean-fixture state")
+	}
+}
+
+func TestSemanticReadinessDeadlineIsBoundedAndRetainsLastObservation(t *testing.T) {
+	var attempts atomic.Int64
+	started := time.Now()
+	err := waitForSemanticReadiness(context.Background(), 35*time.Millisecond, func(context.Context) error {
+		attempts.Add(1)
+		return errors.New("fixture is still converging")
+	})
+	if err == nil || !strings.Contains(err.Error(), "semantic readiness deadline") || !strings.Contains(err.Error(), "fixture is still converging") {
+		t.Fatalf("readiness failure did not retain bounded observation: %v", err)
+	}
+	if attempts.Load() < 2 || time.Since(started) > time.Second {
+		t.Fatalf("readiness retry was not bounded: attempts=%d elapsed=%v", attempts.Load(), time.Since(started))
+	}
+}
+
+func TestSemanticReadinessHonorsParentCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var attempts atomic.Int64
+	err := waitForSemanticReadiness(ctx, time.Second, func(context.Context) error {
+		attempts.Add(1)
+		cancel()
+		return errors.New("not ready")
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("parent cancellation was not returned: %v", err)
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("cancellation triggered extra readiness probes: %d", attempts.Load())
+	}
+}
+
 func TestTargetDriverRejectsStaleProbeDuringCleanFixtureVerification(t *testing.T) {
 	dialer := &countingRunDialer{}
 	probeID := "00000000-0000-4000-8000-000000000099"
@@ -693,6 +812,79 @@ func TestTargetDriverRejectsStaleProbeDuringCleanFixtureVerification(t *testing.
 	dialer.mu.Unlock()
 	if opened != 1 {
 		t.Fatalf("clean verification did not use exactly one isolated snapshot session: %d", opened)
+	}
+}
+
+func TestCleanFixtureVerificationDeduplicatesIdenticalWireQueries(t *testing.T) {
+	dialer := &countingRunDialer{}
+	driver, err := NewTargetDriver(TargetConfig{
+		ID: "v2", Kind: TargetV2, Transport: TransportWebSocket,
+		SessionURL: "ws://127.0.0.1:1/runtime/session", HealthURL: "http://127.0.0.1:1/health",
+		AppID: "00000000-0000-0000-0000-000000000001", Revision: "rev", DatabaseName: "instant_bench_run", PostgresVersion: "17.11", InvalidationMode: "post-commit",
+		Dialer:       dialer,
+		QueryBuilder: func(Query) (any, error) { return map[string]any{"todos": map[string]any{}}, nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := Fixture{
+		Entities: map[string]Entity{"todo-1": {ID: "todo-1", Attributes: map[string]any{"value": float64(0)}}},
+		Queries:  []Query{{ID: "q-1", MatchAll: true}, {ID: "q-2", MatchAll: true}},
+	}
+	if err := driver.verifyCleanFixture(context.Background(), fixture, "dedupe", newEvidenceCollector(EvidenceBudget{})); err != nil {
+		t.Fatal(err)
+	}
+	dialer.mu.Lock()
+	sessions := append([]*countingRunSession(nil), dialer.sessions...)
+	dialer.mu.Unlock()
+	if len(sessions) != 1 {
+		t.Fatalf("clean verification opened %d sessions, want 1", len(sessions))
+	}
+	sessions[0].mu.Lock()
+	snapshots := len(sessions[0].snapshots)
+	sessions[0].mu.Unlock()
+	if snapshots != 1 {
+		t.Fatalf("identical wire queries produced %d subscriptions, want 1", snapshots)
+	}
+}
+
+func TestFinalSnapshotterDeduplicatesIdenticalWireQueries(t *testing.T) {
+	dialer := &countingRunDialer{}
+	driver, err := NewTargetDriver(TargetConfig{
+		ID: "v2", Kind: TargetV2, Transport: TransportWebSocket,
+		SessionURL: "ws://127.0.0.1:1/runtime/session", HealthURL: "http://127.0.0.1:1/health",
+		AppID: "00000000-0000-0000-0000-000000000001", Revision: "rev", DatabaseName: "instant_bench_run", PostgresVersion: "17.11", InvalidationMode: "post-commit",
+		Dialer:       dialer,
+		QueryBuilder: func(Query) (any, error) { return map[string]any{"todos": map[string]any{}}, nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := Fixture{
+		Entities: map[string]Entity{"todo-1": {ID: "todo-1", Attributes: map[string]any{"value": float64(0)}}},
+		Queries:  []Query{{ID: "q-1", MatchAll: true}, {ID: "q-2", MatchAll: true}},
+	}
+	snapshot := driver.finalSnapshotter(fixture, newEvidenceCollector(EvidenceBudget{}))
+	for _, queryID := range []string{"q-1", "q-2"} {
+		got, snapshotErr := snapshot(context.Background(), "client-"+queryID, queryID)
+		if snapshotErr != nil {
+			t.Fatal(snapshotErr)
+		}
+		if got.QueryID != queryID {
+			t.Fatalf("snapshot query id = %q, want %q", got.QueryID, queryID)
+		}
+	}
+	dialer.mu.Lock()
+	sessions := append([]*countingRunSession(nil), dialer.sessions...)
+	dialer.mu.Unlock()
+	if len(sessions) != 1 {
+		t.Fatalf("final verification opened %d sessions, want 1", len(sessions))
+	}
+	sessions[0].mu.Lock()
+	snapshots := len(sessions[0].snapshots)
+	sessions[0].mu.Unlock()
+	if snapshots != 1 {
+		t.Fatalf("identical final wire queries produced %d subscriptions, want 1", snapshots)
 	}
 }
 

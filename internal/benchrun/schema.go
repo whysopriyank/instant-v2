@@ -31,19 +31,25 @@ func Unsupported(unit, reason string) Measurement {
 }
 
 type Manifest struct {
-	SchemaVersion         string            `json:"schema_version"`
-	BundleID              string            `json:"bundle_id"`
-	PairID                string            `json:"pair_id"`
-	Family                string            `json:"family"`
-	SubscriberScale       int               `json:"subscriber_scale"`
-	V1SHA                 string            `json:"v1_sha,omitempty"`
-	V2SHA                 string            `json:"v2_sha,omitempty"`
-	DirtyTreeHash         string            `json:"dirty_tree_hash,omitempty"`
-	SourceTree            string            `json:"source_tree,omitempty"`
-	Executables           map[string]string `json:"executables,omitempty"`
-	CommandLine           []string          `json:"command_line,omitempty"`
-	Seed                  int64             `json:"seed"`
-	RunOrder              []string          `json:"run_order"`
+	SchemaVersion   string            `json:"schema_version"`
+	BundleID        string            `json:"bundle_id"`
+	PairID          string            `json:"pair_id"`
+	Family          string            `json:"family"`
+	SubscriberScale int               `json:"subscriber_scale"`
+	V1SHA           string            `json:"v1_sha,omitempty"`
+	V2SHA           string            `json:"v2_sha,omitempty"`
+	DirtyTreeHash   string            `json:"dirty_tree_hash,omitempty"`
+	SourceTree      string            `json:"source_tree,omitempty"`
+	Executables     map[string]string `json:"executables,omitempty"`
+	CommandLine     []string          `json:"command_line,omitempty"`
+	Seed            int64             `json:"seed"`
+	RunOrder        []string          `json:"run_order"`
+	// TargetOrder records the target permutation executed for each block of a
+	// three-target run. It is intentionally separate from RunOrder, whose
+	// AB/BA values are retained for the two-target format.
+	TargetOrder           []ScheduleBlock   `json:"target_order,omitempty"`
+	TargetRevisions       map[string]string `json:"target_revisions,omitempty"`
+	Comparisons           []ComparisonSpec  `json:"comparisons,omitempty"`
 	HostID                string            `json:"host_id,omitempty"`
 	DatabaseIDs           map[string]string `json:"database_ids,omitempty"`
 	TargetProvenance      map[string]string `json:"target_provenance,omitempty"`
@@ -91,10 +97,31 @@ type Environment struct {
 }
 
 type RunOrder struct {
-	SchemaVersion string   `json:"schema_version"`
-	PairID        string   `json:"pair_id"`
-	Seed          int64    `json:"seed"`
-	Order         []string `json:"order"`
+	SchemaVersion string          `json:"schema_version"`
+	PairID        string          `json:"pair_id"`
+	Seed          int64           `json:"seed"`
+	Order         []string        `json:"order"`
+	Blocks        []ScheduleBlock `json:"blocks,omitempty"`
+}
+
+// ScheduleBlock describes the execution order of targets in one balanced
+// three-target repetition. Order is a permutation of the manifest target
+// identities, not a comparison direction; every target is still measured
+// once per block and pairwise aggregation happens later by target identity.
+type ScheduleBlock struct {
+	Index int      `json:"index"`
+	Order []string `json:"order"`
+}
+
+// ComparisonSpec is an explicit pairwise claim surface. Keeping the target
+// identities and revisions with the comparison prevents V1/current-V2 and
+// reference-V2 observations from being mixed in one aggregate.
+type ComparisonSpec struct {
+	ID                string `json:"id"`
+	BaselineID        string `json:"baseline_id"`
+	CandidateID       string `json:"candidate_id"`
+	BaselineRevision  string `json:"baseline_revision,omitempty"`
+	CandidateRevision string `json:"candidate_revision,omitempty"`
 }
 
 type Target struct {
@@ -130,6 +157,8 @@ type Run struct {
 	ID                         string                 `json:"id"`
 	PairID                     string                 `json:"pair_id"`
 	TargetID                   string                 `json:"target_id"`
+	TargetRevision             string                 `json:"target_revision,omitempty"`
+	ScheduleBlock              int                    `json:"schedule_block,omitempty"`
 	Family                     string                 `json:"family"`
 	Scale                      int                    `json:"scale"`
 	Seed                       int64                  `json:"seed"`
@@ -238,34 +267,51 @@ type DBSnapshot struct {
 }
 
 type Summary struct {
-	SchemaVersion     string            `json:"schema_version"`
-	AggregatorVersion string            `json:"aggregator_version"`
-	InputHashes       map[string]string `json:"input_hashes"`
-	Cells             []CellSummary     `json:"cells"`
-	ClaimGate         ClaimGate         `json:"claim_gate"`
+	SchemaVersion     string              `json:"schema_version"`
+	AggregatorVersion string              `json:"aggregator_version"`
+	InputHashes       map[string]string   `json:"input_hashes"`
+	Cells             []CellSummary       `json:"cells"`
+	Comparisons       []ComparisonSummary `json:"comparisons,omitempty"`
+	ClaimGate         ClaimGate           `json:"claim_gate"`
 }
 type CellSummary struct {
-	Family         string                   `json:"family"`
-	Scale          int                      `json:"scale"`
-	Attempts       int                      `json:"attempts"`
-	Ratios         []float64                `json:"ratios,omitempty"`
-	CI             CI                       `json:"ci"`
-	Sign           SignResult               `json:"sign"`
-	Metrics        map[string]MetricSummary `json:"metrics,omitempty"`
-	Failures       []FailureClass           `json:"failures,omitempty"`
-	ClaimGate      ClaimGate                `json:"claim_gate"`
-	Direction      MetricDirection          `json:"direction"`
-	EndpointClaims map[string]ClaimGate     `json:"endpoint_claims,omitempty"`
+	ComparisonID      string                   `json:"comparison_id,omitempty"`
+	BaselineID        string                   `json:"baseline_id,omitempty"`
+	CandidateID       string                   `json:"candidate_id,omitempty"`
+	BaselineRevision  string                   `json:"baseline_revision,omitempty"`
+	CandidateRevision string                   `json:"candidate_revision,omitempty"`
+	Family            string                   `json:"family"`
+	Scale             int                      `json:"scale"`
+	Attempts          int                      `json:"attempts"`
+	Ratios            []float64                `json:"ratios,omitempty"`
+	CI                CI                       `json:"ci"`
+	Sign              SignResult               `json:"sign"`
+	Metrics           map[string]MetricSummary `json:"metrics,omitempty"`
+	Failures          []FailureClass           `json:"failures,omitempty"`
+	ClaimGate         ClaimGate                `json:"claim_gate"`
+	Direction         MetricDirection          `json:"direction"`
+	EndpointClaims    map[string]ClaimGate     `json:"endpoint_claims,omitempty"`
+}
+type ComparisonSummary struct {
+	ID                string        `json:"id"`
+	BaselineID        string        `json:"baseline_id"`
+	CandidateID       string        `json:"candidate_id"`
+	BaselineRevision  string        `json:"baseline_revision,omitempty"`
+	CandidateRevision string        `json:"candidate_revision,omitempty"`
+	Cells             []CellSummary `json:"cells"`
+	ClaimGate         ClaimGate     `json:"claim_gate"`
 }
 type MetricSummary struct {
-	Name        string      `json:"name"`
-	Unit        string      `json:"unit"`
-	Denominator string      `json:"denominator"`
-	Samples     int         `json:"samples"`
-	Median      Measurement `json:"median"`
-	P99         Measurement `json:"p99"`
-	AbsoluteV1  Measurement `json:"absolute_v1"`
-	AbsoluteV2  Measurement `json:"absolute_v2"`
+	Name              string      `json:"name"`
+	Unit              string      `json:"unit"`
+	Denominator       string      `json:"denominator"`
+	Samples           int         `json:"samples"`
+	Median            Measurement `json:"median"`
+	P99               Measurement `json:"p99"`
+	AbsoluteV1        Measurement `json:"absolute_v1"`
+	AbsoluteV2        Measurement `json:"absolute_v2"`
+	AbsoluteBaseline  Measurement `json:"absolute_baseline,omitempty"`
+	AbsoluteCandidate Measurement `json:"absolute_candidate,omitempty"`
 }
 type CI struct {
 	Lower     float64 `json:"lower"`

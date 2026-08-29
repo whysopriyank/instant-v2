@@ -95,6 +95,11 @@ type ProcProcessCollector struct {
 	ExecutablePath string
 	ExpectedHash   string
 	EndpointURLs   []string
+	// NetworkNamespace is required when the signed process exposes a
+	// wildcard listener. Exact loopback listeners do not need this additional
+	// proof; wildcard listeners are accepted only in a recorded, loopback-only
+	// benchmark namespace shared with the collector.
+	NetworkNamespace NetworkNamespaceProvenance
 }
 
 func (c ProcProcessCollector) Sample(ctx context.Context) (ProcessSample, error) {
@@ -112,7 +117,7 @@ func (c ProcProcessCollector) Sample(ctx context.Context) (ProcessSample, error)
 	if pid <= 0 {
 		return failedProcess("invalid process pid"), errors.New("process pid must be positive")
 	}
-	if err := pidOwnsConfiguredEndpoint(pid, c.EndpointURLs); err != nil {
+	if err := pidOwnsConfiguredEndpointWithNamespace(pid, c.EndpointURLs, c.NetworkNamespace); err != nil {
 		return failedProcess(err.Error()), err
 	}
 	select {
@@ -180,13 +185,26 @@ func (c ProcProcessCollector) Sample(ctx context.Context) (ProcessSample, error)
 
 // pidOwnsConfiguredEndpoint is deliberately Linux/procfs based. A configured
 // PID is not sufficient provenance for a resource claim: at least one
-// loopback session/health/runtime endpoint must be backed by a listening
-// socket owned by that exact PID. Unsupported platforms and missing procfs
-// evidence fail closed.
+// configured loopback session/health/runtime endpoint must be backed by a
+// listening socket owned by that exact PID. A wildcard socket is accepted only
+// after the Linux namespace proof in network_provenance_linux.go. Unsupported
+// platforms and missing procfs evidence fail closed.
 func pidOwnsConfiguredEndpoint(pid int, endpoints []string) error {
+	return pidOwnsConfiguredEndpointWithNamespace(pid, endpoints, NetworkNamespaceProvenance{})
+}
+
+func pidOwnsConfiguredEndpointWithNamespace(pid int, endpoints []string, namespace NetworkNamespaceProvenance) error {
 	if runtime.GOOS != "linux" {
 		return errors.New("endpoint-serving PID binding is unsupported on this platform")
 	}
+	return pidOwnsConfiguredEndpointAt(pid, endpoints, namespace, "/proc", "/proc/self")
+}
+
+// pidOwnsConfiguredEndpointAt is the production implementation with explicit
+// proc roots so its fail-closed procfs parsing can be tested against bounded,
+// deterministic evidence. The runtime path always passes the real procfs
+// roots above.
+func pidOwnsConfiguredEndpointAt(pid int, endpoints []string, namespace NetworkNamespaceProvenance, procRoot, selfRoot string) error {
 	if len(endpoints) == 0 {
 		return errors.New("no configured endpoint for process PID binding")
 	}
@@ -224,16 +242,24 @@ func pidOwnsConfiguredEndpoint(pid int, endpoints []string) error {
 	if len(endpointKeys) == 0 {
 		return errors.New("no non-empty configured endpoint for process PID binding")
 	}
-	inodes, err := processSocketInodes(pid)
+	inodes, err := processSocketInodesAt(pid, procRoot)
 	if err != nil {
 		return err
 	}
-	listeners, err := loopbackListeningInodes(endpointKeys)
+	listeners, wildcards, err := processListeningInodesAt(pid, procRoot, endpointKeys)
 	if err != nil {
 		return err
 	}
 	for inode := range inodes {
 		if listeners[inode] {
+			return nil
+		}
+	}
+	for inode := range inodes {
+		if wildcards[inode] {
+			if err := certifyWildcardListenerAt(pid, namespace, procRoot, selfRoot); err != nil {
+				return err
+			}
 			return nil
 		}
 	}
@@ -260,13 +286,17 @@ func endpointHostIPs(host string) ([]net.IP, error) {
 }
 
 func processSocketInodes(pid int) (map[string]bool, error) {
-	entries, err := os.ReadDir(filepath.Join("/proc", strconv.Itoa(pid), "fd"))
+	return processSocketInodesAt(pid, "/proc")
+}
+
+func processSocketInodesAt(pid int, procRoot string) (map[string]bool, error) {
+	entries, err := os.ReadDir(filepath.Join(procRoot, strconv.Itoa(pid), "fd"))
 	if err != nil {
 		return nil, fmt.Errorf("process socket evidence unavailable: %w", err)
 	}
 	out := make(map[string]bool)
 	for _, entry := range entries {
-		link, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "fd", entry.Name()))
+		link, err := os.Readlink(filepath.Join(procRoot, strconv.Itoa(pid), "fd", entry.Name()))
 		if err != nil {
 			continue
 		}
@@ -280,49 +310,96 @@ func processSocketInodes(pid int) (map[string]bool, error) {
 	return out, nil
 }
 
-func loopbackListeningInodes(endpointKeys map[string]bool) (map[string]bool, error) {
+func loopbackListeningInodes(pid int, endpointKeys map[string]bool) (map[string]bool, error) {
+	listeners, _, err := processListeningInodes(pid, endpointKeys)
+	return listeners, err
+}
+
+func processListeningInodes(pid int, endpointKeys map[string]bool) (map[string]bool, map[string]bool, error) {
+	return processListeningInodesAt(pid, "/proc", endpointKeys)
+}
+
+func processListeningInodesAt(pid int, procRoot string, endpointKeys map[string]bool) (map[string]bool, map[string]bool, error) {
 	out := make(map[string]bool)
+	wildcards := make(map[string]bool)
 	for _, name := range []string{"tcp", "tcp6"} {
-		b, err := os.ReadFile(filepath.Join("/proc/net", name))
+		b, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "net", name))
 		if err != nil {
-			return nil, fmt.Errorf("listening socket evidence unavailable: %w", err)
+			return nil, nil, fmt.Errorf("listening socket evidence unavailable: %w", err)
 		}
 		for _, line := range strings.Split(string(b), "\n")[1:] {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
 			fields := strings.Fields(line)
-			if len(fields) < 10 || fields[3] != "0A" {
+			if len(fields) < 10 {
+				return nil, nil, errors.New("malformed listening socket evidence")
+			}
+			if len(fields[3]) != 2 {
+				return nil, nil, errors.New("malformed listening socket state")
+			}
+			if _, err := strconv.ParseUint(fields[3], 16, 8); err != nil {
+				return nil, nil, errors.New("malformed listening socket state")
+			}
+			if fields[3] != "0A" {
 				continue
 			}
 			address := strings.SplitN(fields[1], ":", 2)
-			if len(address) != 2 {
-				continue
+			if len(address) != 2 || len(address[0]) == 0 || len(address[1]) != 4 {
+				return nil, nil, errors.New("malformed listening socket address")
 			}
 			portHex := address[1]
 			portBytes, err := hex.DecodeString(portHex)
 			if err != nil || len(portBytes) != 2 {
-				continue
+				return nil, nil, errors.New("malformed listening socket port")
 			}
 			port := int(portBytes[0])<<8 | int(portBytes[1])
 			// procfs prints the port in network byte order, while the address
 			// representation is kernel-specific. Only loopback listeners are
 			// accepted, preventing a same-port non-loopback collision.
-			ip, ok := procAddressIP(address[0], name == "tcp6")
-			if !ok || !endpointKeys[ip.String()+":"+strconv.Itoa(port)] {
+			ip, loopback, wildcard, ok := procListenerAddress(address[0], name == "tcp6")
+			if !ok {
+				return nil, nil, errors.New("malformed listening socket address")
+			}
+			if _, err := strconv.ParseUint(fields[9], 10, 64); err != nil {
+				return nil, nil, errors.New("malformed listening socket inode")
+			}
+			if wildcard && endpointPort(endpointKeys, port) {
+				wildcards[fields[9]] = true
 				continue
 			}
-			out[fields[9]] = true
+			if loopback && endpointKeys[ip.String()+":"+strconv.Itoa(port)] {
+				out[fields[9]] = true
+			}
 		}
 	}
-	return out, nil
+	return out, wildcards, nil
+}
+
+func endpointPort(endpointKeys map[string]bool, port int) bool {
+	want := strconv.Itoa(port)
+	for key := range endpointKeys {
+		_, got, err := net.SplitHostPort(key)
+		if err == nil && got == want {
+			return true
+		}
+	}
+	return false
 }
 
 func procAddressIP(value string, ipv6 bool) (net.IP, bool) {
+	ip, loopback, _, ok := procListenerAddress(value, ipv6)
+	return ip, loopback && ok
+}
+
+func procListenerAddress(value string, ipv6 bool) (net.IP, bool, bool, bool) {
 	b, err := hex.DecodeString(value)
 	if err != nil {
-		return nil, false
+		return nil, false, false, false
 	}
 	if !ipv6 && len(b) == 4 {
 		ip := net.IPv4(b[3], b[2], b[1], b[0])
-		return ip, ip.IsLoopback()
+		return ip, ip.IsLoopback(), ip.IsUnspecified(), true
 	}
 	if ipv6 && len(b) == 16 {
 		// Linux stores each 32-bit word little-endian in /proc/net/tcp6.
@@ -330,9 +407,9 @@ func procAddressIP(value string, ipv6 bool) (net.IP, bool) {
 			b[i], b[i+1], b[i+2], b[i+3] = b[i+3], b[i+2], b[i+1], b[i]
 		}
 		ip := net.IP(b)
-		return ip, ip.IsLoopback()
+		return ip, ip.IsLoopback(), ip.IsUnspecified(), true
 	}
-	return nil, false
+	return nil, false, false, false
 }
 
 func (c ProcProcessCollector) Close() error { return nil }
@@ -463,13 +540,13 @@ func parsePrometheus(body string) map[string]float64 {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		name := line
-		if brace := strings.IndexByte(name, '{'); brace >= 0 {
-			name = name[:brace]
-		}
 		parts := strings.Fields(line)
 		if len(parts) < 2 {
 			continue
+		}
+		name := parts[0]
+		if brace := strings.IndexByte(name, '{'); brace >= 0 {
+			name = name[:brace]
 		}
 		value, err := strconv.ParseFloat(parts[len(parts)-1], 64)
 		if err == nil {

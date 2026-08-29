@@ -21,3 +21,11 @@ func TestBenchmarkTimeoutTIsHardBoundPerAttempt(t *testing.T) {
 		t.Fatalf("T timeout=%s want=%s", got, max)
 	}
 }
+
+func TestBenchmarkTimeoutThreeTargetsCoversTwentyOneAttempts(t *testing.T) {
+	plan := benchrun.Plan{RampSeconds: 2, SettleSeconds: 3, WarmupSeconds: 4, MeasureSeconds: 5, GraceSeconds: 6}
+	want := 21 * time.Duration(2+3+4+5+6+60) * time.Second
+	if got := benchmarkTimeoutForTargets("H-append", plan, nil, 3); got != want {
+		t.Fatalf("timeout=%s want=%s", got, want)
+	}
+}

@@ -81,7 +81,13 @@ func main() {
 		executor = benchrun.SyntheticExecutor{}
 		targets = []benchrun.Target{{SchemaVersion: benchrun.SchemaVersion, ID: "v1", Role: "v1"}, {SchemaVersion: benchrun.SchemaVersion, ID: "v2", Role: "v2_current"}}
 	}
-	order, err := benchrun.Schedule(*seed, *pair)
+	var order benchrun.RunOrder
+	var err error
+	if len(targets) == 3 {
+		order, err = benchrun.ThreeTargetSchedule(*seed, *pair)
+	} else {
+		order, err = benchrun.Schedule(*seed, *pair)
+	}
 	if err != nil {
 		fail(1, err.Error())
 	}
@@ -129,7 +135,18 @@ func main() {
 	if err != nil {
 		fail(2, fmt.Sprintf("fixture evidence hash: %v", err))
 	}
-	manifest := benchrun.Manifest{SchemaVersion: benchrun.SchemaVersion, BundleID: "bundle-" + *pair, PairID: *pair, Family: *family, SubscriberScale: *scale, Seed: *seed, RunOrder: order.Order, StartedAt: now, ToolchainVersion: runtime.Version()}
+	manifest := benchrun.Manifest{SchemaVersion: benchrun.SchemaVersion, BundleID: "bundle-" + *pair, PairID: *pair, Family: *family, SubscriberScale: *scale, Seed: *seed, RunOrder: order.Order, TargetOrder: order.Blocks, StartedAt: now, ToolchainVersion: runtime.Version()}
+	if len(targets) == 3 {
+		comparisons, comparisonErr := benchrun.DefaultThreeTargetComparisons(targets)
+		if comparisonErr != nil {
+			fail(2, comparisonErr.Error())
+		}
+		manifest.Comparisons = comparisons
+		manifest.TargetRevisions = make(map[string]string, len(targets))
+		for _, target := range targets {
+			manifest.TargetRevisions[target.ID] = target.Revision
+		}
+	}
 	manifest.FixtureHash = fixtureEvidenceHash
 	configEvidence := benchrun.LiveConfig{PairID: *pair, Seed: *seed, Family: *family, Scale: *scale, Fixture: fixtureIDs}
 	environment := benchrun.Environment{SchemaVersion: benchrun.SchemaVersion, OS: runtime.GOOS, CPUCount: runtime.NumCPU(), MemoryBytes: benchrun.Missing("bytes")}
@@ -154,7 +171,7 @@ func main() {
 			if target.ID == "v1" && manifest.V1SHA == "" {
 				manifest.V1SHA = target.Revision
 			}
-			if target.ID == "v2" && manifest.V2SHA == "" {
+			if (target.ID == "v2" || target.ID == "v2_current") && manifest.V2SHA == "" {
 				manifest.V2SHA = target.Revision
 			}
 		}
@@ -181,7 +198,11 @@ func main() {
 	if liveConfig != nil && liveConfig.ConfigHash != "" && !strings.EqualFold(liveConfig.ConfigHash, manifest.ConfigHash) {
 		fail(2, "configured config hash does not match canonical config evidence")
 	}
-	maxTotal, maxFile, err := benchrun.ContractArtifactBudget(*family, *scale, plan)
+	targetCount := len(targets)
+	if targetCount == 0 {
+		targetCount = 2
+	}
+	maxTotal, maxFile, err := benchrun.ContractArtifactBudgetForTargets(*family, *scale, plan, targetCount)
 	if err != nil {
 		fail(2, fmt.Sprintf("artifact budget: %v", err))
 	}
@@ -198,7 +219,7 @@ func main() {
 		fail(1, err.Error())
 	}
 	runner := benchrun.PairRunner{Writer: w, Executor: executor, Manifest: manifest, Plan: plan, Targets: targets, Environment: environment}
-	timeout := benchmarkTimeout(*family, plan, liveConfig)
+	timeout := benchmarkTimeoutForTargets(*family, plan, liveConfig, targetCount)
 	runCtx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	if _, err := runner.Run(runCtx); err != nil {
@@ -209,7 +230,16 @@ func main() {
 func fail(code int, msg string) { fmt.Fprintln(os.Stderr, msg); os.Exit(code) }
 
 func benchmarkTimeout(family string, plan benchrun.Plan, cfg *benchrun.LiveConfig) time.Duration {
-	// PairRunner executes seven AB/BA pairs (14 target attempts). The timeout
+	return benchmarkTimeoutForTargets(family, plan, cfg, 2)
+}
+
+func benchmarkTimeoutForTargets(family string, plan benchrun.Plan, cfg *benchrun.LiveConfig, targetCount int) time.Duration {
+	// PairRunner executes seven blocks. Two-target runs have 14 attempts and
+	// three-target runs have 21; the timeout covers every target attempt,
+	// including a bounded setup/qualification allowance.
+	if targetCount < 2 {
+		targetCount = 2
+	}
 	// must cover the complete schedule, including a bounded setup/qualification
 	// allowance for every attempt, rather than expiring halfway through it.
 	perRun := plan.RampSeconds + plan.SettleSeconds + plan.WarmupSeconds + plan.MeasureSeconds + plan.GraceSeconds
@@ -228,7 +258,7 @@ func benchmarkTimeout(family string, plan benchrun.Plan, cfg *benchrun.LiveConfi
 	if family == "T-saturation" && perRun > 600 {
 		perRun = 600
 	}
-	return 14 * time.Duration(perRun+setupAllowance) * time.Second
+	return time.Duration(7*targetCount) * time.Duration(perRun+setupAllowance) * time.Second
 }
 
 func hashFile(path string) (string, error) {

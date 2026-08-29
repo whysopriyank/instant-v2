@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/instant-v2/instant-v2/internal/benchharness"
@@ -92,8 +93,11 @@ func (r *PairRunner) Run(ctx context.Context) (Summary, error) {
 	if r.Writer == nil || r.Executor == nil {
 		return Summary{}, errors.New("pair runner requires writer and target executor")
 	}
+	if len(r.Targets) == 3 {
+		return r.runThreeTarget(ctx)
+	}
 	if len(r.Targets) != 2 {
-		return Summary{}, errors.New("pair runner requires exactly two targets")
+		return Summary{}, errors.New("pair runner requires exactly two targets or three-target mode")
 	}
 	if r.Plan.Pairs != 7 {
 		r.Plan.Pairs = 7
@@ -269,9 +273,235 @@ func (r *PairRunner) Run(ctx context.Context) (Summary, error) {
 	return ReportFromArtifacts(r.Writer.Root)
 }
 
+// runThreeTarget executes one seven-block schedule containing v1,
+// v2_reference, and v2_current once per block. It deliberately shares the
+// PairRunner seam so existing callers need only provide three Targets; the
+// artifact shape and two-target path remain unchanged.
+func (r *PairRunner) runThreeTarget(ctx context.Context) (Summary, error) {
+	if r.Plan.Pairs != 7 {
+		r.Plan.Pairs = 7
+	}
+	if len(r.Plan.Families) == 0 {
+		r.Plan.Families = []string{r.Manifest.Family}
+	}
+	if len(r.Plan.Scales) == 0 {
+		r.Plan.Scales = []int{r.Manifest.SubscriberScale}
+	}
+	if r.Now == nil {
+		r.Now = time.Now
+	}
+	order, err := ThreeTargetSchedule(r.Plan.Seed, r.Manifest.PairID)
+	if err != nil {
+		return Summary{}, err
+	}
+	if err := ValidateThreeTargetOrder(order.Blocks); err != nil {
+		return Summary{}, err
+	}
+	byID := make(map[string]Target, len(r.Targets))
+	for _, target := range r.Targets {
+		if !isThreeTargetID(target.ID) {
+			return Summary{}, fmt.Errorf("unsupported three-target identity %q", target.ID)
+		}
+		if _, exists := byID[target.ID]; exists {
+			return Summary{}, fmt.Errorf("duplicate three-target identity %q", target.ID)
+		}
+		byID[target.ID] = target
+	}
+	comparisons, err := DefaultThreeTargetComparisons(r.Targets)
+	if err != nil {
+		return Summary{}, err
+	}
+	if len(r.Manifest.Comparisons) == 0 {
+		r.Manifest.Comparisons = comparisons
+	} else if err := validateThreeTargetComparisons(r.Manifest.Comparisons, byID); err != nil {
+		return Summary{}, err
+	}
+	if r.Manifest.TargetRevisions == nil {
+		r.Manifest.TargetRevisions = make(map[string]string, len(byID))
+	}
+	for id, target := range byID {
+		if revision, ok := r.Manifest.TargetRevisions[id]; ok && revision != target.Revision {
+			return Summary{}, fmt.Errorf("manifest target revision for %s does not match target", id)
+		}
+		r.Manifest.TargetRevisions[id] = target.Revision
+	}
+	if len(r.Manifest.TargetRevisions) != len(byID) {
+		return Summary{}, errors.New("manifest target revisions must name all three targets")
+	}
+	r.Manifest.TargetOrder = append([]ScheduleBlock(nil), order.Blocks...)
+	r.Manifest.RunOrder = append([]string(nil), order.Order...)
+	totalBudget, fileBudget, err := ContractArtifactBudgetForTargets(r.Manifest.Family, r.Manifest.SubscriberScale, r.Plan, len(r.Targets))
+	if err != nil {
+		return Summary{}, err
+	}
+	if r.Manifest.ArtifactMaxTotalBytes != 0 && r.Manifest.ArtifactMaxTotalBytes != totalBudget {
+		return Summary{}, errors.New("manifest artifact total budget does not match contract")
+	}
+	if r.Manifest.ArtifactMaxFileBytes != 0 && r.Manifest.ArtifactMaxFileBytes != fileBudget {
+		return Summary{}, errors.New("manifest artifact file budget does not match contract")
+	}
+	r.Manifest.ArtifactMaxTotalBytes = totalBudget
+	r.Manifest.ArtifactMaxFileBytes = fileBudget
+	if err := validateThreeTargetManifest(r.Manifest); err != nil {
+		return Summary{}, err
+	}
+	if r.Plan.Seed != r.Manifest.Seed {
+		return Summary{}, errors.New("manifest and plan seeds must match")
+	}
+	if err := r.Writer.ConfigureContractBudget(totalBudget, fileBudget); err != nil {
+		return Summary{}, err
+	}
+	if _, statErr := os.Stat(filepath.Join(r.Writer.Root, "fixture.json")); os.IsNotExist(statErr) {
+		fixtureEvidence, fixtureErr := BuildFixtureEvidence(FixtureIDs{}, r.Manifest.Family, r.Manifest.SubscriberScale, r.Plan.Seed)
+		if fixtureErr != nil {
+			return Summary{}, fixtureErr
+		}
+		fixtureHash, fixtureErr := DigestJSON(fixtureEvidence)
+		if fixtureErr != nil {
+			return Summary{}, fixtureErr
+		}
+		r.Manifest.FixtureHash = fixtureHash
+		if err := r.Writer.WriteJSON("fixture.json", fixtureEvidence); err != nil {
+			return Summary{}, err
+		}
+	}
+	if _, statErr := os.Stat(filepath.Join(r.Writer.Root, "config.json")); os.IsNotExist(statErr) {
+		configEvidence := LiveConfig{PairID: r.Manifest.PairID, Seed: r.Manifest.Seed, Family: r.Manifest.Family, Scale: r.Manifest.SubscriberScale}
+		configHash, hashErr := DigestJSON(configEvidence)
+		if hashErr != nil {
+			return Summary{}, hashErr
+		}
+		r.Manifest.ConfigHash = configHash
+		if err := r.Writer.WriteJSON("config.json", configEvidence); err != nil {
+			return Summary{}, err
+		}
+	}
+	qualificationFailed := make(map[string]bool, len(byID))
+	for i, target := range r.Targets {
+		q, qerr := r.Executor.Qualify(ctx, target)
+		target.Qualification = q
+		r.Targets[i] = target
+		byID[target.ID] = target
+		qualificationFailed[target.ID] = qerr != nil || !q.Passed
+		if qerr != nil && target.Qualification.Failure == "" {
+			target.Qualification.Failure = qerr.Error()
+			r.Targets[i] = target
+			byID[target.ID] = target
+		}
+		if err := r.Writer.WriteJSON(filepath.Join("targets", target.ID+".json"), target); err != nil {
+			return Summary{}, err
+		}
+	}
+	if err := r.Writer.WriteJSON("manifest.json", r.Manifest); err != nil {
+		return Summary{}, err
+	}
+	if err := r.Writer.WriteJSON("plan.json", r.Plan); err != nil {
+		return Summary{}, err
+	}
+	if err := r.Writer.WriteJSON("run-order.json", order); err != nil {
+		return Summary{}, err
+	}
+	environment := r.Environment
+	if environment.SchemaVersion == "" {
+		environment.SchemaVersion = SchemaVersion
+	}
+	if err := r.Writer.WriteJSON("environment.json", environment); err != nil {
+		return Summary{}, err
+	}
+	for blockIndex, block := range order.Blocks {
+		attemptPairID := fmt.Sprintf("%s-%02d", r.Manifest.PairID, blockIndex+1)
+		for _, targetID := range block.Order {
+			target := byID[targetID]
+			run := Run{SchemaVersion: SchemaVersion, ID: fmt.Sprintf("%s-%s", attemptPairID, targetID), PairID: attemptPairID, TargetID: targetID, TargetRevision: target.Revision, ScheduleBlock: block.Index, Family: r.Manifest.Family, Scale: r.Manifest.SubscriberScale, Seed: r.Plan.Seed, StartedAt: r.Now().UTC(), PrimaryClass: Pass}
+			var result ExecutionResult
+			var executeErr error
+			if qualificationFailed[targetID] {
+				run.PrimaryClass = SetupInvalid
+				run.Failure = "target qualification failed"
+			} else {
+				result, executeErr = r.Executor.Execute(ctx, RunSpec{Run: run, Target: target, Plan: r.Plan, Attempt: blockIndex + 1, Order: strings.Join(block.Order, ">")})
+			}
+			if executeErr != nil {
+				run.PrimaryClass = classify(executeErr)
+				run.Failure = executeErr.Error()
+			}
+			if result.Run.ID != "" {
+				run = result.Run
+				if executeErr != nil {
+					run.PrimaryClass = classify(executeErr)
+					run.Failure = executeErr.Error()
+				} else if run.PrimaryClass == "" {
+					run.PrimaryClass = Pass
+				}
+			}
+			run.SchemaVersion = SchemaVersion
+			run.ID = fmt.Sprintf("%s-%s", attemptPairID, targetID)
+			run.PairID = attemptPairID
+			run.TargetID = targetID
+			if run.TargetRevision == "" {
+				run.TargetRevision = target.Revision
+			}
+			run.ScheduleBlock = block.Index
+			run.Family = r.Manifest.Family
+			run.Scale = r.Manifest.SubscriberScale
+			if run.EndedAt.IsZero() {
+				run.EndedAt = r.Now().UTC()
+			}
+			if err := r.writeRun(run, result); err != nil {
+				return Summary{}, err
+			}
+		}
+	}
+	summary, err := reportFromArtifacts(r.Writer.Root, false)
+	if err != nil {
+		return Summary{}, err
+	}
+	if err := r.Writer.WriteJSON("summary.json", summary); err != nil {
+		return Summary{}, err
+	}
+	if err := r.Writer.WriteText("report.md", []byte(RenderMarkdown(summary))); err != nil {
+		return Summary{}, err
+	}
+	if err := r.Writer.Finalize(); err != nil {
+		return Summary{}, err
+	}
+	return ReportFromArtifacts(r.Writer.Root)
+}
+
+func validateThreeTargetManifest(m Manifest) error {
+	if m.SchemaVersion != SchemaVersion || m.BundleID == "" || m.PairID == "" || m.Family == "" || m.SubscriberScale <= 0 || m.Seed == 0 || m.StartedAt.IsZero() {
+		return errors.New("three-target manifest missing required provenance")
+	}
+	if err := ValidateThreeTargetOrder(m.TargetOrder); err != nil {
+		return err
+	}
+	if len(m.RunOrder) != ThreeTargetBlocks {
+		return errors.New("three-target manifest run order must contain seven blocks")
+	}
+	for i, block := range m.TargetOrder {
+		if m.RunOrder[i] != strings.Join(block.Order, ">") {
+			return fmt.Errorf("three-target manifest run order does not match block %d", block.Index)
+		}
+	}
+	if len(m.TargetRevisions) != 3 {
+		return errors.New("three-target manifest requires three target revisions")
+	}
+	return nil
+}
+
 // ContractArtifactBudget computes the deterministic raw-artifact budget for a
 // frozen workload before any bundle files are written.
 func ContractArtifactBudget(family string, scale int, plan Plan) (int64, int64, error) {
+	return ContractArtifactBudgetForTargets(family, scale, plan, 2)
+}
+
+// ContractArtifactBudgetForTargets derives limits for the number of target
+// runs in one seven-block schedule. Two-target callers retain the historical
+// ContractArtifactBudget behavior; three-target bundles reserve 21 runs.
+func ContractArtifactBudgetForTargets(family string, scale int, plan Plan, targetCount int) (int64, int64, error) {
+	if targetCount < 2 {
+		return 0, 0, errors.New("at least two targets are required for an artifact budget")
+	}
 	workload, err := benchharness.NewWorkload(benchharness.Family(canonicalBenchmarkFamily(family)), scale, plan.Seed)
 	if err != nil {
 		return 0, 0, err
@@ -287,7 +517,11 @@ func ContractArtifactBudget(family string, scale int, plan Plan) (int64, int64, 
 	if err != nil {
 		return 0, 0, err
 	}
-	allRows, err := safeContractMultiply(rows, 14)
+	allRows, err := safeContractMultiply(rows, int64(targetCount))
+	if err != nil {
+		return 0, 0, err
+	}
+	allRows, err = safeContractMultiply(allRows, 7)
 	if err != nil {
 		return 0, 0, err
 	}

@@ -59,6 +59,9 @@ func ValidateManifest(m Manifest) error {
 	if m.Seed == 0 {
 		return errors.New("manifest seed must be recorded")
 	}
+	if len(m.TargetOrder) > 0 || len(m.Comparisons) > 0 || m.TargetRevisions != nil {
+		return validateThreeTargetManifestShape(m)
+	}
 	if len(m.RunOrder) != 7 {
 		return errors.New("manifest run order must contain exactly seven attempts")
 	}
@@ -78,6 +81,51 @@ func ValidateManifest(m Manifest) error {
 	}
 	if m.StartedAt.IsZero() {
 		return errors.New("manifest start time is required")
+	}
+	return nil
+}
+
+func validateThreeTargetManifestShape(m Manifest) error {
+	if len(m.RunOrder) != ThreeTargetBlocks {
+		return errors.New("three-target manifest run order must contain seven blocks")
+	}
+	if err := ValidateThreeTargetOrder(m.TargetOrder); err != nil {
+		return err
+	}
+	for i, block := range m.TargetOrder {
+		if m.RunOrder[i] != strings.Join(block.Order, ">") {
+			return fmt.Errorf("three-target manifest run order does not match block %d", block.Index)
+		}
+	}
+	if len(m.TargetRevisions) != len(threeTargetIDs) {
+		return errors.New("three-target manifest requires three target revisions")
+	}
+	for _, id := range threeTargetIDs {
+		if _, ok := m.TargetRevisions[id]; !ok {
+			return fmt.Errorf("three-target manifest missing target revision %s", id)
+		}
+	}
+	comparisons := make(map[string]ComparisonSpec, len(m.Comparisons))
+	for _, comparison := range m.Comparisons {
+		if _, exists := comparisons[comparison.ID]; exists {
+			return fmt.Errorf("duplicate three-target comparison %q", comparison.ID)
+		}
+		comparisons[comparison.ID] = comparison
+	}
+	if len(comparisons) != 2 {
+		return errors.New("three-target manifest requires exactly two comparisons")
+	}
+	for _, want := range []struct{ id, baseline, candidate string }{
+		{"v1-v2_current", "v1", "v2_current"},
+		{"v2_reference-v2_current", "v2_reference", "v2_current"},
+	} {
+		comparison, ok := comparisons[want.id]
+		if !ok || comparison.BaselineID != want.baseline || comparison.CandidateID != want.candidate {
+			return fmt.Errorf("invalid three-target comparison %q", want.id)
+		}
+		if comparison.BaselineRevision != m.TargetRevisions[want.baseline] || comparison.CandidateRevision != m.TargetRevisions[want.candidate] {
+			return fmt.Errorf("comparison %q revisions do not match manifest target revisions", want.id)
+		}
 	}
 	return nil
 }
@@ -467,6 +515,14 @@ func reportFromArtifacts(root string, verify bool) (Summary, error) {
 	if e != nil {
 		return Summary{}, e
 	}
+	if isThreeTargetManifest(m) {
+		if verify {
+			if e = VerifyChecksums(root); e != nil {
+				return Summary{}, e
+			}
+		}
+		return reportThreeTargetArtifacts(root, m)
+	}
 	if verify {
 		e = VerifyChecksums(root)
 	}
@@ -850,6 +906,10 @@ func reportFromArtifacts(root string, verify bool) (Summary, error) {
 	return s, nil
 }
 
+func isThreeTargetManifest(m Manifest) bool {
+	return len(m.TargetOrder) > 0 || len(m.Comparisons) > 0 || len(m.TargetRevisions) > 0
+}
+
 func endpointNamesWithPrimary(claims map[string]ClaimGate) []string {
 	names := make([]string, 0, len(claims))
 	for name := range claims {
@@ -881,11 +941,12 @@ func normalizeSummaryReasons(s *Summary) {
 	}
 	s.ClaimGate.Reasons = normalizeReasons(s.ClaimGate.Reasons)
 	for i := range s.Cells {
-		s.Cells[i].ClaimGate.Reasons = normalizeReasons(s.Cells[i].ClaimGate.Reasons)
-		s.Cells[i].Failures = normalizeFailureClasses(s.Cells[i].Failures)
-		for name, gate := range s.Cells[i].EndpointClaims {
-			gate.Reasons = normalizeReasons(gate.Reasons)
-			s.Cells[i].EndpointClaims[name] = gate
+		normalizeCellReasons(&s.Cells[i])
+	}
+	for i := range s.Comparisons {
+		s.Comparisons[i].ClaimGate.Reasons = normalizeReasons(s.Comparisons[i].ClaimGate.Reasons)
+		for j := range s.Comparisons[i].Cells {
+			normalizeCellReasons(&s.Comparisons[i].Cells[j])
 		}
 	}
 }
@@ -1025,31 +1086,45 @@ func RenderMarkdown(s Summary) string {
 	var b strings.Builder
 	b.WriteString("# Benchmark report\n\n")
 	b.WriteString(fmt.Sprintf("Schema: `%s`; aggregator: `%s`\n\n", s.SchemaVersion, s.AggregatorVersion))
-	for _, c := range s.Cells {
-		b.WriteString(fmt.Sprintf("## %s @ %d subscribers\n\nAttempts: %d\n\n", c.Family, c.Scale, c.Attempts))
-		if len(c.Ratios) > 0 {
-			b.WriteString(fmt.Sprintf("Median paired ratio: %.4f; 95%% CI [%.4f, %.4f]\n\n", c.CIpoint(), c.CI.Lower, c.CI.Upper))
-		}
-		b.WriteString(fmt.Sprintf("Claim eligible: %t\n", c.ClaimGate.Eligible))
-		if len(c.ClaimGate.Reasons) > 0 {
-			b.WriteString("Reasons: " + strings.Join(c.ClaimGate.Reasons, "; ") + "\n")
-		}
-		endpoints := make([]string, 0, len(c.EndpointClaims))
-		for endpoint := range c.EndpointClaims {
-			endpoints = append(endpoints, endpoint)
-		}
-		sort.Strings(endpoints)
-		for _, endpoint := range endpoints {
-			gate := c.EndpointClaims[endpoint]
-			b.WriteString(fmt.Sprintf("Endpoint %s claim eligible: %t", endpoint, gate.Eligible))
-			if len(gate.Reasons) > 0 {
-				b.WriteString(" (" + strings.Join(gate.Reasons, "; ") + ")")
+	if len(s.Comparisons) > 0 {
+		for _, comparison := range s.Comparisons {
+			b.WriteString(fmt.Sprintf("# Comparison `%s`: `%s` (%s) → `%s` (%s)\n\n", comparison.ID, comparison.BaselineID, comparison.BaselineRevision, comparison.CandidateID, comparison.CandidateRevision))
+			b.WriteString(fmt.Sprintf("Comparison claim eligible: %t\n\n", comparison.ClaimGate.Eligible))
+			for _, cell := range comparison.Cells {
+				renderCell(&b, cell)
 			}
-			b.WriteByte('\n')
 		}
-		b.WriteString("\n")
+		return b.String()
+	}
+	for _, c := range s.Cells {
+		renderCell(&b, c)
 	}
 	return b.String()
+}
+
+func renderCell(b *strings.Builder, c CellSummary) {
+	b.WriteString(fmt.Sprintf("## %s @ %d subscribers\n\nAttempts: %d\n\n", c.Family, c.Scale, c.Attempts))
+	if len(c.Ratios) > 0 {
+		b.WriteString(fmt.Sprintf("Median paired ratio: %.4f; 95%% CI [%.4f, %.4f]\n\n", c.CIpoint(), c.CI.Lower, c.CI.Upper))
+	}
+	b.WriteString(fmt.Sprintf("Claim eligible: %t\n", c.ClaimGate.Eligible))
+	if len(c.ClaimGate.Reasons) > 0 {
+		b.WriteString("Reasons: " + strings.Join(c.ClaimGate.Reasons, "; ") + "\n")
+	}
+	endpoints := make([]string, 0, len(c.EndpointClaims))
+	for endpoint := range c.EndpointClaims {
+		endpoints = append(endpoints, endpoint)
+	}
+	sort.Strings(endpoints)
+	for _, endpoint := range endpoints {
+		gate := c.EndpointClaims[endpoint]
+		b.WriteString(fmt.Sprintf("Endpoint %s claim eligible: %t", endpoint, gate.Eligible))
+		if len(gate.Reasons) > 0 {
+			b.WriteString(" (" + strings.Join(gate.Reasons, "; ") + ")")
+		}
+		b.WriteByte('\n')
+	}
+	b.WriteByte('\n')
 }
 func (c CellSummary) CIpoint() float64 {
 	if len(c.Ratios) == 0 {

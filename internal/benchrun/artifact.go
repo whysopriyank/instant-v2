@@ -39,6 +39,7 @@ const MaxJSONLineBytes int = 1 << 20
 var secretRE = regexp.MustCompile(`(?is)((?:"?(?:authorization|cookie|password|passwd|token|secret|dsn|auth)"?)\s*[:=]\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^,\s};]+)`)
 var uriCredentialRE = regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)([^/:\s@]+):([^@\s/]+)@`)
 var authHeaderRE = regexp.MustCompile(`(?i)(authorization\s*[:=]\s*)(?:bearer|basic)\s+[^\r\n,}]+`)
+var secretJSONKeyRE = regexp.MustCompile(`(?i)^(?:authorization|cookie|password|passwd|token|secret|dsn|auth)$`)
 
 type ArtifactWriter struct {
 	Root                     string
@@ -104,12 +105,57 @@ func Redact(s string) string {
 	s = uriCredentialRE.ReplaceAllString(s, `${1}[REDACTED]@`)
 	return secretRE.ReplaceAllString(s, `${1}"[REDACTED]"`)
 }
+
+func redactJSONBytes(b []byte, indent bool) ([]byte, error) {
+	redacted := []byte(Redact(string(b)))
+	if json.Valid(redacted) {
+		return redacted, nil
+	}
+	decoder := json.NewDecoder(bytes.NewReader(b))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, err
+	}
+	value = redactJSONValue(value)
+	if indent {
+		return json.MarshalIndent(value, "", "  ")
+	}
+	return json.Marshal(value)
+}
+
+func redactJSONValue(value any) any {
+	switch value := value.(type) {
+	case map[string]any:
+		for key, item := range value {
+			if secretJSONKeyRE.MatchString(key) {
+				value[key] = "[REDACTED]"
+				continue
+			}
+			value[key] = redactJSONValue(item)
+		}
+		return value
+	case []any:
+		for i := range value {
+			value[i] = redactJSONValue(value[i])
+		}
+		return value
+	case string:
+		return Redact(value)
+	default:
+		return value
+	}
+}
+
 func (w *ArtifactWriter) WriteJSON(name string, v any) error {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}
-	b = []byte(Redact(string(b)))
+	b, err = redactJSONBytes(b, true)
+	if err != nil {
+		return err
+	}
 	b = append(b, '\n')
 	return w.Write(name, b)
 }
@@ -164,7 +210,11 @@ func (w *ArtifactWriter) WriteJSONL(name string, records any) (retErr error) {
 		if err != nil {
 			return err
 		}
-		x = append([]byte(Redact(string(x))), '\n')
+		x, err = redactJSONBytes(x, false)
+		if err != nil {
+			return err
+		}
+		x = append(x, '\n')
 		if len(x) > MaxJSONLineBytes {
 			return fmt.Errorf("JSONL line exceeds limit")
 		}
@@ -320,7 +370,8 @@ func (w *ArtifactWriter) ConfigureContractBudget(total, perFile int64) error {
 }
 func mustJSON(v any) []byte {
 	b, _ := json.MarshalIndent(v, "", "  ")
-	return append([]byte(Redact(string(b))), '\n')
+	b, _ = redactJSONBytes(b, true)
+	return append(b, '\n')
 }
 func (w *ArtifactWriter) writeUnlocked(name string, data []byte) error {
 	if w.finalized {
@@ -869,7 +920,11 @@ func bundleArtifactLimits(root string) (int64, int64, error) {
 	if plan.Seed != m.Seed || len(plan.Families) != 1 || canonicalBenchmarkFamily(plan.Families[0]) != canonicalBenchmarkFamily(m.Family) || len(plan.Scales) != 1 || plan.Scales[0] != m.SubscriberScale {
 		return defaults(errors.New("manifest and plan do not match"))
 	}
-	derivedTotal, derivedFile, err := ContractArtifactBudget(m.Family, m.SubscriberScale, plan)
+	targetCount, err := manifestTargetCount(m)
+	if err != nil {
+		return defaults(err)
+	}
+	derivedTotal, derivedFile, err := ContractArtifactBudgetForTargets(m.Family, m.SubscriberScale, plan, targetCount)
 	if err != nil || derivedTotal != m.ArtifactMaxTotalBytes || derivedFile != m.ArtifactMaxFileBytes {
 		return defaults(errors.New("manifest artifact budget does not match contract"))
 	}
@@ -877,6 +932,27 @@ func bundleArtifactLimits(root string) (int64, int64, error) {
 		return defaults(err)
 	}
 	return m.ArtifactMaxTotalBytes, m.ArtifactMaxFileBytes, nil
+}
+
+// manifestTargetCount derives the artifact cardinality from the signed
+// manifest contract. It deliberately never inspects run rows: observed rows
+// are untrusted and must not be able to unlock larger artifact limits.
+func manifestTargetCount(m Manifest) (int, error) {
+	if !isThreeTargetManifest(m) {
+		return 2, nil
+	}
+	if err := validateThreeTargetManifestShape(m); err != nil {
+		return 0, err
+	}
+	if len(m.TargetRevisions) != len(threeTargetIDs) {
+		return 0, errors.New("three-target manifest target count is not canonical")
+	}
+	for _, id := range threeTargetIDs {
+		if _, ok := m.TargetRevisions[id]; !ok {
+			return 0, fmt.Errorf("three-target manifest missing target revision %s", id)
+		}
+	}
+	return len(threeTargetIDs), nil
 }
 
 func openRegularArtifact(path string) (*os.File, int64, error) {

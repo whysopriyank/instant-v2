@@ -220,6 +220,12 @@ func (a BenchharnessDriver) RunTarget(ctx context.Context, spec RunSpec) (Execut
 		coverage := normalizeCoverage(row.Coverage)
 		result.Ledger = append(result.Ledger, LedgerRow{SchemaVersion: SchemaVersion, PairID: row.PairID, RunID: row.RunID, WriterID: row.WriterID, RecipientID: row.RecipientID, ClientEventID: row.ClientEventID, ServerTransactionID: row.ServerTransactionID, ExpectedQuerySet: row.ExpectedQuerySet, ExpectedRecipientSet: row.ExpectedRecipientSet, SubmittedAt: row.SubmittedAt, AcknowledgementAt: row.AcknowledgementAt, CoverAt: row.CoverAt, ProcessedTransactionID: row.ProcessedTransactionID, ExpectedMaterializedDigest: row.ExpectedMaterializedDigest, ObservedMaterializedDigest: row.ObservedMaterializedDigest, ExpectedStateVersion: uint64(maxInt64(row.ExpectedStateVersion)), CoveredExpectedStateVersion: uint64(maxInt64(row.CoveredExpectedStateVersion)), CoveredExpectedMaterializedDigest: row.CoveredExpectedMaterializedDigest, ObservedStateVersion: uint64(maxInt64(row.ObservedStateVersion)), Coverage: coverage, RefreshBeforeAck: row.RefreshBeforeAck, BufferedSnapshotAhead: row.BufferedSnapshotAhead, ConvergedAt: row.ConvergedAt, ErrorClass: string(row.ErrorClass), EvidenceRef: row.EvidenceRef})
 	}
+	if result.Run.PrimaryClass == Pass {
+		if class, failure := classifyLedgerEvidence(rows); class != Pass {
+			result.Run.PrimaryClass = class
+			result.Run.Failure = failure
+		}
+	}
 	expected := expectedLedgerCardinality(w, plan.Mutations)
 	result.Run.ExpectedLedgerRows = expected
 	result.Run.ExpectedMutationRecipients = expected
@@ -318,6 +324,33 @@ func (a BenchharnessDriver) RunTarget(ctx context.Context, spec RunSpec) (Execut
 		}
 	}
 	return result, err
+}
+
+func classifyLedgerEvidence(rows []benchharness.LedgerRow) (FailureClass, string) {
+	class := Pass
+	for _, row := range rows {
+		switch row.ErrorClass {
+		case benchharness.ErrorProtocol:
+			return TargetProtocolFailure, "ledger contains protocol error evidence"
+		case benchharness.ErrorInfrastructure:
+			class = HarnessDefect
+		case benchharness.ErrorTarget:
+			if class == Pass {
+				class = TargetSemanticFailure
+			}
+		}
+		if normalizeCoverage(row.Coverage) == "none" && class == Pass {
+			class = TargetSemanticFailure
+		}
+	}
+	switch class {
+	case HarnessDefect:
+		return class, "ledger contains infrastructure error evidence"
+	case TargetSemanticFailure:
+		return class, "ledger contains target semantic error evidence"
+	default:
+		return Pass, ""
+	}
 }
 
 func processIdentityStable(samples []ProcessSample, measuredStart, measuredEnd time.Time) bool {

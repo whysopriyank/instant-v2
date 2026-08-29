@@ -270,6 +270,19 @@ V1 full versus V2 full is the primary compatibility comparison. V2 delta is
 compared only with V2 full at the same SHA. Targets with incompatible failure
 or retry behavior are reported rather than normalized away.
 
+### Three-target reference mode
+
+When a historical V2 reference is configured, the canonical target identities
+are `v1`, `v2_reference`, and `v2_current`. The harness runs seven blocks with
+each target exactly once per block. The schedule contains all six target
+permutations once plus one deterministic seed-selected repeat, so every target
+occupies each execution position two or three times. It produces 21 target run
+artifacts and two independent seven-observation comparisons:
+`v1-v2_current` and `v2_reference-v2_current`. The reference is never used as
+the V1 baseline. A reference qualification failure remains visible in every
+affected block and makes both the global and relevant comparison gates
+ineligible.
+
 ## 6. Metrics and instrumentation
 
 The harness records raw observations before aggregation.
@@ -345,7 +358,9 @@ benchmarks/results/<bundle-id>/
 V1/V2 SHAs and dirty hashes, source tree paths, executable hashes, command
 lines, random seeds, AB/BA order, host and database identifiers,
 PostgreSQL/toolchain versions, schema/fixture/config hashes, start/end times,
-and artifact hashes. The raw bundle is an immutable, content-addressed bundle
+and artifact hashes. Three-target manifests additionally record the seven
+`target_order` blocks, exact `target_revisions`, and explicit `comparisons`.
+The raw bundle is an immutable, content-addressed bundle
 of metadata, event ids, timing observations, semantic digests, and references;
 it is not a dump of full frames. Secrets, access tokens, cookies, DSNs
 containing credentials, and user data must not be stored. Redaction is
@@ -361,8 +376,10 @@ correctness gate.
 
 ## 8. Run protocol, randomization, and repetitions
 
-For each family/scale, create one fixture and two isolated databases. Run
-exactly seven paired repetitions for publishable evidence. A recorded seed
+For each family/scale, create one fixture and one isolated database per target.
+Two-target mode runs exactly seven paired repetitions; three-target reference
+mode runs exactly seven three-target blocks and derives two independent
+pairwise comparisons from those same blocks. A recorded seed
 balances the treatment order across the seven pairs (AB/BA); the same seed also
 controls subscriber assignment and mutation ordering. Five pairs are
 preliminary/interrupted evidence, and fewer than five is smoke evidence. Run
@@ -392,18 +409,19 @@ Within a run:
 8. Stop collectors only after flush acknowledgement, validate artifact hashes,
    and tear down the isolated target.
 
-The pair runner must avoid alternating V1/V2 within one server process. Run
-order is the only randomized treatment variable unless the cell explicitly
-declares another one. CPU affinity, server flags, database settings, and client
-counts remain fixed across the pair.
+The pair runner must avoid alternating V1/V2 within one server process. In
+three-target mode, all three targets are run once per block and the target
+permutation is the only randomized treatment variable. CPU affinity, server
+flags, database settings, and client counts remain fixed across the block.
 
 ## 9. Statistics and claim thresholds
 
 Primary endpoints are p99 upper bounds for recipient and global semantic
 convergence, CPU core-ms per 1,000 affected-recipient coverages, peak RSS per
 active subscriber and absolute peak RSS, application wire bytes per affected-
-recipient coverage, and committed throughput for `T-saturation`. Report paired
-V2/V1 ratios plus absolute values,
+recipient coverage, and committed throughput for `T-saturation`. In
+three-target mode report separate paired `v2_current/v1` and
+`v2_current/v2_reference` ratios plus absolute values,
 sample counts, every pair value, and distribution spread. Ratios use log-ratio
 aggregation. Compute the 95% confidence interval with at least 10,000 seeded
 bootstrap resamples over pair-level observations, and report the paired

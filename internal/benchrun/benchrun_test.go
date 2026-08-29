@@ -255,6 +255,35 @@ func TestRedactConsumesQuotedSecretValues(t *testing.T) {
 	}
 }
 
+func TestArtifactWriterRedactionPreservesJSONWithQuotedDSNError(t *testing.T) {
+	root := t.TempDir()
+	w, err := NewArtifactWriter(root, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := map[string]any{
+		"failure": `unsafe benchmark database DSN: "postgresql://bench:top-secret@127.0.0.1/instant_bench_v1" host must be explicit`,
+		"token":   "also-secret",
+	}
+	if err := w.WriteJSON("target.json", record); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(root, "target.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid(b) {
+		t.Fatalf("redaction produced invalid JSON: %s", b)
+	}
+	if strings.Contains(string(b), "top-secret") || strings.Contains(string(b), "also-secret") {
+		t.Fatalf("secret was retained: %s", b)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(b, &decoded); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestProcessCollectorRequiresEndpointBindingWhenRequested(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("procfs endpoint ownership is Linux-specific")

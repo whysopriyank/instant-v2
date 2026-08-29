@@ -100,6 +100,16 @@ make bench-run
 make bench-verify
 ```
 
+To include the historical V2 reference, provide three targets in the live
+config with ids `v1`, `v2_reference`, and `v2_current`. The runner detects this
+shape, writes seven seeded target-order blocks (21 target runs), and reports
+the independent comparisons `v1-v2_current` and `v2_reference-v2_current`.
+The historical target is qualified by the same gate; if it fails, its target
+record and all seven failed attempts remain in the bundle and no comparison is
+promoted to an eligible claim. Exact per-target revisions are persisted in
+`manifest.json`, each target record, each run record, and both comparison
+headers in the offline report.
+
 `benchrun -config` loads strict JSON, constructs the WP5-A target adapters, and
 fails before writing a success bundle when validation or qualification cannot
 prove the target. A complete redacted, non-runnable-until-provisioned example is

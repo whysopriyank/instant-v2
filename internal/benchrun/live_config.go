@@ -20,6 +20,7 @@ import (
 
 type LiveTargetConfig struct {
 	ID                     string   `json:"id"`
+	Role                   string   `json:"role,omitempty"`
 	Kind                   string   `json:"kind"`
 	Transport              string   `json:"transport"`
 	SessionURL             string   `json:"session_url"`
@@ -47,6 +48,8 @@ type LiveTargetConfig struct {
 	Versions                map[string]string `json:"versions,omitempty"`
 	ProcessPIDEnv           string            `json:"process_pid_env,omitempty"`
 	ProcessPIDFile          string            `json:"process_pid_file,omitempty"`
+	NetworkNamespaceID      string            `json:"network_namespace_id,omitempty"`
+	InitialNamespaceID      string            `json:"initial_network_namespace_id,omitempty"`
 	ProcessExecutablePath   string            `json:"process_executable_path,omitempty"`
 	ProcessExecutableSHA256 string            `json:"process_executable_sha256,omitempty"`
 	RuntimeEndpoint         string            `json:"runtime_endpoint,omitempty"`
@@ -68,6 +71,7 @@ type LiveConfig struct {
 	TimeoutSeconds         int                `json:"timeout_seconds,omitempty"`
 	V1SHA                  string             `json:"v1_sha,omitempty"`
 	V2SHA                  string             `json:"v2_sha,omitempty"`
+	V2ReferenceSHA         string             `json:"v2_reference_sha,omitempty"`
 	SourceTree             string             `json:"source_tree,omitempty"`
 	SchemaHash             string             `json:"schema_hash,omitempty"`
 	FixtureHash            string             `json:"fixture_hash,omitempty"`
@@ -113,18 +117,22 @@ func (c LiveConfig) Validate() error {
 	if c.Family != string(benchharness.FamilyT) && c.Family != string(benchharness.FamilyS) && c.Family != string(benchharness.FamilyR) && c.Fixture.RankAttrID == "" {
 		return errors.New("fixture rank attribute UUID is required for this workload")
 	}
-	if len(c.Targets) != 2 {
-		return errors.New("live config requires exactly v1 and v2 targets")
+	if len(c.Targets) != 2 && len(c.Targets) != 3 {
+		return errors.New("live config requires v1/v2 or v1/v2_reference/v2_current targets")
 	}
 	seen := map[string]bool{}
 	for _, t := range c.Targets {
-		if t.ID != "v1" && t.ID != "v2" {
-			return fmt.Errorf("target ID must be v1 or v2: %s", t.ID)
+		role, err := canonicalTargetRole(t)
+		if err != nil {
+			return err
 		}
-		if seen[t.ID] {
-			return fmt.Errorf("duplicate target ID: %s", t.ID)
+		if err := validateTargetIdentity(t, role, len(c.Targets)); err != nil {
+			return err
 		}
-		seen[t.ID] = true
+		if seen[role] {
+			return fmt.Errorf("duplicate target role: %s", role)
+		}
+		seen[role] = true
 		if t.SessionURL == "" || t.HealthURL == "" || t.AppID == "" || t.Revision == "" || t.DatabaseName == "" || t.PostgresVersion == "" || t.InvalidationMode == "" || t.MetadataFile == "" || t.ProvisionedMarker == "" || t.DatabaseURLEnv == "" || t.ProbeEntityID == "" || len(t.ProvisionCommand) == 0 {
 			return fmt.Errorf("target %s missing required provenance/config", t.ID)
 		}
@@ -134,12 +142,24 @@ func (c LiveConfig) Validate() error {
 		if t.ProvisionedMarker != t.DatabaseName {
 			return fmt.Errorf("target %s requires matching pre-provisioned marker evidence", t.ID)
 		}
-		prefix := "BENCH_" + strings.ToUpper(t.ID) + "_"
-		if t.DatabaseURLEnv != prefix+"DATABASE_URL" || t.AdminTokenEnv != prefix+"ADMIN_TOKEN" || t.RefreshTokenEnv != prefix+"REFRESH_TOKEN" || t.RuntimeTokenEnv != prefix+"RUNTIME_TOKEN" || (c.Family != "C-process-cold" && t.ProcessPIDEnv != prefix+"PID") {
+		prefix := targetEnvPrefixForConfig(t, role)
+		if t.DatabaseURLEnv != prefix+"DATABASE_URL" || t.AdminTokenEnv != prefix+"ADMIN_TOKEN" || t.RefreshTokenEnv != prefix+"REFRESH_TOKEN" || t.RuntimeTokenEnv != prefix+"RUNTIME_TOKEN" {
 			return fmt.Errorf("target %s must use fixed benchmark environment names", t.ID)
 		}
-		if c.Family == "C-process-cold" && (t.ProcessPIDFile == "" || !filepath.IsAbs(t.ProcessPIDFile)) {
+		if t.ProcessPIDFile != "" && !filepath.IsAbs(t.ProcessPIDFile) {
+			return fmt.Errorf("target %s process pid file must be absolute", t.ID)
+		}
+		if c.Family == "C-process-cold" && t.ProcessPIDFile == "" {
 			return fmt.Errorf("target %s requires an absolute process pid file for C-process-cold", t.ID)
+		}
+		if t.ProcessPIDFile == "" && c.Family != "C-process-cold" && t.ProcessPIDEnv != prefix+"PID" {
+			return fmt.Errorf("target %s must use fixed process pid environment name", t.ID)
+		}
+		if t.ProcessPIDFile != "" && t.ProcessPIDEnv != "" && t.ProcessPIDEnv != prefix+"PID" {
+			return fmt.Errorf("target %s must use fixed process pid environment name", t.ID)
+		}
+		if err := validateNetworkNamespaceFields(t); err != nil {
+			return err
 		}
 		base := strings.ToLower(filepath.Base(t.ProvisionCommand[0]))
 		if !filepath.IsAbs(t.ProvisionCommand[0]) {
@@ -160,7 +180,7 @@ func (c LiveConfig) Validate() error {
 		if base == "sh" || base == "bash" || base == "zsh" || base == "fish" || base == "cmd" || base == "powershell" || base == "pwsh" {
 			return fmt.Errorf("target %s provision command must not invoke a shell", t.ID)
 		}
-		if t.ID == "v1" && !strings.EqualFold(t.OutputPlugin, "wal2json") {
+		if role == "v1" && !strings.EqualFold(t.OutputPlugin, "wal2json") {
 			return errors.New("v1 requires wal2json")
 		}
 		if t.AdminTokenEnv != "" && strings.Contains(t.AdminTokenEnv, "=") {
@@ -190,19 +210,116 @@ func (c LiveConfig) Validate() error {
 			return fmt.Errorf("target %s collector interval cannot be negative", t.ID)
 		}
 	}
-	if !seen["v1"] || !seen["v2"] {
-		return errors.New("both v1 and v2 targets are required")
+	if !seen["v1"] || !seen["v2_current"] {
+		return errors.New("v1 and current v2 targets are required")
+	}
+	if len(c.Targets) == 3 && !seen["v2_reference"] {
+		return errors.New("three-target live config requires v2_reference")
+	}
+	if len(c.Targets) == 2 && seen["v2_reference"] {
+		return errors.New("two-target live config cannot contain v2_reference")
 	}
 	for _, target := range c.Targets {
-		switch target.ID {
+		role, _ := canonicalTargetRole(target)
+		switch role {
 		case "v1":
 			if c.V1SHA == "" || c.V1SHA != target.Revision {
 				return errors.New("top-level v1_sha must equal the qualified v1 revision")
 			}
-		case "v2":
+		case "v2_current":
 			if c.V2SHA == "" || c.V2SHA != target.Revision {
 				return errors.New("top-level v2_sha must equal the qualified v2 revision")
 			}
+		case "v2_reference":
+			if c.V2ReferenceSHA == "" || c.V2ReferenceSHA != target.Revision {
+				return errors.New("top-level v2_reference_sha must equal the qualified v2_reference revision")
+			}
+		}
+	}
+	return nil
+}
+
+func canonicalTargetRole(target LiveTargetConfig) (string, error) {
+	role := strings.TrimSpace(target.Role)
+	inferred := ""
+	switch target.ID {
+	case "v1":
+		inferred = "v1"
+	case "v2", "v2_current", "v2-current":
+		inferred = "v2_current"
+	case "v2_reference", "v2-reference":
+		inferred = "v2_reference"
+	}
+	if role == "" {
+		if inferred == "" {
+			return "", fmt.Errorf("target ID must be v1, v2, v2_reference, or v2_current: %s", target.ID)
+		}
+		role = inferred
+	}
+	if role == "v2" {
+		role = "v2_current"
+	}
+	if role != "v1" && role != "v2_reference" && role != "v2_current" {
+		return "", fmt.Errorf("target %s has unsupported role %q", target.ID, target.Role)
+	}
+	if inferred != "" && inferred != role && target.ID != "v2" {
+		return "", fmt.Errorf("target %s role %q does not match its ID", target.ID, target.Role)
+	}
+	return role, nil
+}
+
+func validateTargetIdentity(target LiveTargetConfig, role string, targetCount int) error {
+	if targetCount == 3 {
+		if target.ID != role || target.Role != role {
+			return fmt.Errorf("three-target config requires exact id and role %q (got id=%q role=%q)", role, target.ID, target.Role)
+		}
+		return nil
+	}
+	if target.ID != "v1" && target.ID != "v2" {
+		return fmt.Errorf("two-target config requires exact v1/v2 IDs (got %q)", target.ID)
+	}
+	if target.ID == "v1" && target.Role != "" && target.Role != "v1" {
+		return fmt.Errorf("two-target config requires exact v1 role when specified (got %q)", target.Role)
+	}
+	if target.ID == "v2" && target.Role != "" && role != "v2_current" {
+		return fmt.Errorf("two-target v2 must map only to current role (got %q)", target.Role)
+	}
+	return nil
+}
+
+func targetEnvPrefix(role string) string {
+	return "BENCH_" + strings.ToUpper(role) + "_"
+}
+
+func targetEnvPrefixForConfig(target LiveTargetConfig, role string) string {
+	// Preserve the original two-target v1/v2 environment contract. Explicit
+	// v2_current IDs/roles use their distinct three-target namespace.
+	if target.ID == "v2" && strings.TrimSpace(target.Role) == "" {
+		return "BENCH_V2_"
+	}
+	return targetEnvPrefix(role)
+}
+
+func validateNetworkNamespaceFields(target LiveTargetConfig) error {
+	if (target.NetworkNamespaceID == "") != (target.InitialNamespaceID == "") {
+		return fmt.Errorf("target %s requires both network namespace identities", target.ID)
+	}
+	for name, value := range map[string]string{
+		"network_namespace_id":         target.NetworkNamespaceID,
+		"initial_network_namespace_id": target.InitialNamespaceID,
+	} {
+		if value == "" {
+			continue
+		}
+		if !strings.HasPrefix(value, "net:[") || !strings.HasSuffix(value, "]") {
+			return fmt.Errorf("target %s %s must use net:[inode] format", target.ID, name)
+		}
+		digits := strings.TrimSuffix(strings.TrimPrefix(value, "net:["), "]")
+		if digits == "" {
+			return fmt.Errorf("target %s %s inode is empty", target.ID, name)
+		}
+		if _, err := strconv.ParseUint(digits, 10, 64); err != nil {
+			return fmt.Errorf("target %s %s inode is invalid", target.ID, name)
 		}
 	}
 	return nil
@@ -249,18 +366,18 @@ func (s LiveTargetConfig) driverConfig(ids FixtureIDs, fixturePath, fixtureHash,
 	if e = json.Unmarshal(metaBytes, &meta); e != nil {
 		return benchharness.TargetConfig{}, fmt.Errorf("metadata evidence %s: %w", s.ID, e)
 	}
-	if meta.Revision != s.Revision || meta.DatabaseName != s.DatabaseName || meta.PostgresVersion != s.PostgresVersion || meta.InvalidationMode != s.InvalidationMode || meta.DirtyTreeHash != s.DirtyTreeHash || s.ID == "v1" && !strings.EqualFold(meta.OutputPlugin, "wal2json") {
+	role, _ := canonicalTargetRole(s)
+	if meta.Revision != s.Revision || meta.DatabaseName != s.DatabaseName || meta.PostgresVersion != s.PostgresVersion || meta.InvalidationMode != s.InvalidationMode || meta.DirtyTreeHash != s.DirtyTreeHash || role == "v1" && !strings.EqualFold(meta.OutputPlugin, "wal2json") {
 		return benchharness.TargetConfig{}, fmt.Errorf("metadata evidence mismatch for %s", s.ID)
 	}
 	kind := benchharness.TargetV2
-	if s.ID == "v1" {
+	if role == "v1" {
 		kind = benchharness.TargetV1
 	}
 	transport := benchharness.TransportWebSocket
 	if s.Transport == "sse" {
 		transport = benchharness.TransportSSE
 	}
-	valueAttr := ids.ValueAttrID
 	probeMutation := benchharness.Mutation{Sequence: 1, EventID: "bench/probe/1", Kind: benchharness.MutationAppend, EntityID: s.ProbeEntityID, Bucket: 0, Rank: 1, Marker: "bench/probe"}
 	tc := benchharness.TargetConfig{ID: s.ID, Kind: kind, Transport: transport, SessionURL: s.SessionURL, HealthURL: s.HealthURL, AdminBaseURL: s.AdminBaseURL, AppID: s.AppID, Revision: s.Revision, DirtyTreeHash: s.DirtyTreeHash, DatabaseName: s.DatabaseName, PostgresVersion: s.PostgresVersion, InvalidationMode: s.InvalidationMode, OutputPlugin: s.OutputPlugin, Versions: s.Versions, AdminToken: os.Getenv(s.AdminTokenEnv), RefreshToken: os.Getenv(s.RefreshTokenEnv), AttributeAliases: map[string]string{
 		"value":  ids.ValueAttrID,
@@ -294,10 +411,9 @@ func (s LiveTargetConfig) driverConfig(ids FixtureIDs, fixturePath, fixtureHash,
 		if !ok {
 			return errors.New("probe entity is absent after mutation")
 		}
-		// The probe must assert the UUID-backed transaction attribute. Query
-		// labels are a separate namespace and must never be used as a
-		// transaction/provisioning fallback.
-		value, ok := entity.Attributes[valueAttr]
+		// Transactions use the UUID-backed attribute above, while the wire
+		// decoder intentionally normalizes that UUID to its semantic key.
+		value, ok := entity.Attributes["value"]
 		if !ok || fmt.Sprint(value) != probeMutation.Marker {
 			return errors.New("probe entity marker was not observed after mutation")
 		}
@@ -478,12 +594,14 @@ func buildLiveCollectors(spec LiveTargetConfig) *LiveCollectors {
 	if set.Interval <= 0 {
 		set.Interval = time.Second
 	}
+	namespace := NetworkNamespaceProvenance{NamespaceID: spec.NetworkNamespaceID, InitialNamespaceID: spec.InitialNamespaceID}
 	if spec.ProcessPIDFile != "" {
 		set.Process = ProcProcessCollector{
-			PIDFile:        spec.ProcessPIDFile,
-			ExecutablePath: spec.ProcessExecutablePath,
-			ExpectedHash:   spec.ProcessExecutableSHA256,
-			EndpointURLs:   []string{spec.SessionURL, spec.HealthURL, spec.RuntimeEndpoint},
+			PIDFile:          spec.ProcessPIDFile,
+			ExecutablePath:   spec.ProcessExecutablePath,
+			ExpectedHash:     spec.ProcessExecutableSHA256,
+			EndpointURLs:     []string{spec.SessionURL, spec.HealthURL, spec.RuntimeEndpoint},
+			NetworkNamespace: namespace,
 		}
 		set.Provenance["process"] = "supported: pid file=" + spec.ProcessPIDFile
 	} else if spec.ProcessPIDEnv == "" {
@@ -497,10 +615,11 @@ func buildLiveCollectors(spec LiveTargetConfig) *LiveCollectors {
 			set.Provenance["process"] = "failed: " + reason
 		} else {
 			set.Process = ProcProcessCollector{
-				PID:            pid,
-				ExecutablePath: spec.ProcessExecutablePath,
-				ExpectedHash:   spec.ProcessExecutableSHA256,
-				EndpointURLs:   []string{spec.SessionURL, spec.HealthURL, spec.RuntimeEndpoint},
+				PID:              pid,
+				ExecutablePath:   spec.ProcessExecutablePath,
+				ExpectedHash:     spec.ProcessExecutableSHA256,
+				EndpointURLs:     []string{spec.SessionURL, spec.HealthURL, spec.RuntimeEndpoint},
+				NetworkNamespace: namespace,
 			}
 			set.Provenance["process"] = "supported: /proc pid=" + strconv.Itoa(pid)
 		}

@@ -162,6 +162,45 @@ func TestLiveCollectorsSupportedAndPlanPhases(t *testing.T) {
 	}
 }
 
+func TestParsePrometheusSupportsUnlabeledAndLabeledSamples(t *testing.T) {
+	metrics := parsePrometheus("go_memstats_alloc_bytes 10\n" +
+		"go_gc_duration_seconds_count{quantile=\"0.5\"} 2\n")
+	if metrics["go_memstats_alloc_bytes"] != 10 {
+		t.Fatalf("unlabeled sample parsed incorrectly: %+v", metrics)
+	}
+	if metrics["go_gc_duration_seconds_count"] != 2 {
+		t.Fatalf("labeled sample parsed incorrectly: %+v", metrics)
+	}
+	if _, ok := metrics["go_memstats_alloc_bytes 10"]; ok {
+		t.Fatalf("sample value leaked into metric name: %+v", metrics)
+	}
+}
+
+func TestClassifyLedgerEvidence(t *testing.T) {
+	tests := []struct {
+		name string
+		rows []benchharness.LedgerRow
+		want FailureClass
+	}{
+		{name: "pass", rows: []benchharness.LedgerRow{{Coverage: benchharness.CoverageExact}}, want: Pass},
+		{name: "missing coverage", rows: []benchharness.LedgerRow{{Coverage: benchharness.CoverageMissing}}, want: TargetSemanticFailure},
+		{name: "target", rows: []benchharness.LedgerRow{{Coverage: benchharness.CoverageMissing, ErrorClass: benchharness.ErrorTarget}}, want: TargetSemanticFailure},
+		{name: "infrastructure", rows: []benchharness.LedgerRow{{Coverage: benchharness.CoverageMissing, ErrorClass: benchharness.ErrorInfrastructure}}, want: HarnessDefect},
+		{name: "protocol precedence", rows: []benchharness.LedgerRow{{Coverage: benchharness.CoverageMissing, ErrorClass: benchharness.ErrorInfrastructure}, {Coverage: benchharness.CoverageMissing, ErrorClass: benchharness.ErrorProtocol}}, want: TargetProtocolFailure},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, failure := classifyLedgerEvidence(tt.rows)
+			if got != tt.want {
+				t.Fatalf("classification = %q, want %q", got, tt.want)
+			}
+			if got != Pass && failure == "" {
+				t.Fatal("failed ledger classification lacks failure reason")
+			}
+		})
+	}
+}
+
 func TestLoadLiveConfigAndDefaultBuilders(t *testing.T) {
 	dir := t.TempDir()
 	meta := map[string]any{"revision": "abc", "database_name": "instant_bench_v1", "postgres_version": "17.1", "invalidation_mode": "direct", "output_plugin": "wal2json", "dirty_tree_hash": "clean"}
@@ -243,7 +282,7 @@ func TestProbeValidatorRequiresMutationChangeAndMarker(t *testing.T) {
 		t.Fatal("unchanged probe was accepted")
 	}
 	changed := unchanged
-	changed.Full = &benchharness.Materialized{QueryID: "probe-query", Entities: map[string]benchharness.Entity{"probe-id": {ID: "probe-id", Attributes: map[string]any{"00000000-0000-0000-0000-000000000001": "bench/probe"}}}}
+	changed.Full = &benchharness.Materialized{QueryID: "probe-query", Entities: map[string]benchharness.Entity{"probe-id": {ID: "probe-id", Attributes: map[string]any{"value": "bench/probe"}}}}
 	if err := tc.Probe.Validate(initial, changed); err != nil {
 		t.Fatalf("valid probe rejected: %v", err)
 	}

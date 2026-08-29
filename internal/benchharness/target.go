@@ -390,6 +390,75 @@ func (d *TargetDriver) Provision(ctx context.Context) error {
 	return d.cfg.Provisioner(ctx)
 }
 
+const defaultSemanticReadinessTimeout = 20 * time.Second
+
+// waitForSemanticReadiness retries only after an observed semantic failure.
+// The bounded backoff avoids hammering a target that is still completing its
+// provision/reset work, while the caller's context and timeout keep the
+// readiness barrier finite. A successful check is the only completion signal;
+// this is not a fixed sleep masquerading as readiness.
+func waitForSemanticReadiness(ctx context.Context, timeout time.Duration, check func(context.Context) error) error {
+	if check == nil {
+		return errors.New("semantic readiness check is not configured")
+	}
+	if timeout <= 0 {
+		timeout = defaultSemanticReadinessTimeout
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		lastErr = check(checkCtx)
+		if lastErr == nil {
+			return nil
+		}
+		if err := checkCtx.Err(); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return fmt.Errorf("semantic readiness deadline after %s: %w", timeout, lastErr)
+		}
+		delay := 10 * time.Millisecond
+		for i := 0; i < attempt && delay < 250*time.Millisecond; i++ {
+			delay *= 2
+		}
+		if delay > 250*time.Millisecond {
+			delay = 250 * time.Millisecond
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-checkCtx.Done():
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return fmt.Errorf("semantic readiness deadline after %s: %w", timeout, lastErr)
+		case <-timer.C:
+		}
+	}
+}
+
+// waitForTargetReadiness proves both independently observed metadata and the
+// semantic fixture state before a run advances to qualification or ramp.
+// verifyCleanFixture specifically rejects a lingering qualification probe and
+// compares every frozen query against the prefix-zero oracle.
+func (d *TargetDriver) waitForTargetReadiness(ctx context.Context, fixture Fixture, runID string, evidence *evidenceCollector) error {
+	timeout := d.cfg.Probe.Timeout
+	if timeout <= 0 {
+		timeout = defaultSemanticReadinessTimeout
+	}
+	var attempt int
+	return waitForSemanticReadiness(ctx, timeout, func(checkCtx context.Context) error {
+		attempt++
+		if err := d.VerifyMetadata(checkCtx); err != nil {
+			return fmt.Errorf("metadata not ready: %w", err)
+		}
+		if err := d.verifyCleanFixture(checkCtx, fixture, fmt.Sprintf("%s-%d", runID, attempt), evidence); err != nil {
+			return err
+		}
+		return nil
+	})
+}
+
 // Prepare provisions/seeds the target through the caller-owned callback and
 // then runs the independent qualification gate. It does not reset anything;
 // destructive database setup remains in soaksetup's guarded owner.
@@ -668,18 +737,25 @@ func (s *TargetSession) Subscribe(ctx context.Context, query Query) (Refresh, er
 	if _, err := s.currentSession().Send(ctx, SessionMessage{Op: "add-query", ClientEventID: eventID, Payload: map[string]any{"q": q}}); err != nil {
 		return Refresh{}, err
 	}
-	if _, err := s.await(ctx, func(ev SessionEvent) bool {
+	queryAck, err := s.await(ctx, func(ev SessionEvent) bool {
 		return (ev.Op == "add-query-ok" || ev.Op == "add-query-exists") && ev.ClientEventID == eventID
-	}); err != nil {
-		return Refresh{}, err
-	}
-	ev, err := s.await(ctx, func(ev SessionEvent) bool { return ev.Op == "refresh-ok" || ev.Op == "refresh-ok-delta" })
+	})
 	if err != nil {
 		return Refresh{}, err
 	}
-	refresh, err := s.decodeRefresh(ev, query.ID)
+	refresh, available, err := decodeAddQuerySnapshot(queryAck, query.ID, s.driver.cfg.AttributeAliases, wireQuery)
 	if err != nil {
 		return Refresh{}, err
+	}
+	if !available {
+		ev, err := s.await(ctx, func(ev SessionEvent) bool { return ev.Op == "refresh-ok" || ev.Op == "refresh-ok-delta" })
+		if err != nil {
+			return Refresh{}, err
+		}
+		refresh, err = s.decodeRefresh(ev, query.ID)
+		if err != nil {
+			return Refresh{}, err
+		}
 	}
 	if refresh.Full == nil {
 		return Refresh{}, &UnsupportedTargetError{Check: "initial_snapshot", Reason: "initial add-query refresh did not provide a full materialized baseline"}
@@ -1118,7 +1194,13 @@ func classifyFrame(ev SessionEvent, protocolErr string) FrameClass {
 func (d *TargetDriver) verifyCleanFixture(ctx context.Context, fixture Fixture, runID string, evidence *evidenceCollector) error {
 	oracle := NewPrefixOracle(fixture)
 	probeID := d.cfg.Probe.Mutation.EntityID
-	for i, query := range fixture.Queries {
+	client, err := d.openSession(ctx, runID+"-clean-check", evidence)
+	if err != nil {
+		return fmt.Errorf("clean fixture open session: %w", err)
+	}
+	defer client.Close()
+	snapshots := make(map[string]Materialized)
+	for _, query := range fixture.Queries {
 		expected, err := oracle.Materialize(query.ID, 0)
 		if err != nil {
 			return fmt.Errorf("clean fixture query %q oracle: %w", query.ID, err)
@@ -1128,20 +1210,27 @@ func (d *TargetDriver) verifyCleanFixture(ctx context.Context, fixture Fixture, 
 				return fmt.Errorf("clean fixture query %q includes reserved qualification probe entity %q", query.ID, probeID)
 			}
 		}
-		clientID := fmt.Sprintf("%s-clean-check-%d", runID, i)
-		client, err := d.openSession(ctx, clientID, evidence)
+		wireQuery, err := d.cfg.QueryBuilder(query)
 		if err != nil {
-			return fmt.Errorf("clean fixture query %q open session: %w", query.ID, err)
+			return fmt.Errorf("clean fixture query %q build: %w", query.ID, err)
 		}
-		actualRefresh, snapshotErr := client.Subscribe(ctx, query)
-		_ = client.Close()
-		if snapshotErr != nil {
-			return fmt.Errorf("clean fixture query %q snapshot: %w", query.ID, snapshotErr)
+		wireKey, err := json.Marshal(wireQuery)
+		if err != nil {
+			return fmt.Errorf("clean fixture query %q encode: %w", query.ID, err)
 		}
-		if actualRefresh.Full == nil {
-			return fmt.Errorf("clean fixture query %q snapshot was not full", query.ID)
+		actual, ok := snapshots[string(wireKey)]
+		if !ok {
+			actualRefresh, snapshotErr := client.Subscribe(ctx, query)
+			if snapshotErr != nil {
+				return fmt.Errorf("clean fixture query %q snapshot: %w", query.ID, snapshotErr)
+			}
+			if actualRefresh.Full == nil {
+				return fmt.Errorf("clean fixture query %q snapshot was not full", query.ID)
+			}
+			actual = *actualRefresh.Full
+			snapshots[string(wireKey)] = actual
 		}
-		actual := *actualRefresh.Full
+		actual.QueryID = query.ID
 		if probeID != "" {
 			if _, present := actual.Entities[probeID]; present {
 				return fmt.Errorf("clean fixture query %q still contains qualification probe entity %q", query.ID, probeID)
@@ -1176,12 +1265,17 @@ func (d *TargetDriver) Run(ctx context.Context, plan RunPlan) (TargetRunArtifact
 	if len(plan.Workload.Fixture.Queries) == 0 || plan.Workload.Subscribers != len(plan.Workload.Fixture.Queries) {
 		return base, &UnsupportedTargetError{Check: "run", Reason: "workload must contain one frozen query per subscriber"}
 	}
+	evidence := newEvidenceCollector(d.cfg.EvidenceBudget)
 	// Provision is deliberately per attempt. A caller may use it to create a
-	// fresh database/process; qualification then proves that exact attempt.
+	// fresh database/process; the semantic barrier proves that exact attempt
+	// has reached the clean fixture before qualification starts.
 	if err := d.Provision(ctx); err != nil {
 		return base, err
 	}
-	evidence := newEvidenceCollector(d.cfg.EvidenceBudget)
+	if err := d.waitForTargetReadiness(ctx, plan.Workload.Fixture, plan.RunID+"-pre-qualification-clean-check", evidence); err != nil {
+		base.RawFrames, base.Evidence = evidence.snapshot()
+		return base, fmt.Errorf("pre-qualification readiness: %w", err)
+	}
 	qualification, err := d.qualify(ctx, evidence)
 	base.Qualification = qualification
 	if err != nil {
@@ -1193,12 +1287,9 @@ func (d *TargetDriver) Run(ctx context.Context, plan RunPlan) (TargetRunArtifact
 	if err := d.Provision(ctx); err != nil {
 		return base, fmt.Errorf("restore clean fixture after qualification: %w", err)
 	}
-	if err := d.VerifyMetadata(ctx); err != nil {
-		return base, fmt.Errorf("post-qualification metadata verification: %w", err)
-	}
-	if err := d.verifyCleanFixture(ctx, plan.Workload.Fixture, plan.RunID, evidence); err != nil {
+	if err := d.waitForTargetReadiness(ctx, plan.Workload.Fixture, plan.RunID+"-post-qualification-clean-check", evidence); err != nil {
 		base.RawFrames, base.Evidence = evidence.snapshot()
-		return base, fmt.Errorf("post-qualification clean fixture verification: %w", err)
+		return base, fmt.Errorf("post-qualification readiness: %w", err)
 	}
 
 	clients := make([]*TargetSession, 0, len(plan.Workload.Fixture.Queries))
@@ -1409,21 +1500,7 @@ func (d *TargetDriver) Run(ctx context.Context, plan RunPlan) (TargetRunArtifact
 			}
 			return nil
 		},
-		FinalSnapshot: func(ctx context.Context, recipient, queryID string) (Materialized, error) {
-			for _, query := range plan.Workload.Fixture.Queries {
-				if query.ID != queryID {
-					continue
-				}
-				fresh, err := d.openSession(ctx, recipient+"-final", evidence)
-				if err != nil {
-					return Materialized{}, err
-				}
-				snapshot, snapshotErr := fresh.FinalSnapshot(ctx, query)
-				_ = fresh.Close()
-				return snapshot, snapshotErr
-			}
-			return Materialized{}, fmt.Errorf("unknown final-snapshot query %q", queryID)
-		},
+		FinalSnapshot: d.finalSnapshotter(plan.Workload.Fixture, evidence),
 	})
 	stop()
 	rawFrames, evidenceStats := evidence.snapshot()
@@ -1449,6 +1526,45 @@ func (d *TargetDriver) Run(ctx context.Context, plan RunPlan) (TargetRunArtifact
 		runErr = fmt.Errorf("target evidence budget exceeded: observed %d frames/%d bytes (limits %d/%d)", evidenceStats.ObservedFrames, evidenceStats.ObservedBytes, evidenceStats.MaxFrames, evidenceStats.MaxBytes)
 	}
 	return base, runErr
+}
+
+func (d *TargetDriver) finalSnapshotter(fixture Fixture, evidence *evidenceCollector) func(context.Context, string, string) (Materialized, error) {
+	type cachedSnapshot struct {
+		materialized Materialized
+		err          error
+	}
+	queries := make(map[string]Query, len(fixture.Queries))
+	for _, query := range fixture.Queries {
+		queries[query.ID] = query
+	}
+	cache := make(map[string]cachedSnapshot)
+	return func(ctx context.Context, recipient, queryID string) (Materialized, error) {
+		query, ok := queries[queryID]
+		if !ok {
+			return Materialized{}, fmt.Errorf("unknown final-snapshot query %q", queryID)
+		}
+		wireQuery, err := d.cfg.QueryBuilder(query)
+		if err != nil {
+			return Materialized{}, fmt.Errorf("final snapshot query %q build: %w", queryID, err)
+		}
+		wireKey, err := json.Marshal(wireQuery)
+		if err != nil {
+			return Materialized{}, fmt.Errorf("final snapshot query %q encode: %w", queryID, err)
+		}
+		cached, ok := cache[string(wireKey)]
+		if !ok {
+			fresh, openErr := d.openSession(ctx, recipient+"-final", evidence)
+			if openErr != nil {
+				cached.err = openErr
+			} else {
+				cached.materialized, cached.err = fresh.FinalSnapshot(ctx, query)
+				_ = fresh.Close()
+			}
+			cache[string(wireKey)] = cached
+		}
+		cached.materialized.QueryID = queryID
+		return cached.materialized, cached.err
+	}
 }
 
 func waitPhase(ctx context.Context, duration time.Duration) error {
@@ -1809,6 +1925,47 @@ func DecodeWireRefreshWithAliases(ev SessionEvent, queryID string, aliases map[s
 // sessions, where unrelated subscriptions can share a refresh envelope.
 func DecodeWireRefreshForQuery(ev SessionEvent, queryID string, wireQuery json.RawMessage, aliases map[string]string) (Refresh, error) {
 	return decodeWireRefresh(ev, queryID, aliases, wireQuery)
+}
+
+// V1 and V2 return the initial materialized result in add-query-ok. Some test
+// adapters emit a separate refresh frame instead, so absence of result is an
+// explicit fallback rather than a fabricated empty snapshot.
+func decodeAddQuerySnapshot(ev SessionEvent, queryID string, aliases map[string]string, expectedQuery json.RawMessage) (Refresh, bool, error) {
+	if ev.Op != "add-query-ok" {
+		return Refresh{}, false, nil
+	}
+	if len(bytes.TrimSpace(ev.Payload)) == 0 {
+		return Refresh{}, false, nil
+	}
+	var envelope struct {
+		Query     json.RawMessage `json:"q"`
+		Result    json.RawMessage `json:"result"`
+		Processed json.RawMessage `json:"processed-tx-id"`
+	}
+	if err := json.Unmarshal(ev.Payload, &envelope); err != nil {
+		return Refresh{}, true, fmt.Errorf("decode add-query snapshot: %w", err)
+	}
+	if len(envelope.Result) == 0 || rawIsNull(envelope.Result) {
+		return Refresh{}, false, nil
+	}
+	query := envelope.Query
+	if len(query) == 0 || rawIsNull(query) {
+		query = expectedQuery
+	}
+	if len(query) == 0 || rawIsNull(query) {
+		return Refresh{}, true, errors.New("add-query snapshot missing query")
+	}
+	payload, err := json.Marshal(struct {
+		Computations []wireComputation `json:"computations"`
+		Processed    json.RawMessage   `json:"processed-tx-id,omitempty"`
+	}{Computations: []wireComputation{{Query: query, Result: envelope.Result}}, Processed: envelope.Processed})
+	if err != nil {
+		return Refresh{}, true, err
+	}
+	ev.Op = "refresh-ok"
+	ev.Payload = payload
+	refresh, err := decodeWireRefresh(ev, queryID, aliases, expectedQuery)
+	return refresh, true, err
 }
 
 func decodeWireRefresh(ev SessionEvent, queryID string, aliases map[string]string, expectedQuery json.RawMessage) (Refresh, error) {
