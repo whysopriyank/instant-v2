@@ -36,6 +36,28 @@ func TestSchemaRoundTripAndMeasurementStates(t *testing.T) {
 	}
 }
 
+func TestRunSchemaRetainsIntegerSeedProperty(t *testing.T) {
+	_, sourceFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("could not locate test source")
+	}
+	b, err := os.ReadFile(filepath.Join(filepath.Dir(sourceFile), "..", "..", "benchmarks", "schema", "run.schema.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema struct {
+		Properties map[string]struct {
+			Type string `json:"type"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(b, &schema); err != nil {
+		t.Fatal(err)
+	}
+	if schema.Properties["seed"].Type != "integer" {
+		t.Fatalf("run schema seed property type=%q, want integer", schema.Properties["seed"].Type)
+	}
+}
+
 func TestArtifactWriterRedactsAndVerifies(t *testing.T) {
 	root := t.TempDir()
 	w, err := NewArtifactWriter(root, 1<<20)
@@ -808,6 +830,139 @@ func TestContractArtifactBudgetScalesBeyondDefault(t *testing.T) {
 	}
 	if w2000.MaxBytes <= w.MaxBytes {
 		t.Fatalf("2000 scale budget did not grow: 300=%d 2000=%d", w.MaxBytes, w2000.MaxBytes)
+	}
+}
+
+func TestContractEvidenceBudgetBindsWorkloadShapeAndManifest(t *testing.T) {
+	plan := Plan{SchemaVersion: SchemaVersion, Seed: 7, MeasureSeconds: 180}
+	hBudget, err := ContractEvidenceBudget("H-append", 300, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hBudget.MaxBytes <= 85_902_606_202 || hBudget.MaxBytes > benchharness.MaxAbsoluteEvidenceBytes {
+		t.Fatalf("H300 live budget is not bounded/admitting: %#v", hBudget)
+	}
+	xBudget, err := ContractEvidenceBudget("X-heterogeneous", 300, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if xBudget.MaxBytes >= hBudget.MaxBytes {
+		t.Fatalf("X300 budget ignored bucket cardinality: H=%d X=%d", hBudget.MaxBytes, xBudget.MaxBytes)
+	}
+	m := Manifest{Family: "H-append", SubscriberScale: 300}
+	if err := bindManifestEvidenceBudget(&m, plan); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateManifestEvidenceBudget(m, plan); err != nil {
+		t.Fatalf("bound evidence budget did not verify: %v", err)
+	}
+	m.EvidenceMaxBytes++
+	if err := validateManifestEvidenceBudget(m, plan); err == nil {
+		t.Fatal("tampered manifest evidence budget passed offline recomputation")
+	}
+}
+
+func TestContractEvidenceBudgetRejectsMutationCountOverflow(t *testing.T) {
+	plan := Plan{SchemaVersion: SchemaVersion, Seed: 7, MeasureSeconds: int(^uint(0) >> 1)}
+	if _, err := ContractEvidenceBudget("H-append", 300, plan); err == nil {
+		t.Fatal("overflowing live evidence mutation count was accepted")
+	}
+}
+
+func TestContractEvidenceBudgetMaximumFamilyScaleMatrixStaysUnderCeiling(t *testing.T) {
+	plan := Plan{SchemaVersion: SchemaVersion, Seed: 17, MeasureSeconds: 180}
+	for _, family := range []benchharness.Family{benchharness.FamilyH, benchharness.FamilyX, benchharness.FamilyM, benchharness.FamilyO, benchharness.FamilyS, benchharness.FamilyR, benchharness.FamilyC, benchharness.FamilyT} {
+		t.Run(string(family), func(t *testing.T) {
+			budget, err := ContractEvidenceBudget(string(family), 2000, plan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if budget.MaxBytes > benchharness.MaxAbsoluteEvidenceBytes {
+				t.Fatalf("maximum contract workload crossed evidence hard ceiling: %d", budget.MaxBytes)
+			}
+		})
+	}
+}
+
+func TestContractEvidenceBudgetTracksSignedBehaviorWindow(t *testing.T) {
+	canonical := Plan{SchemaVersion: SchemaVersion, Seed: 17, MeasureSeconds: 180}
+	short := Plan{SchemaVersion: SchemaVersion, Seed: 17, MeasureSeconds: 120}
+	canonicalBudget, err := ContractEvidenceBudget("R-reconnect", 300, canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := benchharness.NewWorkload(benchharness.FamilyR, 300, canonical.Seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directBudget, err := benchharness.EvidenceBudgetForWorkload(w, canonical.MeasureSeconds*8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if canonicalBudget != directBudget {
+		t.Fatalf("offline contract budget diverged from adapter workload budget: offline=%#v direct=%#v", canonicalBudget, directBudget)
+	}
+	shortBudget, err := ContractEvidenceBudget("R-reconnect", 300, short)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shortBudget.MaxBytes >= canonicalBudget.MaxBytes {
+		t.Fatalf("signed shorter R behavior window did not reduce lifecycle budget: canonical=%d short=%d", canonicalBudget.MaxBytes, shortBudget.MaxBytes)
+	}
+	tooLong := Plan{SchemaVersion: SchemaVersion, Seed: 17, MeasureSeconds: 360}
+	if _, err := ContractEvidenceBudget("R-reconnect", 300, tooLong); err == nil {
+		t.Fatal("signed R behavior window above canonical duration was accepted")
+	}
+}
+
+func TestPairOfflineReportRejectsOmittedOrForgedRunEvidenceBudget(t *testing.T) {
+	for name, mutate := range map[string]func(*Run){
+		"omitted": func(run *Run) {
+			run.EvidenceMaxFrames = 0
+			run.EvidenceMaxBytes = 0
+			run.EvidenceMaxRetained = 0
+		},
+		"forged": func(run *Run) { run.EvidenceMaxBytes++ },
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			writer, err := NewArtifactWriter(root, 1<<26)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner := PairRunner{
+				Writer: writer, Executor: SyntheticExecutor{},
+				Manifest: Manifest{SchemaVersion: SchemaVersion, BundleID: "budget-pair", PairID: "budget-pair", Family: "H-append", SubscriberScale: 300, Seed: 7, RunOrder: []string{"AB", "BA", "AB", "BA", "AB", "BA", "AB"}, StartedAt: time.Unix(1, 0).UTC()},
+				Plan:     Plan{SchemaVersion: SchemaVersion, Seed: 7, Pairs: 7},
+				Targets:  []Target{{SchemaVersion: SchemaVersion, ID: "v1", Role: "v1"}, {SchemaVersion: SchemaVersion, ID: "v2", Role: "v2_current"}},
+			}
+			if _, err := runner.Run(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(root, "runs", "budget-pair-01-v1", "run.json")
+			var run Run
+			b, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(b, &run); err != nil {
+				t.Fatal(err)
+			}
+			manifest, err := LoadManifest(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if run.EvidenceMaxFrames != manifest.EvidenceMaxFrames || run.EvidenceMaxBytes != manifest.EvidenceMaxBytes || run.EvidenceMaxRetained != manifest.EvidenceMaxRetained {
+				t.Fatalf("runner did not initialize run evidence budget: run=%+v manifest=%+v", run, manifest)
+			}
+			mutate(&run)
+			if err := os.WriteFile(path, mustJSON(run), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := reportFromArtifacts(root, false); err == nil {
+				t.Fatalf("offline pair report accepted %s run evidence budget", name)
+			}
+		})
 	}
 }
 

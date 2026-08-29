@@ -160,6 +160,9 @@ func (a BenchharnessDriver) RunTarget(ctx context.Context, spec RunSpec) (Execut
 	}
 	result.Run.MeasuredStartedAt = artifacts.MeasuredStartedAt
 	result.Run.MeasuredFinishedAt = artifacts.MeasuredFinishedAt
+	result.Run.EvidenceMaxFrames = artifacts.Evidence.MaxFrames
+	result.Run.EvidenceMaxBytes = artifacts.Evidence.MaxBytes
+	result.Run.EvidenceMaxRetained = artifacts.Evidence.MaxRetainedFrames
 	result.Run.PrimaryClass = Pass
 	if err != nil {
 		result.Run.PrimaryClass = classifyBenchError(err)

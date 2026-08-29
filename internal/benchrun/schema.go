@@ -58,6 +58,9 @@ type Manifest struct {
 	SchemaHash            string            `json:"schema_hash,omitempty"`
 	FixtureHash           string            `json:"fixture_hash,omitempty"`
 	ConfigHash            string            `json:"config_hash,omitempty"`
+	EvidenceMaxFrames     int64             `json:"evidence_max_frames,omitempty"`
+	EvidenceMaxBytes      int64             `json:"evidence_max_bytes,omitempty"`
+	EvidenceMaxRetained   int               `json:"evidence_max_retained_frames,omitempty"`
 	ArtifactMaxTotalBytes int64             `json:"artifact_max_total_bytes"`
 	ArtifactMaxFileBytes  int64             `json:"artifact_max_file_bytes"`
 	ContentRoot           string            `json:"content_root,omitempty"`
@@ -173,6 +176,9 @@ type Run struct {
 	WarmupMutations            int                    `json:"warmup_mutations,omitempty"`
 	ExpectedLedgerRows         int                    `json:"expected_ledger_rows,omitempty"`
 	ExpectedMutationRecipients int                    `json:"expected_mutation_recipients,omitempty"`
+	EvidenceMaxFrames          int64                  `json:"evidence_max_frames,omitempty"`
+	EvidenceMaxBytes           int64                  `json:"evidence_max_bytes,omitempty"`
+	EvidenceMaxRetained        int                    `json:"evidence_max_retained_frames,omitempty"`
 	ProtocolErrors             []string               `json:"protocol_errors,omitempty"`
 	BehaviorErrors             []string               `json:"behavior_errors,omitempty"`
 	CollectorProvenance        map[string]string      `json:"collector_provenance,omitempty"`

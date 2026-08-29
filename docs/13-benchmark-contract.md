@@ -451,7 +451,41 @@ Microbenchmarks and V2-only soaks remain separate evidence classes.
 
 ## 10. Budgets and failure taxonomy
 
-Budgets are explicit per invocation and stored in `config.json`. The
+Budgets are explicit per invocation and stored in `config.json`. The live
+evidence budget is derived from the signed workload shape and is persisted in
+the manifest; the offline verifier recomputes the same value and rejects an
+omitted or forged run limit. With `Q` frozen queries/subscribers, `M` measured
+plus warm-up mutations, `P` the per-mutation recipient upper bound, and `D`
+the behavior duration in seconds, the conservative frame bound is:
+
+```text
+F = M*P + 2*84*(2*Q + 2) + 4*Q + 4*Q + 21 + M
+    + (T ? 16 : 0)
+    + (R ? 4*ceil(Q/10)*floor(D/30) : 0)
+    + 128
+B = max(8 GiB, F*16 MiB)
+```
+
+`P` is `Q` except for verified canonical bucket-only X/C/T fixtures, where it
+is `ceil(Q/cohorts)`. The readiness term covers two bounded 20-second passes;
+each attempt includes the SSE handshake, protocol init, query acknowledgement,
+and snapshot. The measured-subscriber and final-snapshot terms cover four
+frames per query, qualification is 21 frames, T adds eight writer-session
+setups, and R charges four frames per scheduled reconnect. Arithmetic is
+overflow-checked and `B` must remain below the 64 TiB hard ceiling. The
+collector also enforces a 10,000,000-frame ceiling and retains at most 8,192
+frame metadata samples.
+
+An all-zero budget requests this derivation. A non-zero operator budget remains
+an explicit cap and may not exceed those hard ceilings; it is never silently
+raised. The signed manifest and every run carry the same non-zero triple, so a
+limit change cannot make an incomplete or forged bundle claim-eligible. H300
+full-snapshot traffic can exceed the historical 8 GiB floor because cumulative
+application payload is counted across all recipients and lifecycle frames;
+this does not imply equivalent memory or disk retention. Payloads are counted
+and hashed as they arrive, then released; only the bounded metadata sample is
+retained.
+
 The short CI gate uses 150 subscribers, 10 s ramp, 30 s warm-up, 60 s
 measurement at 8 tx/s, homogeneous append, final convergence within 20 s, at
 least 95% of scheduled writes submitted, all submitted writes resolved, zero

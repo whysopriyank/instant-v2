@@ -920,6 +920,9 @@ func bundleArtifactLimits(root string) (int64, int64, error) {
 	if plan.Seed != m.Seed || len(plan.Families) != 1 || canonicalBenchmarkFamily(plan.Families[0]) != canonicalBenchmarkFamily(m.Family) || len(plan.Scales) != 1 || plan.Scales[0] != m.SubscriberScale {
 		return defaults(errors.New("manifest and plan do not match"))
 	}
+	if err := validateManifestEvidenceBudget(m, plan); err != nil {
+		return defaults(err)
+	}
 	targetCount, err := manifestTargetCount(m)
 	if err != nil {
 		return defaults(err)

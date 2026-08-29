@@ -165,11 +165,29 @@ Set `INSTANT_BENCH_TRUSTED_APPROVAL_PUBLIC_KEY` when rerunning `benchreport`
 offline against an approved immutable raw bundle; without it, the report stays
 diagnostic.
 
-The safety budgets are 128 MiB per artifact/config/metadata file, 8 MiB per log,
-8,192 retained frame samples, and 10,000,000 frames or 8 GiB cumulative
-payload evidence per run. JSONL records are limited to 1 MiB per line. Budget
-overflow fails the attempt; an optional retained-sample cap does not erase its
-observed counts or stream digest.
+The safety budgets are 128 MiB per artifact/config/metadata file and 8 MiB per
+log. Live evidence uses a signed, workload-derived bound. For `Q`
+queries/subscribers, `M` measured plus warm-up mutations, recipient bound `P`,
+and behavior duration `D` seconds:
+
+```text
+F = M*P + 2*84*(2*Q + 2) + 4*Q + 4*Q + 21 + M
+    + (T ? 16 : 0)
+    + (R ? 4*ceil(Q/10)*floor(D/30) : 0)
+    + 128
+B = max(8 GiB, F*16 MiB)
+```
+
+`P=Q` is the safe default; only verified canonical bucket-only X/C/T fixtures
+use `P=ceil(Q/cohorts)`. The derived byte bound is overflow-checked and must
+stay below 64 TiB. Independent hard ceilings remain 10,000,000 frames and
+8,192 retained frame-metadata samples. An all-zero budget requests derivation;
+an explicit non-zero operator cap is preserved and never raised. The manifest
+stores the triple and offline verification recomputes it for every run.
+H300 may therefore exceed the old 8 GiB floor for legitimate cumulative
+full-snapshot payload traffic; payloads are counted/hashed and released rather
+than retained in memory. JSONL records remain limited to 1 MiB per line, and
+budget overflow fails the attempt without erasing observed counts or digest.
 
 ## Qualification and metrics
 

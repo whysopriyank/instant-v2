@@ -74,6 +74,61 @@ func TestPairRunnerThreeTargetModeWritesTwentyOneRunsAndTwoComparisons(t *testin
 	}
 }
 
+func TestThreeTargetOfflineReportRejectsOmittedOrForgedRunEvidenceBudget(t *testing.T) {
+	for name, mutate := range map[string]func(*Run){
+		"omitted": func(run *Run) {
+			run.EvidenceMaxFrames = 0
+			run.EvidenceMaxBytes = 0
+			run.EvidenceMaxRetained = 0
+		},
+		"forged": func(run *Run) { run.EvidenceMaxBytes++ },
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			writer, err := NewArtifactWriter(root, 1<<28)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner := PairRunner{
+				Writer: writer, Executor: SyntheticExecutor{},
+				Manifest: Manifest{SchemaVersion: SchemaVersion, BundleID: "budget-triad", PairID: "budget-triad", Family: "H-append", SubscriberScale: 300, Seed: 17, StartedAt: time.Unix(1, 0).UTC()},
+				Plan:     Plan{SchemaVersion: SchemaVersion, Seed: 17, Pairs: 7},
+				Targets: []Target{
+					{SchemaVersion: SchemaVersion, ID: "v1", Role: "v1", Revision: "v1-sha"},
+					{SchemaVersion: SchemaVersion, ID: "v2_reference", Role: "v2_reference", Revision: "v2-reference-sha"},
+					{SchemaVersion: SchemaVersion, ID: "v2_current", Role: "v2_current", Revision: "v2-current-sha"},
+				},
+			}
+			if _, err := runner.Run(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(root, "runs", "budget-triad-01-v1", "run.json")
+			var run Run
+			b, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(b, &run); err != nil {
+				t.Fatal(err)
+			}
+			manifest, err := LoadManifest(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if run.EvidenceMaxFrames != manifest.EvidenceMaxFrames || run.EvidenceMaxBytes != manifest.EvidenceMaxBytes || run.EvidenceMaxRetained != manifest.EvidenceMaxRetained {
+				t.Fatalf("runner did not initialize run evidence budget: run=%+v manifest=%+v", run, manifest)
+			}
+			mutate(&run)
+			if err := os.WriteFile(path, mustJSON(run), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := reportFromArtifacts(root, false); err == nil {
+				t.Fatalf("offline triad report accepted %s run evidence budget", name)
+			}
+		})
+	}
+}
+
 type qualificationFailureExecutor struct {
 	SyntheticExecutor
 }
@@ -121,5 +176,21 @@ func TestPairRunnerThreeTargetModeRetainsHistoricalQualificationFailure(t *testi
 		if _, err := os.Stat(filepath.Join(root, "targets", id+".json")); err != nil {
 			t.Fatalf("target qualification artifact %s: %v", id, err)
 		}
+	}
+	manifest, err := LoadManifest(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failedRunPath := filepath.Join(root, "runs", "three-01-v2_reference", "run.json")
+	failedRunBytes, err := os.ReadFile(failedRunPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var failedRun Run
+	if err := json.Unmarshal(failedRunBytes, &failedRun); err != nil {
+		t.Fatal(err)
+	}
+	if failedRun.PrimaryClass != SetupInvalid || failedRun.EvidenceMaxFrames != manifest.EvidenceMaxFrames || failedRun.EvidenceMaxBytes != manifest.EvidenceMaxBytes || failedRun.EvidenceMaxRetained != manifest.EvidenceMaxRetained {
+		t.Fatalf("qualification-failed run lost bound evidence budget: run=%+v manifest=%+v", failedRun, manifest)
 	}
 }

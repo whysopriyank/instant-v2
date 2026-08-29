@@ -111,6 +111,9 @@ func (r *PairRunner) Run(ctx context.Context) (Summary, error) {
 	if r.Now == nil {
 		r.Now = time.Now
 	}
+	if err := bindManifestEvidenceBudget(&r.Manifest, r.Plan); err != nil {
+		return Summary{}, err
+	}
 	totalBudget, fileBudget, err := ContractArtifactBudget(r.Manifest.Family, r.Manifest.SubscriberScale, r.Plan)
 	if err != nil {
 		return Summary{}, err
@@ -221,7 +224,7 @@ func (r *PairRunner) Run(ctx context.Context) (Summary, error) {
 				return Summary{}, fmt.Errorf("target %s not provided", targetID)
 			}
 			attemptPairID := fmt.Sprintf("%s-%02d", r.Manifest.PairID, attempt+1)
-			run := Run{SchemaVersion: SchemaVersion, ID: fmt.Sprintf("%s-%s", attemptPairID, targetID), PairID: attemptPairID, TargetID: targetID, Family: r.Manifest.Family, Scale: r.Manifest.SubscriberScale, Seed: r.Plan.Seed, StartedAt: r.Now().UTC(), PrimaryClass: Pass}
+			run := Run{SchemaVersion: SchemaVersion, ID: fmt.Sprintf("%s-%s", attemptPairID, targetID), PairID: attemptPairID, TargetID: targetID, Family: r.Manifest.Family, Scale: r.Manifest.SubscriberScale, Seed: r.Plan.Seed, StartedAt: r.Now().UTC(), PrimaryClass: Pass, EvidenceMaxFrames: r.Manifest.EvidenceMaxFrames, EvidenceMaxBytes: r.Manifest.EvidenceMaxBytes, EvidenceMaxRetained: r.Manifest.EvidenceMaxRetained}
 			var result ExecutionResult
 			var executeErr error
 			if qualificationFailed[target.ID] {
@@ -242,6 +245,11 @@ func (r *PairRunner) Run(ctx context.Context) (Summary, error) {
 				} else if run.PrimaryClass == "" {
 					run.PrimaryClass = Pass
 				}
+			}
+			if run.EvidenceMaxFrames == 0 && run.EvidenceMaxBytes == 0 && run.EvidenceMaxRetained == 0 {
+				run.EvidenceMaxFrames = r.Manifest.EvidenceMaxFrames
+				run.EvidenceMaxBytes = r.Manifest.EvidenceMaxBytes
+				run.EvidenceMaxRetained = r.Manifest.EvidenceMaxRetained
 			}
 			run.SchemaVersion = SchemaVersion
 			run.ID = fmt.Sprintf("%s-%s", attemptPairID, targetID)
@@ -330,6 +338,9 @@ func (r *PairRunner) runThreeTarget(ctx context.Context) (Summary, error) {
 	}
 	r.Manifest.TargetOrder = append([]ScheduleBlock(nil), order.Blocks...)
 	r.Manifest.RunOrder = append([]string(nil), order.Order...)
+	if err := bindManifestEvidenceBudget(&r.Manifest, r.Plan); err != nil {
+		return Summary{}, err
+	}
 	totalBudget, fileBudget, err := ContractArtifactBudgetForTargets(r.Manifest.Family, r.Manifest.SubscriberScale, r.Plan, len(r.Targets))
 	if err != nil {
 		return Summary{}, err
@@ -412,7 +423,7 @@ func (r *PairRunner) runThreeTarget(ctx context.Context) (Summary, error) {
 		attemptPairID := fmt.Sprintf("%s-%02d", r.Manifest.PairID, blockIndex+1)
 		for _, targetID := range block.Order {
 			target := byID[targetID]
-			run := Run{SchemaVersion: SchemaVersion, ID: fmt.Sprintf("%s-%s", attemptPairID, targetID), PairID: attemptPairID, TargetID: targetID, TargetRevision: target.Revision, ScheduleBlock: block.Index, Family: r.Manifest.Family, Scale: r.Manifest.SubscriberScale, Seed: r.Plan.Seed, StartedAt: r.Now().UTC(), PrimaryClass: Pass}
+			run := Run{SchemaVersion: SchemaVersion, ID: fmt.Sprintf("%s-%s", attemptPairID, targetID), PairID: attemptPairID, TargetID: targetID, TargetRevision: target.Revision, ScheduleBlock: block.Index, Family: r.Manifest.Family, Scale: r.Manifest.SubscriberScale, Seed: r.Plan.Seed, StartedAt: r.Now().UTC(), PrimaryClass: Pass, EvidenceMaxFrames: r.Manifest.EvidenceMaxFrames, EvidenceMaxBytes: r.Manifest.EvidenceMaxBytes, EvidenceMaxRetained: r.Manifest.EvidenceMaxRetained}
 			var result ExecutionResult
 			var executeErr error
 			if qualificationFailed[targetID] {
@@ -433,6 +444,11 @@ func (r *PairRunner) runThreeTarget(ctx context.Context) (Summary, error) {
 				} else if run.PrimaryClass == "" {
 					run.PrimaryClass = Pass
 				}
+			}
+			if run.EvidenceMaxFrames == 0 && run.EvidenceMaxBytes == 0 && run.EvidenceMaxRetained == 0 {
+				run.EvidenceMaxFrames = r.Manifest.EvidenceMaxFrames
+				run.EvidenceMaxBytes = r.Manifest.EvidenceMaxBytes
+				run.EvidenceMaxRetained = r.Manifest.EvidenceMaxRetained
 			}
 			run.SchemaVersion = SchemaVersion
 			run.ID = fmt.Sprintf("%s-%s", attemptPairID, targetID)
@@ -495,6 +511,70 @@ func ContractArtifactBudget(family string, scale int, plan Plan) (int64, int64, 
 	return ContractArtifactBudgetForTargets(family, scale, plan, 2)
 }
 
+// ContractEvidenceBudget computes the deterministic per-run live evidence
+// budget from the same signed workload/plan inputs used by the artifact
+// contract. It is persisted in the manifest so offline verification can
+// reject a bundle whose run-level limit was changed after authorization.
+func ContractEvidenceBudget(family string, scale int, plan Plan) (benchharness.EvidenceBudget, error) {
+	workload, err := benchharness.NewWorkload(benchharness.Family(canonicalBenchmarkFamily(family)), scale, plan.Seed)
+	if err != nil {
+		return benchharness.EvidenceBudget{}, err
+	}
+	if plan.MeasureSeconds > 0 && (workload.Family == benchharness.FamilyR || workload.Family == benchharness.FamilyS) {
+		// S/R behavior follows the signed run window, which is also bounded by
+		// TargetDriver/Execute against the canonical workload duration.
+		if err := benchharness.ValidateBehaviorWindow(workload, plan.MeasureSeconds); err != nil {
+			return benchharness.EvidenceBudget{}, err
+		}
+		workload.DurationSeconds = plan.MeasureSeconds
+	}
+	mutations, err := contractMutationCount(workload, plan)
+	if err != nil {
+		return benchharness.EvidenceBudget{}, err
+	}
+	return benchharness.EvidenceBudgetForWorkloadWithWarmup(workload, mutations, plan.WarmupMutations)
+}
+
+func bindManifestEvidenceBudget(m *Manifest, plan Plan) error {
+	if m == nil {
+		return errors.New("manifest is required")
+	}
+	budget, err := ContractEvidenceBudget(m.Family, m.SubscriberScale, plan)
+	if err != nil {
+		return err
+	}
+	if (m.EvidenceMaxFrames != 0 && m.EvidenceMaxFrames != budget.MaxFrames) ||
+		(m.EvidenceMaxBytes != 0 && m.EvidenceMaxBytes != budget.MaxBytes) ||
+		(m.EvidenceMaxRetained != 0 && m.EvidenceMaxRetained != budget.MaxRetainedFrames) {
+		return errors.New("manifest evidence budget does not match contract")
+	}
+	m.EvidenceMaxFrames = budget.MaxFrames
+	m.EvidenceMaxBytes = budget.MaxBytes
+	m.EvidenceMaxRetained = budget.MaxRetainedFrames
+	return nil
+}
+
+func contractMutationCount(workload benchharness.Workload, plan Plan) (int, error) {
+	mutations := workload.Measured
+	if workload.Family == benchharness.FamilyT {
+		return 4096, nil
+	}
+	if mutations <= 0 {
+		if plan.MeasureSeconds <= 0 {
+			return 1, nil
+		}
+		total, err := safeContractMultiply(int64(plan.MeasureSeconds), 8)
+		if err != nil || total > int64(^uint(0)>>1) {
+			return 0, errors.New("contract mutation count overflow")
+		}
+		mutations = int(total)
+	}
+	if mutations <= 0 {
+		return 1, nil
+	}
+	return mutations, nil
+}
+
 // ContractArtifactBudgetForTargets derives limits for the number of target
 // runs in one seven-block schedule. Two-target callers retain the historical
 // ContractArtifactBudget behavior; three-target bundles reserve 21 runs.
@@ -506,12 +586,9 @@ func ContractArtifactBudgetForTargets(family string, scale int, plan Plan, targe
 	if err != nil {
 		return 0, 0, err
 	}
-	mutations := workload.Measured
-	if workload.Family != benchharness.FamilyT && mutations <= 0 {
-		mutations = plan.MeasureSeconds * 8
-	}
-	if mutations <= 0 {
-		mutations = 1
+	mutations, err := contractMutationCount(workload, plan)
+	if err != nil {
+		return 0, 0, err
 	}
 	rows, err := safeContractMultiply(int64(expectedLedgerCardinality(workload, mutations)), 1)
 	if err != nil {

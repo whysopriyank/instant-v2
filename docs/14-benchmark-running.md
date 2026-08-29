@@ -203,8 +203,8 @@ evidence.
 
 Raw ledger bundles can be large because every affected-recipient coverage is
 retained. JSONL is written atomically as a bounded stream rather than buffered
-in memory. With the default writer budget, the runner derives conservative
-per-file and whole-bundle limits from mutation, query, recipient, and 14-attempt
+in memory. With an all-zero evidence budget, the runner derives the signed
+per-run limit from mutation, query, recipient, lifecycle, and bounded retry
 cardinality; an explicit operator cap is never raised. Provision enough local
 disk for that derived matrix before starting a live run. Exceeding either bound
 fails the attempt and removes the partial artifact instead of truncating it.
@@ -232,13 +232,37 @@ offline verification environment and rerun `benchreport` against the immutable
 raw bundle. Without that key, the report remains diagnostic rather than a
 trusted claim artifact.
 
-The current safety budgets are explicit: each artifact/config/metadata file is
-limited to 128 MiB, individual log artifacts to 8 MiB, retained frame metadata
-to 8,192 frames, and cumulative evidence to 10,000,000 frames or 8 GiB of
-payload bytes per run. JSONL records are capped at 1 MiB per line. Exceeding a
-budget is a failed attempt, not truncation that can be treated as complete
-evidence; optional retained samples may be truncated while their cumulative
-counts and digest remain recorded.
+The live evidence budget is derived and signed with the manifest. For `Q`
+queries/subscribers, `M` measured plus warm-up mutations, recipient bound `P`,
+and behavior duration `D` seconds, the operator-level frame formula is:
+
+```text
+F = M*P + 2*84*(2*Q + 2) + 4*Q + 4*Q + 21 + M
+    + (T ? 16 : 0)
+    + (R ? 4*ceil(Q/10)*floor(D/30) : 0)
+    + 128
+B = max(8 GiB, F*16 MiB)
+```
+
+Use `P=Q` unless the fixture is a verified canonical bucket-only X/C/T
+assignment, where `P=ceil(Q/cohorts)`. The formula includes two 20-second
+readiness passes, SSE handshake/init frames, measured subscriptions, final
+snapshots, four-client qualification, T writer setup, R reconnects, and fixed
+control allowance. It is overflow-checked and fails closed above the 64 TiB
+hard byte ceiling. In addition, each run is capped at 10,000,000 frames and
+8,192 retained frame-metadata samples. An all-zero config budget derives this
+triple; any explicit non-zero operator cap is preserved and cannot be raised.
+The manifest stores the derived values, and offline verification recomputes
+them against each run, rejecting omission or forgery.
+
+This means H300 full-snapshot traffic may exceed the old 8 GiB floor: cumulative
+application payload is counted across recipients and lifecycle traffic, while
+payload bytes are hashed and released as they arrive. Only bounded metadata
+samples are retained, so a larger cumulative byte limit does not authorize
+unbounded memory retention. JSONL records are capped at 1 MiB per line.
+Exceeding a budget is a failed attempt, not truncation that can be treated as
+complete evidence; optional retained samples may be truncated while their
+cumulative counts and digest remain recorded.
 
 The checked-in performance workflow invokes only the synthetic pair mode,
 invokes `soak` for a bounded live V2 smoke, and invokes `benchreport` for

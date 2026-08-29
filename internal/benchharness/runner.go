@@ -104,6 +104,9 @@ type RunResult struct {
 // target receipts against the prefix oracle. It is deliberately not a pair
 // runner: cross-target order, aggregation, and reporting belong to WP5-B.
 func Execute(ctx context.Context, plan RunPlan, hooks RunHooks) (RunResult, error) {
+	if err := ValidateBehaviorWindow(plan.Workload, plan.BehaviorSeconds); err != nil {
+		return RunResult{}, err
+	}
 	if hooks.Submit == nil && hooks.SubmitWriter == nil {
 		return RunResult{}, fmt.Errorf("run submit hook is nil")
 	}

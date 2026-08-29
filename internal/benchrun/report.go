@@ -289,6 +289,44 @@ func validateRunEvidence(dir string, run Run) error {
 	return nil
 }
 
+func validateRunEvidenceBudget(run Run, manifest Manifest) error {
+	runLegacy := run.EvidenceMaxFrames == 0 && run.EvidenceMaxBytes == 0 && run.EvidenceMaxRetained == 0
+	manifestLegacy := manifest.EvidenceMaxFrames == 0 && manifest.EvidenceMaxBytes == 0 && manifest.EvidenceMaxRetained == 0
+	if runLegacy || manifestLegacy {
+		if runLegacy && manifestLegacy {
+			return nil
+		}
+		return fmt.Errorf("run %s evidence budget is not completely bound to the manifest", run.ID)
+	}
+	if run.EvidenceMaxFrames <= 0 || run.EvidenceMaxBytes <= 0 || run.EvidenceMaxRetained <= 0 {
+		return fmt.Errorf("run %s evidence budget is incomplete", run.ID)
+	}
+	if manifest.EvidenceMaxFrames <= 0 || manifest.EvidenceMaxBytes <= 0 || manifest.EvidenceMaxRetained <= 0 {
+		return fmt.Errorf("run %s carries evidence budget without manifest binding", run.ID)
+	}
+	if run.EvidenceMaxFrames != manifest.EvidenceMaxFrames || run.EvidenceMaxBytes != manifest.EvidenceMaxBytes || run.EvidenceMaxRetained != manifest.EvidenceMaxRetained {
+		return fmt.Errorf("run %s evidence budget does not match manifest", run.ID)
+	}
+	return nil
+}
+
+func validateManifestEvidenceBudget(manifest Manifest, plan Plan) error {
+	if manifest.EvidenceMaxFrames == 0 && manifest.EvidenceMaxBytes == 0 && manifest.EvidenceMaxRetained == 0 {
+		return nil
+	}
+	if manifest.EvidenceMaxFrames == 0 || manifest.EvidenceMaxBytes == 0 || manifest.EvidenceMaxRetained == 0 {
+		return errors.New("manifest evidence budget is incomplete")
+	}
+	budget, err := ContractEvidenceBudget(manifest.Family, manifest.SubscriberScale, plan)
+	if err != nil {
+		return fmt.Errorf("recompute evidence budget: %w", err)
+	}
+	if manifest.EvidenceMaxFrames != budget.MaxFrames || manifest.EvidenceMaxBytes != budget.MaxBytes || manifest.EvidenceMaxRetained != budget.MaxRetainedFrames {
+		return errors.New("manifest evidence budget does not match contract")
+	}
+	return nil
+}
+
 func validateProcessProvenance(dir string, run Run, target Target) error {
 	if target.ExecutableHash == "" {
 		return nil
@@ -590,6 +628,9 @@ func reportFromArtifacts(root string, verify bool) (Summary, error) {
 	if plan.Seed != m.Seed || len(plan.Families) != 1 || canonicalBenchmarkFamily(plan.Families[0]) != canonicalBenchmarkFamily(m.Family) || len(plan.Scales) != 1 || plan.Scales[0] != m.SubscriberScale {
 		return Summary{}, errors.New("benchmark plan does not match manifest")
 	}
+	if err := validateManifestEvidenceBudget(m, plan); err != nil {
+		return Summary{}, err
+	}
 	derivedTotal, derivedFile, budgetErr := ContractArtifactBudget(m.Family, m.SubscriberScale, plan)
 	if budgetErr != nil {
 		return Summary{}, fmt.Errorf("recompute artifact budget: %w", budgetErr)
@@ -655,6 +696,9 @@ func reportFromArtifacts(root string, verify bool) (Summary, error) {
 			return fmt.Errorf("invalid failure taxonomy in %s", path)
 		}
 		if e := validateRunEvidence(filepath.Dir(path), r); e != nil {
+			return e
+		}
+		if e := validateRunEvidenceBudget(r, m); e != nil {
 			return e
 		}
 		runIDs[r.ID] = true

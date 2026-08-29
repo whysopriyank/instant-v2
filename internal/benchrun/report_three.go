@@ -118,6 +118,9 @@ func reportThreeTargetArtifacts(root string, m Manifest) (Summary, error) {
 		if readErr = validateRunEvidence(filepath.Dir(path), run); readErr != nil {
 			return readErr
 		}
+		if readErr = validateRunEvidenceBudget(run, m); readErr != nil {
+			return readErr
+		}
 		for name, metric := range run.Measurements {
 			if readErr = ValidateMeasurement(metric); readErr != nil {
 				return fmt.Errorf("invalid measurement %s in %s: %w", name, path, readErr)
@@ -233,6 +236,9 @@ func validateThreeTargetSharedEvidence(root string, m Manifest) error {
 	}
 	if plan.Seed != m.Seed || len(plan.Families) != 1 || canonicalBenchmarkFamily(plan.Families[0]) != canonicalBenchmarkFamily(m.Family) || len(plan.Scales) != 1 || plan.Scales[0] != m.SubscriberScale {
 		return errors.New("benchmark plan does not match manifest")
+	}
+	if err := validateManifestEvidenceBudget(m, plan); err != nil {
+		return err
 	}
 	derivedTotal, derivedFile, err := ContractArtifactBudgetForTargets(m.Family, m.SubscriberScale, plan, len(threeTargetIDs))
 	if err != nil {
