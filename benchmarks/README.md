@@ -7,6 +7,19 @@ hardens collection and reporting; Wave 6 is the first comparative measurement
 wave. A bundle produced before Wave 6 is diagnostic evidence unless it passes
 the complete claim gate.
 
+For the credit-efficient V1 smoke, one-attempt triad smoke, detached full run,
+and checkpoint prompts, use
+[`docs/15-wave6-execution.md`](../docs/15-wave6-execution.md) and
+[`benchmarks/scripts/wave6-orchestrate.sh`](scripts/wave6-orchestrate.sh).
+The controller requires the canonical H-append/300 triad timings (30/30/60/180/30),
+proves the dedicated loopback-only Linux namespace, snapshots and rehashes its
+inputs from stable file descriptors, holds the adjacent output ownership lock
+through launch, caps/redacts controller logs, and validates exact 21-run
+execution progress without making a claim-eligibility decision. Linux artifact
+status reads are pinned to an opened bundle directory and reject symlink or
+replacement races. Linux output-lock creation is also dirfd-based with
+`O_CREAT|O_EXCL|O_NOFOLLOW`; a missing or unowned output lock is a status error.
+
 ## Prerequisites
 
 - Go version from `go.mod`.
@@ -95,11 +108,18 @@ must be reproducible with both targets unavailable.
 ## Live-config contract and fixed family limits
 
 The redacted example under `benchmarks/config/` shows the current strict JSON
-shape. Top-level `pair_id`, non-zero `seed`, `family`, positive `scale`,
+shape; the corresponding structural schemas are
+[`schema/live-config.schema.json`](schema/live-config.schema.json) and
+[`schema/fixture.schema.json`](schema/fixture.schema.json). Top-level `pair_id`, non-zero `seed`, `family`, positive `scale`,
 `output`, `authorization_signature`, and `fixture` are required for a live run.
 Query labels and transaction attribute UUIDs are separate: use `query_entity`, `query_bucket_attr`, and
-`query_rank_attr` for labels, and `value_attr_id`, `bucket_attr_id`, and
-`rank_attr_id` for provisioned UUID attribute IDs.
+`query_rank_attr` for query labels, `id_attr` for the provisioned identity
+attribute label, and `id_attr_id`, `value_attr_id`, `bucket_attr_id`, and
+`rank_attr_id` for provisioned UUID attribute IDs. The identity attribute is a
+unique cardinality-one blob attribute named `id`; its value is the entity UUID.
+The checked-in canonical UUID allocation reserves `...000100` for `id`,
+followed by `...000101`, `...000102`, and `...000103` for value, bucket, and
+rank.
 
 Each target requires `id`, `kind`, `transport`, loopback `session_url` and
 `health_url`, UUID `app_id`, reviewed `revision`, `database_name` with the
@@ -120,7 +140,10 @@ loopback admin/runtime endpoints and contains no token values.
 
 Before every provision, the runner verifies and reconstructs the canonical
 fixture, then passes its path/hash plus family, scale, and seed through fixed
-`BENCH_FIXTURE_*`, `BENCH_FAMILY`, `BENCH_SCALE`, and `BENCH_SEED` fields.
+`BENCH_FIXTURE_PATH`, `BENCH_FIXTURE_SHA256`, `BENCH_FIXTURE_ID_ATTR`,
+`BENCH_FIXTURE_ID_ATTR_ID`, `BENCH_FAMILY`, `BENCH_SCALE`, and `BENCH_SEED`
+fields. The provisioner must create the identity attribute and seed its value
+equal to each entity UUID before the benchmark opens subscriptions.
 `C-process-cold` must also configure an absolute `process_pid_file`; the
 provisioner atomically writes the fresh PID there and the collector rereads it
 for every measured boundary.
