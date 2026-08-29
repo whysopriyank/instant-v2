@@ -462,11 +462,14 @@ func TestNamespaceEvidenceRejectsExternalInterfacesAndRoutes(t *testing.T) {
 	if err := validateProcRoute(strings.Replace(route, "lo 00000000", "eth0 00000000", 1)); err == nil {
 		t.Fatal("external IPv4 route evidence was accepted")
 	}
-	ipv6 := "00000000000000000000000000000000 00 00000000000000000000000000000000 00 00000000000000000000000000000000 00000000 00000000 00000000 00000000 lo\n"
+	ipv6 := "00000000000000000000000000000000 00 00000000000000000000000000000000 00 00000000000000000000000000000000 ffffffff 00000001 00000000 00200200 lo\n"
 	if err := validateProcIPv6Route(ipv6); err != nil {
 		t.Fatal(err)
 	}
-	localV6 := strings.Replace(ipv6, strings.Repeat("0", 32)+" 00", strings.Repeat("0", 31)+"1 80", 1)
+	if err := validateProcIPv6Route(ipv6 + ipv6); err != nil {
+		t.Fatalf("duplicated kernel loopback IPv6 route rows were rejected: %v", err)
+	}
+	localV6 := "00000000000000000000000000000001 80 00000000000000000000000000000000 00 00000000000000000000000000000000 00000000 00000000 00000000 80200001 lo\n"
 	if err := validateProcIPv6Route(localV6); err != nil {
 		t.Fatalf("canonical IPv6 loopback route was rejected: %v", err)
 	}
@@ -484,9 +487,25 @@ func TestNamespaceEvidenceRejectsExternalLoopbackRoutes(t *testing.T) {
 	if err := validateProcRoute(v4); err == nil {
 		t.Fatal("arbitrary IPv4 loopback mask was accepted")
 	}
-	v6 := "00000000000000000000000000000001 00 00000000000000000000000000000000 00 00000000000000000000000000000000 00000000 00000000 00000000 00000000 lo\n"
+	v6 := "00000000000000000000000000000002 80 00000000000000000000000000000000 00 00000000000000000000000000000000 00000000 00000000 00000000 80200001 lo\n"
 	if err := validateProcIPv6Route(v6); err == nil {
 		t.Fatal("external IPv6 destination on lo was accepted")
+	}
+	v6 = "00000000000000000000000000000000 00 00000000000000000000000000000000 00 00000000000000000000000000000000 00000000 00000000 00000000 00200201 lo\n"
+	if err := validateProcIPv6Route(v6); err == nil {
+		t.Fatal("non-canonical IPv6 route flags were accepted")
+	}
+	v6 = "00000000000000000000000000000000 00 00000000000000000000000000000000 00 00000000000000000000000000000001 00000000 00000000 00000000 00200200 lo\n"
+	if err := validateProcIPv6Route(v6); err == nil {
+		t.Fatal("non-zero IPv6 route gateway was accepted")
+	}
+	v6 = "00000000000000000000000000000000 00 00000000000000000000000000000000 00 00000000000000000000000000000000 ffffff 00000000 00000000 00200200 lo\n"
+	if err := validateProcIPv6Route(v6); err == nil {
+		t.Fatal("short IPv6 route counter was accepted")
+	}
+	v6 = "00000000000000000000000000000001 80 00000000000000000000000000000000 00 00000000000000000000000000000000 00000000 00000000 00000000 00200200 lo\n"
+	if err := validateProcIPv6Route(v6); err == nil {
+		t.Fatal("default-route flags were accepted for the IPv6 local route")
 	}
 }
 

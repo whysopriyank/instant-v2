@@ -700,7 +700,7 @@ func validateProcIPv6Route(value string) error {
 			continue
 		}
 		fields := strings.Fields(line)
-		if len(fields) < 10 {
+		if len(fields) != 10 {
 			return errors.New("malformed IPv6 route evidence")
 		}
 		for _, index := range []int{0, 2, 4} {
@@ -713,7 +713,18 @@ func validateProcIPv6Route(value string) error {
 				}
 			}
 		}
-		for _, index := range []int{1, 3, 5, 6, 7, 8} {
+		for _, index := range []int{1, 3} {
+			if len(fields[index]) != 2 {
+				return errors.New("malformed IPv6 route prefix")
+			}
+			if _, err := strconv.ParseUint(fields[index], 16, 8); err != nil {
+				return errors.New("malformed IPv6 route prefix")
+			}
+		}
+		for _, index := range []int{5, 6, 7, 8} {
+			if len(fields[index]) != 8 {
+				return errors.New("malformed IPv6 route counter")
+			}
 			if _, err := strconv.ParseUint(fields[index], 16, 32); err != nil {
 				return errors.New("malformed IPv6 route counter")
 			}
@@ -723,12 +734,18 @@ func validateProcIPv6Route(value string) error {
 		}
 		zero := strings.Repeat("0", 32)
 		loopback := strings.Repeat("0", 31) + "1"
-		canonicalDestination := (fields[0] == zero && fields[1] == "00") || (fields[0] == loopback && fields[1] == "80")
-		if !canonicalDestination ||
+		defaultRoute := fields[0] == zero && fields[1] == "00"
+		localRoute := fields[0] == loopback && fields[1] == "80"
+		// Linux's proc ABI reports distinct flags for the null/default and
+		// local ::1 routes. Match the complete known values; accepting
+		// arbitrary bits or crossing route types would weaken the namespace
+		// proof.
+		canonicalFlags := (defaultRoute && fields[8] == "00200200") ||
+			(localRoute && fields[8] == "80200001")
+		if (!defaultRoute && !localRoute) ||
 			fields[2] != zero || fields[3] != "00" ||
-			fields[4] != strings.Repeat("0", 32) || fields[5] != "00000000" ||
-			fields[6] != "00000000" || fields[7] != "00000000" ||
-			(fields[8] != "00000000" && fields[8] != "00000001") {
+			fields[4] != zero ||
+			!canonicalFlags {
 			return errors.New("non-canonical IPv6 loopback route evidence")
 		}
 	}
