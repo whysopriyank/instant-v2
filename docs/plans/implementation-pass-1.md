@@ -24,7 +24,7 @@ actual executed test names/outcomes before claiming completion.
 | A1b | Persisted code has one successful concurrent consumer | auth worker | `TestQualityOAuthConsumptionConcurrent`: controlled DB contention; one winner and one persisted token | GREEN |
 | A1c | Invalid/expired callback state does not reach provider exchange | auth worker | Expiry and bindings/retry tests count provider calls and compare stored state | GREEN |
 | A2 | Existing supported built-ins resolve endpoints used by exchange | auth worker | Built-in resolution and local HTTP exchange tests | GREEN (Google/GitHub; Apple explicitly unsupported) |
-| Q4a | Adjacent exact numeric lookup values above 2^53 identify distinct entities | transaction worker | Actual lookup transaction changes only intended entity, exact readback | PENDING |
+| Q4a | Exact adjacent numeric lookups identify distinct entities; equivalent spellings share same-batch identity | transaction worker | `TestLookupRefResolutionPreservesLargeIntegers`, `TestHighLevelSameBatchEquivalentNumericLookupsReuseEntity`, normalization unit cases | GREEN |
 | M1 | Repeated gauge registration does not break scraping; runtime releases callbacks | metrics worker; root runtime wiring | Repeated scrape and lifecycle tests; `TestRunDatabaseReleasesGaugesIntegration` | GREEN |
 | G1a | Unset metrics address uses default; explicit empty disables it | config worker | `TestLoadMetricsAddressConfiguration`: empty case RED then all cases GREEN; existing serveHTTP guard inspected | GREEN |
 | G1b | Empty read URL means same DSN, not shared pool | config worker; root docs | Corrected comment; default marker assertion; unchanged runDatabase creates separate pools after DSN fallback | GREEN (inspection/comment correction) |
@@ -101,3 +101,14 @@ three leaked gauge families, then passed twice with race detection (root 2.389s)
 Metrics package race tests passed twice (root 1.737s). Bounded review also caught
 one retained callback in removed slice storage; clearing that slot and a focused
 storage assertion close the issue without a new lifecycle harness.
+
+Numeric lookup: the original float conversion made the second adjacent-integer
+lookup mutate the first entity. Exact decoding fixed that, but bounded review
+caught a same-batch regression: `1`, `1.0`, and `1e0` acquired separate cache keys
+and failed the unique index. Shared exact decimal canonicalization now preserves
+both distinct large integers and equivalent numeric identity, including nested
+values; it does not change original emitted application values. The real
+high-level lowering/transaction regression and original large-integer regression
+passed twice in the worker. Root repeated them with normalization and adjacent
+lookup checks on owned PostgreSQL (1.235s). Non-author review found no remaining
+blocker; package vet and hermetic checks passed.

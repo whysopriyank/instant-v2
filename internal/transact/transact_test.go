@@ -399,6 +399,167 @@ func TestLookupRefResolution(t *testing.T) {
 	}
 }
 
+func TestLookupRefResolutionPreservesLargeIntegers(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	appID, _, _ := seed(t, db)
+
+	var numberAttr, markerAttr platform.Attr
+	if err := db.WithTx(ctx, func(tx pgx.Tx) error {
+		var err error
+		numberAttr, err = platform.GetOrCreateAttr(ctx, tx, appID, "users", "accountNumber", "blob", "one", true, true)
+		if err != nil {
+			return err
+		}
+		markerAttr, err = platform.GetOrCreateAttr(ctx, tx, appID, "users", "lookupMarker", "blob", "one", false, true)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cat, err := platform.LoadAttrCatalog(ctx, db.Pool, appID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	values := []string{"9007199254740992", "9007199254740993"}
+	entities := [][16]byte{rand16(), rand16()}
+	for i, value := range values {
+		steps := parseSteps(t, mustJSON(t, []any{
+			"add-triple", uuidStr(entities[i]), uuidToStr(numberAttr.ID), json.RawMessage(value),
+		}))
+		if _, err := transact.Transact(ctx, db, cat, appID, steps, transact.Options{}, nil); err != nil {
+			t.Fatalf("seed exact numeric value %s: %v", value, err)
+		}
+	}
+
+	for i, value := range values {
+		lookupEID := []any{uuidToStr(numberAttr.ID), json.RawMessage(value)}
+		steps := parseSteps(t, mustJSON(t, []any{
+			"add-triple", lookupEID, uuidToStr(markerAttr.ID), fmt.Sprintf("matched-%d", i),
+		}))
+		if _, err := transact.Transact(ctx, db, cat, appID, steps, transact.Options{}, nil); err != nil {
+			t.Fatalf("lookup exact numeric value %s: %v", value, err)
+		}
+	}
+
+	for i, value := range values {
+		var stored string
+		if err := db.Pool.QueryRow(ctx, `
+			SELECT value::text FROM triples
+			 WHERE app_id=$1 AND entity_id=$2 AND attr_id=$3`,
+			appID, entities[i], numberAttr.ID).Scan(&stored); err != nil {
+			t.Fatalf("read exact numeric value %s: %v", value, err)
+		}
+		if stored != value {
+			t.Fatalf("stored numeric value for entity %d: got %q, want %q", i, stored, value)
+		}
+
+		rows, err := db.FetchTriples(ctx, appID, storage.FetchFilter{
+			EntityIDs: [][16]byte{entities[i]}, AttrIDs: [][16]byte{markerAttr.ID},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) != 1 || rows[0].Triple.V != fmt.Sprintf("matched-%d", i) {
+			t.Fatalf("lookup for %s mutated wrong entity: rows=%+v", value, rows)
+		}
+	}
+}
+
+func TestHighLevelSameBatchEquivalentNumericLookupsReuseEntity(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	appID, _, _ := seed(t, db)
+
+	var numberAttr, idAttr platform.Attr
+	markers := make([]platform.Attr, 3)
+	if err := db.WithTx(ctx, func(tx pgx.Tx) error {
+		var err error
+		numberAttr, err = platform.GetOrCreateAttr(ctx, tx, appID, "users", "accountNumber", "blob", "one", true, true)
+		if err != nil {
+			return err
+		}
+		idAttr, err = platform.GetOrCreateAttr(ctx, tx, appID, "users", "id", "blob", "one", true, true)
+		if err != nil {
+			return err
+		}
+		for i := range markers {
+			markers[i], err = platform.GetOrCreateAttr(ctx, tx, appID, "users", fmt.Sprintf("marker%d", i), "blob", "one", false, true)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cat, err := platform.LoadAttrCatalog(ctx, db.Pool, appID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hooks := transact.LowerHooks{
+		ResolveUnique: func(ctx context.Context, appID, attrID [16]byte, value json.RawMessage) ([16]byte, bool, error) {
+			var eid [16]byte
+			err := db.Pool.QueryRow(ctx, `
+				SELECT entity_id FROM triples
+				 WHERE app_id=$1 AND attr_id=$2 AND av AND value=$3::jsonb
+				 LIMIT 1`, appID, attrID, string(value)).Scan(&eid)
+			if err == pgx.ErrNoRows {
+				return [16]byte{}, false, nil
+			}
+			return eid, true, err
+		},
+	}
+	spellings := []string{"1", "1.0", "1e0"}
+	raw := make([]json.RawMessage, 0, len(spellings))
+	for i, spelling := range spellings {
+		raw = append(raw, mustJSON(t, []any{
+			"update", "users", []any{"accountNumber", json.RawMessage(spelling)},
+			map[string]any{fmt.Sprintf("marker%d", i): fmt.Sprintf("matched-%d", i)},
+		}))
+	}
+	lowered, err := transact.LowerAdminSteps(ctx, appID, cat, raw, hooks, false)
+	if err != nil {
+		t.Fatalf("lower high-level same-batch lookups: %v", err)
+	}
+	steps := parseSteps(t, lowered...)
+	if _, err := transact.Transact(ctx, db, cat, appID, steps, transact.Options{}, nil); err != nil {
+		t.Fatalf("transact high-level same-batch lookups: %v", err)
+	}
+
+	var entity [16]byte
+	var stored string
+	if err := db.Pool.QueryRow(ctx, `
+		SELECT entity_id, value::text FROM triples
+		 WHERE app_id=$1 AND attr_id=$2`, appID, numberAttr.ID).Scan(&entity, &stored); err != nil {
+		t.Fatalf("read minted lookup entity: %v", err)
+	}
+	if stored != "1" {
+		t.Fatalf("canonical lookup value: got %q, want %q", stored, "1")
+	}
+	for i, marker := range markers {
+		rows, err := db.FetchTriples(ctx, appID, storage.FetchFilter{
+			EntityIDs: [][16]byte{entity}, AttrIDs: [][16]byte{marker.ID},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) != 1 || rows[0].Triple.V != fmt.Sprintf("matched-%d", i) {
+			t.Fatalf("same-batch lookup marker %d was not attached to one entity: rows=%+v", i, rows)
+		}
+	}
+
+	var entityCount int
+	if err := db.Pool.QueryRow(ctx, `
+		SELECT count(*) FROM triples WHERE app_id=$1 AND attr_id=$2`, appID, idAttr.ID).Scan(&entityCount); err != nil {
+		t.Fatal(err)
+	}
+	if entityCount != 1 {
+		t.Fatalf("equivalent lookup spellings minted %d entities, want 1", entityCount)
+	}
+}
+
 func rand16() [16]byte {
 	var u [16]byte
 	rand.Read(u[:])

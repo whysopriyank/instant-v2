@@ -1,9 +1,13 @@
 package transact
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"math/big"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -78,12 +82,90 @@ func deref(s *string) string {
 }
 
 func normalizeValue(raw json.RawMessage) ([]byte, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
 	var v any
-	if err := json.Unmarshal(raw, &v); err != nil {
+	if err := dec.Decode(&v); err != nil {
 		return nil, err
 	}
-	b, _ := json.Marshal(v)
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("invalid JSON value: multiple values")
+		}
+		return nil, err
+	}
+	v = canonicalizeLookupValue(v)
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
 	return b, nil
+}
+
+func canonicalizeLookupValue(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		for key, value := range x {
+			x[key] = canonicalizeLookupValue(value)
+		}
+		return x
+	case []any:
+		for i, value := range x {
+			x[i] = canonicalizeLookupValue(value)
+		}
+		return x
+	case json.Number:
+		return canonicalNumber(x)
+	default:
+		return v
+	}
+}
+
+// canonicalNumber preserves exact decimal semantics for lookup cache keys:
+// equivalent spellings such as 1, 1.0, and 1e0 match, while adjacent large
+// integers remain distinct. Exponents are manipulated symbolically so a huge
+// exponent never expands into a large decimal string.
+func canonicalNumber(n json.Number) json.Number {
+	s := string(n)
+	sign := ""
+	if strings.HasPrefix(s, "-") {
+		sign, s = "-", s[1:]
+	}
+	exponent := new(big.Int)
+	if i := strings.IndexAny(s, "eE"); i >= 0 {
+		exponent.SetString(s[i+1:], 10)
+		s = s[:i]
+	}
+	if i := strings.IndexByte(s, '.'); i >= 0 {
+		exponent.Sub(exponent, big.NewInt(int64(len(s)-i-1)))
+		s = s[:i] + s[i+1:]
+	}
+	s = strings.TrimLeft(s, "0")
+	if s == "" {
+		return "0"
+	}
+	digits := strings.TrimRight(s, "0")
+	exponent.Add(exponent, big.NewInt(int64(len(s)-len(digits))))
+	point := new(big.Int).Add(exponent, big.NewInt(int64(len(digits))))
+	if point.IsInt64() && point.Int64() > -6 && point.Int64() <= 21 {
+		p := int(point.Int64())
+		switch {
+		case p <= 0:
+			s = "0." + strings.Repeat("0", -p) + digits
+		case p >= len(digits):
+			s = digits + strings.Repeat("0", p-len(digits))
+		default:
+			s = digits[:p] + "." + digits[p:]
+		}
+	} else {
+		s = digits[:1]
+		if len(digits) > 1 {
+			s += "." + digits[1:]
+		}
+		s += "e" + point.Sub(point, big.NewInt(1)).String()
+	}
+	return json.Number(sign + s)
 }
 
 func mustMarshalJSON(s string) json.RawMessage {
