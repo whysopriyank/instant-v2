@@ -6,6 +6,10 @@ production-readiness certification. Changes were still uncommitted when measured
 See the [execution ledger](../plans/quality-execution.md) for work ownership and
 the [corpus contracts](../../corpus/README.md) for exact replay boundaries.
 
+Later functional repairs and current status are tracked in
+[implementation pass 1](../plans/implementation-pass-1.md). The sizes and findings
+below remain the original snapshot, not a remeasurement after those fixes.
+
 ## Evidence and measurement
 
 - **VERIFIED**: an executed check and inspected result; scope is named below.

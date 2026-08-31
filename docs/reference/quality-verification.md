@@ -8,6 +8,8 @@ Later checkpoint: that implementation was committed as `eb88232` on
 [incident/delivery closure](quality-incident-followup.md#committed-development-checkpoint)
 for the user's pre-release disposition and fresh minimum commit checks. The
 results below remain historical evidence, not a new production-hardening run.
+Subsequent bounded fixes and their fresh evidence are recorded in
+[implementation pass 1](../plans/implementation-pass-1.md).
 
 Status: **PARTIAL against the full approved program**. The structural and
 targeted correctness work is implemented, with non-author Sol reviews. Final

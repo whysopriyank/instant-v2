@@ -5,6 +5,8 @@ Documentation is grouped by purpose, not by implementation wave.
 Current execution scope: [implementation first](plans/production-completion-roadmap.md#current-authority--implementation-first),
 Luna-heavy routing, focused tests and incremental local commits. Production and
 benchmark hardening require separate user approval; older plans remain history.
+See [implementation pass 1](plans/implementation-pass-1.md) for the current bounded
+fixes, evidence and commit checkpoint.
 
 - [Guides](guides/): running, verifying, benchmarking, and collaborating.
 - [Reference](reference/): protocol, package contracts, and benchmark policy.

@@ -6,8 +6,11 @@ Date: 2026-08-31. Baseline: the uncommitted quality-refactor tree based on
 Status: **IMPLEMENTATION FIRST; PRODUCTION/BENCHMARK HARDENING DEFERRED**.
 The user's latest 2026-08-31 instruction supersedes earlier all-Sol routing and
 release-first sequencing. The detailed waves below remain a backlog, not an
-instruction to run them now. Current work closes the development incident and
-commits the existing implementation; it does not begin all remaining repairs.
+instruction to run them now. The development incident and existing implementation
+checkpoint are closed. The subsequent approved bounded pass is tracked in
+[Functional implementation pass 1](implementation-pass-1.md): Q1/Q2, A1/A2,
+Q4a, M1 and G1 only. Its live ledger, not the historical packet descriptions below,
+records current implementation and test status.
 
 ## Current authority — implementation first
 
@@ -39,8 +42,8 @@ Checkpoint: existing implementation committed as `eb88232` on
 `codex/quality-implementation-checkpoint`; relevant pre-existing edits were
 included after Luna review, with generated/private artifacts excluded. The
 [incident record](../reference/quality-incident-followup.md#committed-development-checkpoint)
-contains the minimum checks. The next action is a bounded user-selected
-implementation slice, not automatic execution of the hardening roadmap.
+contains the minimum checks. Later functional fixes are incremental local commits;
+they do not authorize automatic execution of the remaining hardening roadmap.
 
 This completes implementation quality and its evidence, not a replacement service
 architecture. Read the [incident follow-up](../reference/quality-incident-followup.md)

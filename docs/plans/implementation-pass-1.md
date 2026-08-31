@@ -3,7 +3,7 @@
 Started 2026-08-31 from `3873335` on
 `codex/quality-implementation-checkpoint`, initially clean.
 
-Status: IN PROGRESS. The user approved proceeding with the implementation-first
+Status: COMPLETE for this bounded functional pass. The user approved proceeding with the implementation-first
 plan. Scope is concrete functional defects, minimum meaningful tests and
 incremental local commits. No production/benchmark/chaos/soak hardening, broad
 capture expansion or deployment is part of this pass.
@@ -141,3 +141,40 @@ The temporary copy remains at `/tmp/instant-query-baseline.br1gyI`; it is not
 tracked and contains no database data. The initial two-row ordering probe was
 insufficient because the SQL sentinel included both rows; the three-row probe
 exercises selection beyond that sentinel.
+
+## Final checkpoint
+
+| Commit | Component |
+|---|---|
+| `b401aa7` | Explicit-empty metrics configuration and read-pool comment |
+| `9516a35` | Atomic OAuth consumption, expiry and configured providers |
+| `53cd367` | Gauge registration ownership and runtime cleanup |
+| `c07707a` | Exact numeric SQL/cache lookup identity |
+| `cc0efea` | Query ordering, cursors, conjunction, relations and corpus promotion |
+
+Final integrated smoke passed:
+
+```sh
+INSTANT_TEST_INTEGRATION=0 DATABASE_URL= TEST_DATABASE_URL= go test ./... -short -count=1
+```
+
+This is hermetic package/build regression evidence, not a complete live suite.
+Live evidence above used `INSTANT_TEST_INTEGRATION=1` and the owned port-55490
+`DATABASE_URL`, with testkit creating and dropping unique databases. Final audit
+found zero leftover test databases, zero replication slots and zero public tables
+in that cluster's administrative `postgres` database. Its exact owned server was
+stopped successfully; `/tmp/instant-implementation-pg.qRGXIc` is retained. No
+default developer database or earlier incident resources were changed.
+
+Static/build checks: scoped vet, Go compilation through the selected tests,
+format checks and `git diff --check` passed. A new repository-wide linter campaign
+was not run; the linter is not on PATH. No real provider calls, v1 comparison,
+native Linux/container certification, soak, recovery or benchmarking was run.
+The broad roadmap remains open and requires separate approval for hardening.
+
+The initial working tree was clean. Only this pass's listed code, tests, promoted
+fixtures and status documentation were included. Changes are committed locally;
+no push, PR, tag or deployment was performed. Non-author reviews challenged the
+OAuth transaction boundary, numeric cache identity and query composition; their
+essential findings were repaired and focused checks rerun. The Q2 retrospective
+evidence limitation above remains explicit rather than being called test-first.
