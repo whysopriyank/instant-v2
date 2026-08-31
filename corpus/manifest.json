@@ -109,13 +109,13 @@
     },
     {
       "id": "ws.query.pagination",
-      "status": "gap",
-      "note": "Known gap: after-cursor request repeats the first page. Desired behavior retained in opt-in TestCorpusKnownGapIntegration/after-cursor."
+      "status": "covered",
+      "note": "Reusing the emitted first-page cursor returns the second entity; promoted unchanged desired outputs from the former known-gap fixture."
     },
     {
       "id": "ws.query.relations",
-      "status": "gap",
-      "note": "Known gap: aliased cardinality-one forward relation drops link/child data. Desired behavior retained in opt-in TestCorpusKnownGapIntegration/forward-relation."
+      "status": "covered",
+      "note": "Aliased cardinality-one forward relation retains reference and child projection; not full relation/permission parity."
     },
     {
       "id": "ws.reactive.delta",
@@ -431,6 +431,32 @@
       "surfaces": [
         "ws.transact.number"
       ],
+      "ordering": "ordered-frames"
+    },
+    {
+      "id": "17-after-cursor",
+      "path": "17-after-cursor.ndjson",
+      "owner": "internal/corpus",
+      "fixture": "posts",
+      "normalization": "canonical-v1",
+      "oracle": {
+        "kind": "regression",
+        "source": "Promoted unchanged desired v2 outputs from the known-gap after-cursor fixture. Not a captured v1 oracle."
+      },
+      "surfaces": ["ws.query.pagination"],
+      "ordering": "ordered-frames"
+    },
+    {
+      "id": "18-forward-relation",
+      "path": "18-forward-relation.ndjson",
+      "owner": "internal/corpus",
+      "fixture": "relations",
+      "normalization": "canonical-v1",
+      "oracle": {
+        "kind": "regression",
+        "source": "Promoted unchanged desired v2 outputs from the known-gap forward-relation fixture. Not a captured v1 oracle."
+      },
+      "surfaces": ["ws.query.relations"],
       "ordering": "ordered-frames"
     }
   ]

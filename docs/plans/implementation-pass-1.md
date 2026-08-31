@@ -16,10 +16,10 @@ actual executed test names/outcomes before claiming completion.
 
 | ID | Desired invariant / real path | Ownership | Planned observation / expected red | Status |
 |---|---|---|---|---|
-| Q1a | Emitted after-cursor advances query results | query worker; root owns corpus promotion | Existing known-gap `after-cursor` repeats first page; preserve desired expectation | PENDING |
-| Q1b | Aliased cardinality-one relation retains reference and child projection | query worker, explicit consumer handoff if needed | Existing known-gap `forward-relation` yields empty child/lost reference | PENDING |
-| Q2a | All supported predicates in an operator map apply together | query worker | Two-bound range returns intersection, independent of map iteration | PENDING |
-| Q2b | Requested global ordering precedes page selection | query worker | Seed IDs conflicting with requested field order, compare exact pages | PENDING |
+| Q1a | Emitted after-cursor advances query results | query worker; root owns corpus promotion | Unchanged desired fixture now normal scenario 17; combined cursor regression | GREEN |
+| Q1b | Aliased cardinality-one relation retains reference and child projection | query worker; root integration | Unchanged desired fixture now scenario 18; `TestForwardAliasProjectionAndRootIsolation` | GREEN |
+| Q2a | All supported predicates in an operator map apply together | query worker | `TestWhereMultiBoundConjunction`, shared coercion normalization | GREEN |
+| Q2b | Requested global ordering precedes page selection | query worker; root integration | `TestQueryFieldOrderCursorAndNulls`, cursor/domain/metadata cases | GREEN |
 | A1a | Expired OAuth code cannot issue a token | auth worker | `TestQualityOAuthConsumptionExpiry`: before/at/after expiry | GREEN |
 | A1b | Persisted code has one successful concurrent consumer | auth worker | `TestQualityOAuthConsumptionConcurrent`: controlled DB contention; one winner and one persisted token | GREEN |
 | A1c | Invalid/expired callback state does not reach provider exchange | auth worker | Expiry and bindings/retry tests count provider calls and compare stored state | GREEN |
@@ -65,6 +65,10 @@ inclusive cursor flags. Existing ID-only cursor tuples cannot recover a removed
 entity's previous field position; an absent explicit-order cursor returns a
 controlled query error rather than silently restarting page one. These choices
 do not establish v1 parity or add a new cursor format/server-created-at feature.
+Ordering retains the existing float64 numeric domain, or homogeneous strings,
+plus null/missing values. Mixed/unsupported/non-finite ordering values fail
+explicitly. Exact arbitrary-precision numeric sorting is not claimed by Q4a's
+separate exact-lookup fix.
 
 OAuth: preserve existing provider-exchange-failure local-state rollback and
 burn-before-token-issuance semantics. An independent Sol contract review requires
@@ -91,8 +95,6 @@ blocking defect. Rollback, expiry during exchange and single-connection tests ar
 additional post-fix guards, not separately claimed pre-fix failures. Local provider
 fixtures do not establish real Google/GitHub end-to-end acceptance.
 
-Other pending rows await their specific handoffs; completed rows do not close them.
-
 Metrics: repeated registration previously caused HTTP 500 on the second scrape
 test run. Registration now replaces a logical series and returns an idempotent,
 generation-aware close handle. The runtime releases all eight handles before its
@@ -112,3 +114,30 @@ high-level lowering/transaction regression and original large-integer regression
 passed twice in the worker. Root repeated them with normalization and adjacent
 lookup checks on owned PostgreSQL (1.235s). Non-author review found no remaining
 blocker; package vet and hermetic checks passed.
+
+Queries: the two existing desired-behavior corpus cases are now normal scenarios
+17 and 18, with every client input and expected server output unchanged. Root's
+post-integration query race run passed (3.475s), vet passed, and the full normal
+18-scenario PostgreSQL/WS corpus replay passed with race detection (6.063s).
+Manifest validation reports 18 authored v2 regressions, 22 narrow covered surfaces,
+seven gaps, two unsupported surfaces, and zero v1 captures. No capture/harness
+expansion was performed. Paging/ordering helpers now have one cohesive
+`internal/instaql/pagination.go` owner; no query-engine replacement.
+
+Independent Sol review caught combined-cursor indexing and optional/projected
+child attachment issues before acceptance. Root completed those bounded fixes,
+added focused regressions and received a final no-blocker review. The query worker
+was interrupted for an explicit handoff; its unfinished edits were completed and
+verified by the coordinator rather than accepted as green.
+
+Q2 evidence caveat: its new tests were not executed before the worker edited
+production code. Root subsequently built an isolated query-package copy from
+`3873335`, retaining current dependencies/testkit. The two-bound test returned
+two rows instead of one; the three-row global-order test selected `y` instead of
+`a` because SQL had already limited candidates. Both assertions passed unchanged
+against the current production files via a Go overlay (0.930s). This is a
+retrospective baseline/treatment comparison, not claimed test-first execution.
+The temporary copy remains at `/tmp/instant-query-baseline.br1gyI`; it is not
+tracked and contains no database data. The initial two-row ordering probe was
+insufficient because the SQL sentinel included both rows; the three-row probe
+exercises selection beyond that sentinel.

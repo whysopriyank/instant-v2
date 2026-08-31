@@ -65,7 +65,8 @@ func qseed(t *testing.T, db *storage.DB) ([16]byte, *platform.AttrCatalog, qids)
 		postTitle, e1 = mustAttr(t, tx, appID, "posts", "title", "blob", "one", false, true)
 		postViews, e2 = mustAttr(t, tx, appID, "posts", "views", "number", "one", false, true)
 		postTag, e3 = mustAttr(t, tx, appID, "posts", "tags", "blob", "many", false, false)
-		postAuthor, e4 = mustAttr(t, tx, appID, "posts", "author", "ref", "one", false, false)
+		postAuthor, e4 = platform.GetOrCreateAttrRev(context.Background(), tx, appID,
+			"posts", "author", strptr("users"), strptr("posts"), "ref", "one", false, false)
 		userName, e5 = mustAttr(t, tx, appID, "users", "name", "blob", "one", false, true)
 		commentTxt, e6 = mustAttr(t, tx, appID, "comments", "text", "blob", "one", false, true)
 		commentPost, e7 = platform.GetOrCreateAttrRev(context.Background(), tx, appID,
@@ -201,6 +202,30 @@ func TestQueryNestedJoin(t *testing.T) {
 	if len(comments) != 2 {
 		t.Fatalf("top-level comments %d want 2", len(comments))
 	}
+
+	// Reverse traversal must normalize the scalar posts.author ref as well as
+	// cardinality-many refs when grouping children back under users.
+	q, err = instaql.Coerce(map[string]any{
+		"users": map[string]any{"posts": map[string]any{}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err = ex.Run(ctx, q, cat, appID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var users []map[string]any
+	if err := json.Unmarshal(res.Data["users"], &users); err != nil {
+		t.Fatal(err)
+	}
+	if len(users) != 1 {
+		t.Fatalf("users %d want 1", len(users))
+	}
+	nestedPosts, ok := users[0]["posts"].([]any)
+	if !ok || len(nestedPosts) != 1 {
+		t.Fatalf("reverse scalar relation missing: %v", users[0])
+	}
 }
 
 func TestQueryPaginationAndAggregate(t *testing.T) {
@@ -314,6 +339,71 @@ func TestQueryPageInfoBoundaries(t *testing.T) {
 	}
 }
 
+func TestQueryFieldOrderCursorAndNulls(t *testing.T) {
+	db := qdb(t)
+	ctx := context.Background()
+	appID, cat, ids := qseed(t, db)
+	// The IDs deliberately sort opposite to their title values.
+	idA := [16]byte{1}
+	idB := [16]byte{2}
+	idC := [16]byte{3} // no title: exercises null ordering
+	idD := [16]byte{4} // ties with idB
+	if _, err := db.InsertTriples(ctx, appID, cat, []triple.Triple{
+		{E: idA, A: ids.title, V: "z"}, {E: idB, A: ids.title, V: "a"},
+		{E: idC, A: ids.views, V: int64(99)}, {E: idD, A: ids.title, V: "a"},
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	ex := &instaql.Executor{DB: db.Pool}
+	run := func(opts map[string]any) ([]map[string]any, *instaql.PageInfo, error) {
+		q, err := instaql.Coerce(map[string]any{"posts": map[string]any{"$": opts}})
+		if err != nil {
+			return nil, nil, err
+		}
+		res, err := ex.Run(ctx, q, cat, appID)
+		if err != nil {
+			return nil, nil, err
+		}
+		var rows []map[string]any
+		if err := json.Unmarshal(res.Data["posts"], &rows); err != nil {
+			return nil, nil, err
+		}
+		return rows, res.PageInfo, nil
+	}
+	asc := map[string]any{"order": map[string]any{"k": "title", "direction": "asc"}, "limit": float64(2)}
+	rows, info, err := run(asc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0]["id"] != uuidStr(idC) || rows[1]["id"] != uuidStr(idB) || info == nil || !info.HasNextPage {
+		t.Fatalf("ascending field order/nulls: rows=%v info=%+v", rows, info)
+	}
+	desc := map[string]any{"order": map[string]any{"k": "title", "direction": "desc"}, "limit": float64(2)}
+	rows, _, err = run(desc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0]["id"] != uuidStr(idA) || rows[1]["id"] != uuidStr(idB) {
+		t.Fatalf("descending field order/ties: rows=%v", rows)
+	}
+	if info == nil || info.EndCursor == nil {
+		t.Fatal("ascending page did not emit an end cursor")
+	}
+	page2 := map[string]any{"order": map[string]any{"k": "title", "direction": "asc"}, "limit": float64(2), "after": *info.EndCursor}
+	rows, info2, err := run(page2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0]["id"] != uuidStr(idD) || rows[1]["id"] != uuidStr(idA) || info2 == nil || info2.HasNextPage {
+		t.Fatalf("cursor continuation: rows=%v info=%+v", rows, info2)
+	}
+	_, _, err = run(map[string]any{"order": map[string]any{"k": "title", "direction": "asc"}, "after": "[\"99999999-9999-4999-8999-999999999999\",\"\",null]"})
+	var missing *instaql.ErrCursorNotFound
+	if !errors.As(err, &missing) {
+		t.Fatalf("missing explicit-order cursor error = %v, want ErrCursorNotFound", err)
+	}
+}
+
 func TestCoerceRejectsUnknowns(t *testing.T) {
 	for _, raw := range []map[string]any{
 		{"posts": map[string]any{"$": map[string]any{"bogus": 1}}},
@@ -324,6 +414,40 @@ func TestCoerceRejectsUnknowns(t *testing.T) {
 		if _, err := instaql.Coerce(raw); err == nil {
 			t.Fatalf("expected rejection for %v", raw)
 		}
+	}
+}
+
+func TestCoerceExpandsMultiOperatorWhere(t *testing.T) {
+	raw := map[string]any{"posts": map[string]any{"$": map[string]any{
+		"where": map[string]any{"score": map[string]any{"$lt": 10, "$gt": 1}},
+	}}}
+	q, err := instaql.Coerce(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(q.Forms) != 1 || q.Forms[0].Options == nil {
+		t.Fatalf("coerced query missing form/options: %+v", q)
+	}
+	conds := q.Forms[0].Options.Where
+	if len(conds) != 2 {
+		t.Fatalf("where conditions = %d, want 2: %+v", len(conds), conds)
+	}
+	for i, want := range []string{"$gt", "$lt"} {
+		if len(conds[i].Path) != 1 || conds[i].Path[0] != "score" {
+			t.Fatalf("condition %d path = %v, want score", i, conds[i].Path)
+		}
+		m, ok := conds[i].Value.(map[string]any)
+		if !ok || len(m) != 1 {
+			t.Fatalf("condition %d value = %#v, want singleton operator map", i, conds[i].Value)
+		}
+		if _, ok := m[want]; !ok {
+			t.Fatalf("condition %d value = %#v, want operator %s", i, m, want)
+		}
+	}
+	// Coercion must not rewrite the caller's raw query map.
+	where := raw["posts"].(map[string]any)["$"].(map[string]any)["where"].(map[string]any)
+	if len(where["score"].(map[string]any)) != 2 {
+		t.Fatalf("raw operator map was mutated: %#v", where["score"])
 	}
 }
 
@@ -446,6 +570,43 @@ func TestRangePredicatesAreTyped(t *testing.T) {
 	// Cross-type bound excludes instead of comparing as text.
 	if got := countWhere("views", map[string]any{"$gt": "x"}); got != 0 {
 		t.Fatalf("$gt cross-type: %d want 0", got)
+	}
+}
+
+func TestWhereMultiBoundConjunction(t *testing.T) {
+	db := qdb(t)
+	ctx := context.Background()
+	appID, cat, ids := qseed(t, db)
+	p1, p2, p3 := rand16(), rand16(), rand16()
+	if _, err := db.InsertTriples(ctx, appID, cat, []triple.Triple{
+		{E: p1, A: ids.title, V: "one"}, {E: p1, A: ids.views, V: int64(1)},
+		{E: p2, A: ids.title, V: "two"}, {E: p2, A: ids.views, V: int64(2)},
+		{E: p3, A: ids.title, V: "three"}, {E: p3, A: ids.views, V: int64(3)},
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	run := func(where map[string]any) int {
+		q, err := instaql.Coerce(map[string]any{"posts": map[string]any{"$": map[string]any{
+			"where": where,
+		}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := (&instaql.Executor{DB: db.Pool}).Run(ctx, q, cat, appID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var rows []map[string]any
+		if err := json.Unmarshal(res.Data["posts"], &rows); err != nil {
+			t.Fatal(err)
+		}
+		return len(rows)
+	}
+	if got := run(map[string]any{"views": map[string]any{"$gt": 1, "$lt": 3}}); got != 1 {
+		t.Fatalf("two bounds returned %d rows, want 1", got)
+	}
+	if got := run(map[string]any{"views": map[string]any{"$gt": 3, "$lt": 1}}); got != 0 {
+		t.Fatalf("contradictory bounds returned %d rows, want 0", got)
 	}
 }
 

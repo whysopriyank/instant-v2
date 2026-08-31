@@ -15,20 +15,23 @@ package instaql
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 )
 
 // Options is the coerced "$" map (db/instaql.clj option-map).
 type Options struct {
-	Where     []WhereCond
-	Order     *Order
-	Limit     *int
-	First     *int
-	Last      *int
-	Offset    *int
-	Before    []any // cursor tuple [eid, attrId, value, (inclusive?)]
-	After     []any
-	Aggregate string // "" | "count"
-	Fields    []string
+	Where           []WhereCond
+	Order           *Order
+	Limit           *int
+	First           *int
+	Last            *int
+	Offset          *int
+	Before          []any // cursor tuple [eid, attrId, value, (inclusive?)]
+	After           []any
+	BeforeInclusive bool
+	AfterInclusive  bool
+	Aggregate       string // "" | "count"
+	Fields          []string
 }
 
 // Order is {k, direction}; k == "serverCreatedAt" orders by triple created_at.
@@ -136,11 +139,24 @@ func coerceOptions(v any) (*Options, error) {
 			var conds []WhereCond
 			for path, wv := range wm {
 				if m, isMap := wv.(map[string]any); isMap {
+					ops := make([]string, 0, len(m))
 					for op := range m {
 						if !validOps[op] {
 							return nil, fmt.Errorf("where %q: unknown operator %q", path, op)
 						}
+						ops = append(ops, op)
 					}
+					if len(ops) == 0 {
+						return nil, fmt.Errorf("where %q: empty operator map", path)
+					}
+					// An operator map is a conjunction. Keep the original map
+					// untouched and expand it into deterministic singleton maps so
+					// every consumer of Options.Where receives every predicate.
+					sort.Strings(ops)
+					for _, op := range ops {
+						conds = append(conds, WhereCond{Path: splitPath(path), Value: map[string]any{op: m[op]}})
+					}
+					continue
 				}
 				conds = append(conds, WhereCond{Path: splitPath(path), Value: wv})
 			}
@@ -187,12 +203,24 @@ func coerceOptions(v any) (*Options, error) {
 				return nil, fmt.Errorf("before: %w", err)
 			}
 			o.Before = c
+		case "beforeInclusive":
+			b, ok := val.(bool)
+			if !ok {
+				return nil, fmt.Errorf("beforeInclusive must be boolean")
+			}
+			o.BeforeInclusive = b
 		case "after":
 			c, err := decodeCursor(val)
 			if err != nil {
 				return nil, fmt.Errorf("after: %w", err)
 			}
 			o.After = c
+		case "afterInclusive":
+			b, ok := val.(bool)
+			if !ok {
+				return nil, fmt.Errorf("afterInclusive must be boolean")
+			}
+			o.AfterInclusive = b
 		case "aggregate":
 			s, _ := val.(string)
 			if s != "count" {

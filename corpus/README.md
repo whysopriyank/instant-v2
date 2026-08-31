@@ -1,7 +1,7 @@
 # Corpus contracts and evidence
 
 `manifest.json` is the deterministic WS scenario, fixture, owner, normalization,
-and coverage inventory. The 16 default scenarios are **authored v2 regression
+and coverage inventory. The 18 default scenarios are **authored v2 regression
 expectations**, not recorded v1 oracles. The two original scenario paths remain
 stable. Scenarios are still NDJSON `meta`/`c2s`/`s2c` records; loading is recursive
 and sorted. Every scenario must start with one named meta record and contain
@@ -27,7 +27,7 @@ reset shared `public` schemas. Missing integration prerequisites fail; unit mode
 skips the live lane explicitly. Offline validation is not replay evidence.
 
 The fixture UUIDs/admin token are deterministic local test data, not credentials
-for a real service. `relations.json` is reserved for the opt-in reproduction below.
+for a real service. `relations.json` seeds the forward-relation regression.
 
 ## Coverage
 
@@ -49,33 +49,27 @@ for a real service. `relations.json` is reserved for the opt-in reproduction bel
 | 14 | Unique lookup changes the original entity |
 | 15 | Required-field retraction fails and preserves original data |
 | 16 | `9007199254740993` survives transaction, storage and query |
+| 17 | Reusing an emitted cursor advances to the second entity |
+| 18 | Aliased cardinality-one forward relation retains reference/child projection |
 
-The manifest distinguishes narrow covered surfaces from gaps: cursor advancement,
-aliased forward relations, full cardinality/merge/cascade matrix, dynamic permission
+The manifest records 22 narrowly covered surfaces, seven gaps and two unsupported
+surfaces, with zero v1 captures. Remaining gaps include the full
+cardinality/merge/cascade matrix, dynamic permission
 bindings/fallbacks, token auth, multi-client room fanout, delta refresh, SSE and
 HTTP/SDK capture. Sync/stream acknowledgement placeholders and cross-node rooms
 are explicitly unsupported, not asserted as implemented parity.
 
-## Known desired-behavior reproductions (not passing corpus)
+## Promoted query regressions
 
-These inputs/desired outputs are retained under
-`internal/corpus/testdata/known-gaps/`, outside default corpus discovery:
+The former `after-cursor` and `forward-relation` known-gap cases now run as
+scenarios 17 and 18 in the normal integration replay. Their client inputs and
+expected server outputs are unchanged; only paths and suite metadata changed.
+The old opt-in runner was removed, so default integration runs cannot silently
+skip these repaired contracts. Historical red evidence remains in the older
+quality reports; fresh execution is recorded in
+[implementation pass 1](../docs/plans/implementation-pass-1.md).
 
-- `after-cursor`: reusing the emitted first-page cursor should return the second
-  entity. The current executor repeats the first page instead.
-- `forward-relation`: `posts.author` (cardinality one, target `users`) should retain
-  the reference and child projection. The current coercion/executor produces an
-  empty `author` node and drops the reference.
-
-The coordinator explicitly deferred query-engine changes. To reproduce each
-gap, with `DATABASE_URL` set, run these commands separately. **A failing desired
-assertion is expected; neither failure nor default skipping counts as a pass.**
-
-```sh
-go test ./internal/corpus -list '^TestCorpusKnownGapIntegration$'
-INSTANT_CORPUS_KNOWN_GAPS=1 INSTANT_TEST_INTEGRATION=1 go test ./internal/corpus -run '^TestCorpusKnownGapIntegration/after-cursor$' -count=1 -v
-INSTANT_CORPUS_KNOWN_GAPS=1 INSTANT_TEST_INTEGRATION=1 go test ./internal/corpus -run '^TestCorpusKnownGapIntegration/forward-relation$' -count=1 -v
-```
+These two narrow fixtures do not establish general query or v1 parity.
 
 ## Canonicalization policy
 

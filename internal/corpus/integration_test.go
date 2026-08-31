@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -42,21 +41,6 @@ func TestCorpusReplayIntegration(t *testing.T) {
 	for _, entry := range manifest.Scenarios {
 		t.Run(entry.ID, func(t *testing.T) {
 			replayFixtureScenario(t, root, fixtures[entry.Fixture], root+"/"+entry.Path)
-		})
-	}
-}
-
-// Opt-in desired-behavior reproductions. These must FAIL until their owning
-// product package repairs the documented gaps; skipping them is not green evidence.
-func TestCorpusKnownGapIntegration(t *testing.T) {
-	if os.Getenv("INSTANT_CORPUS_KNOWN_GAPS") != "1" {
-		t.Skip("known gaps: opt in with INSTANT_CORPUS_KNOWN_GAPS=1; see corpus/README.md")
-	}
-	for _, tc := range []struct{ name, fixture string }{
-		{"after-cursor", "posts"}, {"forward-relation", "relations"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			replayFixtureScenario(t, "../../corpus", "fixtures/"+tc.fixture+".json", "testdata/known-gaps/"+tc.name+".ndjson")
 		})
 	}
 }
