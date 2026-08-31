@@ -109,14 +109,3 @@ func verifyPKCE(method, challenge, verifier string) bool {
 		return false
 	}
 }
-
-func expiredAt(created any, ttl time.Duration) bool {
-	if created == nil {
-		return false // legacy rows without timestamps never expire
-	}
-	t, ok := created.(time.Time)
-	if !ok {
-		return false
-	}
-	return time.Since(t) > ttl
-}

@@ -58,13 +58,16 @@ type ResolvedProvider struct {
 }
 
 // resolveProvider maps client-name to a concrete provider config. Custom OIDC
-// clients arrive later with apps.rules persistence (Phase 5); until then the
-// three builtins carry the flow.
+// clients arrive later with apps.rules persistence (Phase 5). Google and GitHub
+// support the userinfo flow; Apple's separate exchange path remains deferred.
 func (s *Service) resolveProvider(ctx context.Context, appID [16]byte, name string) (*ResolvedProvider, error) {
 	envClientID := envOr("INSTANT_OAUTH_"+strings.ToUpper(name)+"_CLIENT_ID", "")
 	envSecret := envOr("INSTANT_OAUTH_"+strings.ToUpper(name)+"_CLIENT_SECRET", "")
 	if p, ok := s.Providers[name]; ok {
 		return p, nil
+	}
+	if name == "apple" {
+		return nil, fmt.Errorf("authn: oauth provider %q is unsupported for authorization-code exchange", name)
 	}
 	base, ok := builtin[name]
 	if !ok {
@@ -73,6 +76,8 @@ func (s *Service) resolveProvider(ctx context.Context, appID [16]byte, name stri
 	out := &ResolvedProvider{
 		ClientID:     envClientID,
 		ClientSecret: envSecret,
+		TokenURL:     base.tokenURL,
+		UserInfo:     base.userInfo,
 		authURL:      base.authURL,
 		scope:        base.scope,
 	}
@@ -102,6 +107,9 @@ func exchangeUserInfo(ctx context.Context, p *ResolvedProvider, code, redirectUR
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("authn: token exchange failed: %s", resp.Status)
+	}
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	var tok struct {
 		AccessToken string `json:"access_token"`
@@ -126,6 +134,9 @@ func exchangeUserInfo(ctx context.Context, p *ResolvedProvider, code, redirectUR
 		return nil, err
 	}
 	defer func() { _ = uresp.Body.Close() }()
+	if uresp.StatusCode < http.StatusOK || uresp.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("authn: userinfo failed: %s", uresp.Status)
+	}
 	ubody, _ := io.ReadAll(io.LimitReader(uresp.Body, 1<<20))
 	var info map[string]any
 	if err := json.Unmarshal(ubody, &info); err != nil {

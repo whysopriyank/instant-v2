@@ -26,8 +26,8 @@ import (
 	"strings"
 
 	"github.com/instant-v2/instant-v2/internal/platform"
-	"github.com/instant-v2/instant-v2/internal/storage"
 	"github.com/instant-v2/instant-v2/internal/triple"
+	"github.com/jackc/pgx/v5"
 )
 
 // OAuthStartParams mirror GET /runtime/oauth/start query params.
@@ -45,11 +45,15 @@ type OAuthStartParams struct {
 // this is what stops the phishing chain where an attacker starts an OAuth
 // flow with their own redirect target and harvests the minted instant code.
 func (s *Service) validateRedirectOrigin(ctx context.Context, appID [16]byte, redirectURI string) error {
+	return validateRedirectOrigin(ctx, s.Catalogs.RowQ, appID, redirectURI)
+}
+
+func validateRedirectOrigin(ctx context.Context, q platform.RowQueryer, appID [16]byte, redirectURI string) error {
 	origin, ok := platform.OriginOf(redirectURI)
 	if !ok {
 		return fmt.Errorf("authn: invalid redirect_uri %q", redirectURI)
 	}
-	allowed, err := platform.RedirectOrigins(ctx, s.Catalogs.RowQ, appID)
+	allowed, err := platform.RedirectOrigins(ctx, q, appID)
 	if err != nil {
 		return fmt.Errorf("authn: redirect origins load: %w", err)
 	}
@@ -121,63 +125,65 @@ func (s *Service) OAuthCallback(ctx context.Context, appID [16]byte,
 	if err != nil {
 		return "", err
 	}
-	rows, err := s.DB.FetchTriples(ctx, appID, storage.FetchFilter{
-		AttrIDs: [][16]byte{a.state},
-		Value:   state,
-	})
-	if err != nil || len(rows) == 0 {
-		return "", ErrOAuthState
-	}
-	values, err := s.loadTriplesByEntity(ctx, appID, rows[0].Triple.E)
-	if err != nil {
-		return "", err
-	}
-	record, err := decodeOAuthRedirect(values, a)
-	if err != nil {
-		return "", err
-	}
-	if record.cookieHash != hashHex(cookieValue) {
-		return "", ErrOAuthState
-	}
-
-	prov, err := s.resolveProvider(ctx, appID, record.clientName)
-	if err != nil {
-		return "", err
-	}
-	// Defense in depth: the stored redirectURI was validated at start; the
-	// origin check runs again before anything is redirected there.
-	if err := s.validateRedirectOrigin(ctx, appID, record.redirectURI); err != nil {
-		return "", err
-	}
-	userInfo, err := exchangeUserInfo(ctx, prov, providerCode, record.redirectURI)
-	if err != nil {
-		return "", err
-	}
-	// Enforce the 10-minute $oauthRedirects expiry before consuming.
-	if expiredAt(s.entityCreatedAt(ctx, appID, rows[0].Triple.E), oauthStateTTL) {
-		return "", ErrOAuthState
-	}
-	if err := s.burnRedirect(ctx, appID, rows[0].Triple.E); err != nil {
-		return "", err
-	}
-
-	// Mint one-time code carrying the verified identity.
-	instantCode := randToken()
 	cat, err := s.catalog(ctx, appID)
 	if err != nil {
 		return "", err
 	}
-	codeEntity := newRandUUID()
-	uiJSON, err := json.Marshal(userInfo)
+	instantCode := randToken()
+	var record oauthRedirectRecord
+	err = s.DB.WithTx(ctx, func(tx pgx.Tx) error {
+		eid, values, created, err := lockOAuthRecord(ctx, tx, appID, a.state, state, ErrOAuthState)
+		if err != nil {
+			return err
+		}
+		record, err = decodeOAuthRedirect(values, a)
+		if err != nil {
+			return err
+		}
+		if record.cookieHash != hashHex(cookieValue) || !s.now().Before(created.Add(oauthStateTTL)) {
+			return ErrOAuthState
+		}
+		prov, err := s.resolveProvider(ctx, appID, record.clientName)
+		if err != nil {
+			return err
+		}
+		if err := validateRedirectOrigin(ctx, tx, appID, record.redirectURI); err != nil {
+			return err
+		}
+		// Hold the state lock through the bounded provider exchange. Failures
+		// leave local state retryable, though a provider may burn its own code.
+		userInfo, err := exchangeUserInfo(ctx, prov, providerCode, record.redirectURI)
+		if err != nil {
+			return err
+		}
+		if !s.now().Before(created.Add(oauthStateTTL)) {
+			return ErrOAuthState
+		}
+		uiJSON, err := json.Marshal(userInfo)
+		if err != nil {
+			return fmt.Errorf("authn: encode oauth userInfo: %w", err)
+		}
+		var consumed []triple.Triple
+		for aid, value := range values {
+			consumed = append(consumed, triple.Triple{E: eid, A: aid, V: value})
+		}
+		n, err := s.DB.DeleteTx(ctx, tx, appID, consumed)
+		if err != nil {
+			return err
+		}
+		if n != int64(len(consumed)) {
+			return ErrOAuthState
+		}
+		codeEntity := newRandUUID()
+		// Consuming the redirect and persisting its code share one commit.
+		return s.DB.SetTx(ctx, tx, appID, cat, []triple.Triple{
+			{E: codeEntity, A: a.oauthCodeHash, V: hashHex(instantCode)},
+			{E: codeEntity, A: a.oauthCC, V: record.challenge},
+			{E: codeEntity, A: a.oauthCCM, V: record.method},
+			{E: codeEntity, A: a.oauthUserInfo, V: string(uiJSON)},
+		}, false)
+	})
 	if err != nil {
-		return "", fmt.Errorf("authn: encode oauth userInfo: %w", err)
-	}
-	if _, err := s.DB.InsertTriples(ctx, appID, cat, []triple.Triple{
-		{E: codeEntity, A: a.oauthCodeHash, V: hashHex(instantCode)},
-		{E: codeEntity, A: a.oauthCC, V: record.challenge},
-		{E: codeEntity, A: a.oauthCCM, V: record.method},
-		{E: codeEntity, A: a.oauthUserInfo, V: string(uiJSON)},
-	}, false); err != nil {
 		return "", err
 	}
 	sep := "?"
@@ -197,34 +203,41 @@ func (s *Service) OAuthToken(ctx context.Context, appID [16]byte,
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.DB.FetchTriples(ctx, appID, storage.FetchFilter{
-		AttrIDs: [][16]byte{a.oauthCodeHash},
-		Value:   hashHex(instantCode),
+	var record oauthCodeRecord
+	var email string
+	err = s.DB.WithTx(ctx, func(tx pgx.Tx) error {
+		eid, values, created, err := lockOAuthRecord(ctx, tx, appID, a.oauthCodeHash, hashHex(instantCode), ErrOAuthCode)
+		if err != nil {
+			return err
+		}
+		record, err = decodeOAuthCode(values, a)
+		if err != nil {
+			return err
+		}
+		if !s.now().Before(created.Add(oauthCodeTTL)) {
+			return ErrOAuthCode
+		}
+		if !verifyPKCE(record.method, record.challenge, codeVerifier) {
+			return errors.New("authn: pkce verification failed")
+		}
+		email, _ = record.userInfo["email"].(string)
+		if email == "" {
+			return errors.New("authn: provider returned no email")
+		}
+		n, err := s.DB.DeleteTx(ctx, tx, appID, []triple.Triple{{E: eid, A: a.oauthCodeHash, V: hashHex(instantCode)}})
+		if err != nil {
+			return err
+		}
+		if n != 1 {
+			return ErrOAuthCode
+		}
+		return nil
 	})
-	if err != nil || len(rows) == 0 {
-		return nil, ErrOAuthCode
-	}
-	values, err := s.loadTriplesByEntity(ctx, appID, rows[0].Triple.E)
 	if err != nil {
 		return nil, err
 	}
-	record, err := decodeOAuthCode(values, a)
-	if err != nil {
-		return nil, err
-	}
-	if !verifyPKCE(record.method, record.challenge, codeVerifier) {
-		return nil, errors.New("authn: pkce verification failed")
-	}
-	email, _ := record.userInfo["email"].(string)
-	if email == "" {
-		return nil, errors.New("authn: provider returned no email")
-	}
-	// Burn the one-time code first (single-use regardless of what follows).
-	if _, err := s.DB.DeleteTriples(ctx, appID, []triple.Triple{
-		{E: rows[0].Triple.E, A: a.oauthCodeHash, V: hashHex(instantCode)},
-	}); err != nil {
-		return nil, err
-	}
+	// Preserve burn-before-issuance: a valid code is single-use even when
+	// the following user creation or refresh-token issuance fails.
 	// Upsert user through the same machinery magic codes use.
 	res, verr := s.VerifyMagicCodeTrusted(ctx, appID, email, record.userInfo)
 	if verr != nil {

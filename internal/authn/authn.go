@@ -113,7 +113,7 @@ type Service struct {
 	// Apple signs client-secret assertions when configured (.p8 material).
 	Apple *AppleSigner
 
-	// NowFunc overrides time.Now for lockout/throttle state (tests). nil →
+	// NowFunc overrides time.Now for lockout/throttle and OAuth expiry (tests). nil →
 	// time.Now.
 	NowFunc func() time.Time
 

@@ -2,11 +2,13 @@ package authn
 
 import (
 	"context"
+	"errors"
+	"time"
+
 	"github.com/instant-v2/instant-v2/internal/platform"
 	"github.com/instant-v2/instant-v2/internal/storage"
 	"github.com/instant-v2/instant-v2/internal/triple"
 	"github.com/jackc/pgx/v5"
-	"time"
 )
 
 type oauthAttrs struct {
@@ -32,43 +34,35 @@ func (s *Service) cachedAttr(appID [16]byte, etype, label string) *platform.Attr
 	return cat.FindByEtypeLabel(etype, label)
 }
 
-// loadTriplesByEntity projects one entity's triples to attr-id → value.
-func (s *Service) loadTriplesByEntity(ctx context.Context, appID [16]byte, e [16]byte) (map[[16]byte]any, error) {
-	rows, err := s.DB.FetchTriples(ctx, appID, storage.FetchFilter{EntityIDs: [][16]byte{e}})
+// lockOAuthRecord serializes consumers on the persisted unique state/code key.
+// A waiter rechecks that key after the winner commits; a rollback leaves it
+// available. All record reads stay on the owning transaction connection.
+func lockOAuthRecord(ctx context.Context, tx pgx.Tx, appID, attrID [16]byte, value string, invalid error) ([16]byte, map[[16]byte]any, time.Time, error) {
+	var eid [16]byte
+	var created time.Time
+	encoded, err := triple.EncodeValue(value)
 	if err != nil {
-		return nil, err
+		return eid, nil, created, err
+	}
+	err = tx.QueryRow(ctx, `SELECT t.entity_id, t.created_at FROM triples t
+		JOIN attrs a ON a.id=t.attr_id AND a.deletion_marked_at IS NULL
+		WHERE t.app_id=$1 AND t.attr_id=$2 AND t.value=$3::jsonb FOR UPDATE OF t`,
+		appID, attrID, string(encoded)).Scan(&eid, &created)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return eid, nil, created, invalid
+	}
+	if err != nil {
+		return eid, nil, created, err
+	}
+	rows, err := storage.FetchTx(ctx, tx, appID, storage.FetchFilter{EntityIDs: [][16]byte{eid}})
+	if err != nil {
+		return eid, nil, created, err
 	}
 	out := make(map[[16]byte]any, len(rows))
 	for _, r := range rows {
 		out[r.Triple.A] = r.Triple.V
 	}
-	return out, nil
-}
-
-// entityCreatedAt reads triples.created_at for expiry checks.
-func (s *Service) entityCreatedAt(ctx context.Context, appID [16]byte, e [16]byte) time.Time {
-	var ts time.Time
-	err := s.Pool.QueryRow(ctx,
-		`SELECT created_at FROM triples WHERE app_id=$1 AND entity_id=$2 LIMIT 1`,
-		appID, e).Scan(&ts)
-	if err != nil {
-		return time.Time{}
-	}
-	return ts
-}
-
-// burnRedirect deletes every triple of a consumed $oauthRedirects record.
-func (s *Service) burnRedirect(ctx context.Context, appID [16]byte, e [16]byte) error {
-	rec, err := s.loadTriplesByEntity(ctx, appID, e)
-	if err != nil {
-		return err
-	}
-	var ts []triple.Triple
-	for aid, v := range rec {
-		ts = append(ts, triple.Triple{E: e, A: aid, V: v})
-	}
-	_, err = s.DB.DeleteTriples(ctx, appID, ts)
-	return err
+	return eid, out, created, nil
 }
 
 func (s *Service) oaAttrs(ctx context.Context, appID [16]byte) (oauthAttrs, error) {

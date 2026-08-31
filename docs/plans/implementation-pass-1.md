@@ -20,10 +20,10 @@ actual executed test names/outcomes before claiming completion.
 | Q1b | Aliased cardinality-one relation retains reference and child projection | query worker, explicit consumer handoff if needed | Existing known-gap `forward-relation` yields empty child/lost reference | PENDING |
 | Q2a | All supported predicates in an operator map apply together | query worker | Two-bound range returns intersection, independent of map iteration | PENDING |
 | Q2b | Requested global ordering precedes page selection | query worker | Seed IDs conflicting with requested field order, compare exact pages | PENDING |
-| A1a | Expired OAuth code cannot issue a token | auth worker | Past/boundary expiry rejected through actual redemption | PENDING |
-| A1b | Persisted code has one successful concurrent consumer | auth worker | Controlled competing redemption, exact issued/persisted state | PENDING |
-| A1c | Invalid/expired callback state does not reach provider exchange | auth worker | Fake provider counts no calls; existing malformed-state invariants retained | PENDING |
-| A2 | Existing supported built-ins resolve endpoints used by exchange | auth worker | Normal configured resolution, local provider exchange fixtures | PENDING |
+| A1a | Expired OAuth code cannot issue a token | auth worker | `TestQualityOAuthConsumptionExpiry`: before/at/after expiry | GREEN |
+| A1b | Persisted code has one successful concurrent consumer | auth worker | `TestQualityOAuthConsumptionConcurrent`: controlled DB contention; one winner and one persisted token | GREEN |
+| A1c | Invalid/expired callback state does not reach provider exchange | auth worker | Expiry and bindings/retry tests count provider calls and compare stored state | GREEN |
+| A2 | Existing supported built-ins resolve endpoints used by exchange | auth worker | Built-in resolution and local HTTP exchange tests | GREEN (Google/GitHub; Apple explicitly unsupported) |
 | Q4a | Adjacent exact numeric lookup values above 2^53 identify distinct entities | transaction worker | Actual lookup transaction changes only intended entity, exact readback | PENDING |
 | M1 | Repeated gauge registration does not break scraping | metrics worker | Existing scrape-time-value test with `-count=2`; real lifecycle regression | PENDING |
 | G1a | Unset metrics address uses default; explicit empty disables it | config worker | `TestLoadMetricsAddressConfiguration`: empty case RED then all cases GREEN; existing serveHTTP guard inspected | GREEN |
@@ -56,6 +56,22 @@ actual executed test names/outcomes before claiming completion.
   An integrated short suite is the final build/regression smoke, not production
   certification. Keep unresolved roadmap risks explicitly open.
 
+### Bounded decisions
+
+Query: normalize operator conjunction during Coerce so the existing normal and
+incremental consumers receive the same conditions. Preserve current ID-ascending
+ties, apply null-first ascending/null-last descending, and implement the existing
+inclusive cursor flags. Existing ID-only cursor tuples cannot recover a removed
+entity's previous field position; an absent explicit-order cursor returns a
+controlled query error rather than silently restarting page one. These choices
+do not establish v1 parity or add a new cursor format/server-created-at feature.
+
+OAuth: preserve existing provider-exchange-failure local-state rollback and
+burn-before-token-issuance semantics. An independent Sol contract review requires
+transaction-local locking/read/check/delete, no nested pool acquisition under the
+lock, expiry before and after bounded provider exchange, and no new Apple feature.
+Local rollback cannot restore a provider authorization code consumed upstream.
+
 ## Evidence and commits
 
 Configuration: `envOrAllowEmpty` distinguishes absent and explicit-empty values
@@ -65,4 +81,14 @@ with integration disabled. Existing runtime code skips the metrics listener for
 empty address and creates distinct read/write pools; no pool redesign or new
 runtime listener test was added for the comment correction.
 
-Other rows await their specific handoffs; green configuration does not close them.
+OAuth: the failing observations included two concurrent winners, accepted expired
+codes, expired callbacks contacting the provider, missing built-in endpoints and
+accepted HTTP 401 identity responses. Transaction-local locking and consumption
+now pass the focused `TestQuality(OAuth|BuiltinOAuth)` group with race detection;
+root repeated it against the owned port-55490 instance (2.665s). Worker full authn
+live/race, build and vet passed; independent Sol security review found no remaining
+blocking defect. Rollback, expiry during exchange and single-connection tests are
+additional post-fix guards, not separately claimed pre-fix failures. Local provider
+fixtures do not establish real Google/GitHub end-to-end acceptance.
+
+Other pending rows await their specific handoffs; completed rows do not close them.
