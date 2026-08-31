@@ -15,8 +15,8 @@ type Config struct {
 	DatabaseURL string // DATABASE_URL (required from Phase 1; optional while booting without DB)
 
 	// Read plane (docs/reference/09-tier2-architecture.md §T2.3). Empty means reads
-	// share the write pool — today's behavior. Set to a replica DSN to
-	// route instaql/catalog/runtime queries off the writer.
+	// use the write DSN through a separate read pool — today's behavior. Set to a
+	// replica DSN to route instaql/catalog/runtime queries off the writer.
 	ReadDatabaseURL string // INSTANT_V2_READ_URL, default ""
 
 	// Pool sizing (docs/09 §T2.3). Zero keeps the built-in floor (32);
@@ -106,7 +106,7 @@ func Load() (Config, error) {
 		WSCompression:   envOr("INSTANT_V2_WS_COMPRESSION", "disabled"),
 		InvalidationBus: envOr("INSTANT_V2_INVALIDATION_BUS", "none"),
 		NodeID:          os.Getenv("INSTANT_V2_NODE_ID"),
-		MetricsAddr:     envOr("INSTANT_V2_METRICS_ADDR", "127.0.0.1:9465"),
+		MetricsAddr:     envOrAllowEmpty("INSTANT_V2_METRICS_ADDR", "127.0.0.1:9465"),
 	}
 	n, err := envInt32("INSTANT_V2_WRITE_POOL_MAXCONNS")
 	if err != nil {
@@ -298,6 +298,13 @@ func envInt64(key string) (int64, error) {
 
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+func envOrAllowEmpty(key, def string) string {
+	if v, ok := os.LookupEnv(key); ok {
 		return v
 	}
 	return def

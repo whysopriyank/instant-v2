@@ -45,6 +45,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.WSCompression != "disabled" || cfg.InvalidationBus != "none" {
 		t.Fatalf("defaults: %+v", cfg)
 	}
+	if cfg.ReadDatabaseURL != "" {
+		t.Fatalf("empty read URL must retain empty fallback marker: %q", cfg.ReadDatabaseURL)
+	}
 	if cfg.MaxQueueDepth != 0 || cfg.WritePoolMaxConns != 0 || cfg.ReadPoolMaxConns != 0 {
 		t.Fatalf("numeric defaults must be zero-valued: %+v", cfg)
 	}
@@ -60,6 +63,50 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if !cfg.StorageSecretIsSet() {
 		t.Fatal("secret must register as set")
+	}
+}
+
+func TestLoadMetricsAddressConfiguration(t *testing.T) {
+	const key = "INSTANT_V2_METRICS_ADDR"
+
+	cases := []struct {
+		name    string
+		present bool
+		value   string
+		want    string
+	}{
+		{name: "unset uses default", want: "127.0.0.1:9465"},
+		{name: "explicit empty disables", present: true, value: "", want: ""},
+		{name: "explicit address is honored", present: true, value: "127.0.0.1:19465", want: "127.0.0.1:19465"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			old, had := os.LookupEnv(key)
+			if tc.present {
+				if err := os.Setenv(key, tc.value); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.Unsetenv(key); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if had {
+					_ = os.Setenv(key, old)
+				} else {
+					_ = os.Unsetenv(key)
+				}
+			})
+
+			setEnv(t, map[string]string{"INSTANT_V2_STORAGE_SECRET": "s"})
+			cfg, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.MetricsAddr != tc.want {
+				t.Fatalf("MetricsAddr = %q, want %q", cfg.MetricsAddr, tc.want)
+			}
+		})
 	}
 }
 
