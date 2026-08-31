@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/instant-v2/instant-v2/internal/config"
+	"github.com/instant-v2/instant-v2/internal/metrics"
 	"github.com/instant-v2/instant-v2/internal/platform"
 	"github.com/instant-v2/instant-v2/internal/ratelimit"
 	"github.com/instant-v2/instant-v2/internal/testkit"
@@ -111,5 +112,33 @@ func TestServeHTTPBindFailure(t *testing.T) {
 	err := serveHTTP(context.Background(), http.NewServeMux(), config.Config{HTTPAddr: "127.0.0.1:invalid"}, slog.Default(), ratelimit.New(ratelimit.Config{}), nil)
 	if err == nil {
 		t.Fatal("invalid listener address must return its bind error")
+	}
+}
+
+func TestRunDatabaseReleasesGaugesIntegration(t *testing.T) {
+	fixture := testkit.NewPostgres(t, testkit.PostgresOptions{})
+	db, err := sql.Open("pgx", fixture.DSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cfg := config.Config{
+		DatabaseURL: fixture.DSN, HTTPAddr: "127.0.0.1:invalid",
+		StorageSecret: "gauge-lifecycle-test-only", InvalidationBus: "none",
+	}
+	if err := runDatabase(ctx, db, http.NewServeMux(), cfg, slog.Default(), ratelimit.New(ratelimit.Config{})); err == nil {
+		t.Fatal("expected listener bind failure")
+	}
+	families, err := metrics.Registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, family := range families {
+		switch family.GetName() {
+		case "instant_notifier_queue_depth", "instant_ws_sessions_active", "instant_db_pool_conns":
+			t.Errorf("runtime returned but still owns gauge %s", family.GetName())
+		}
 	}
 }

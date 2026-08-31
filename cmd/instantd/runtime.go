@@ -77,7 +77,8 @@ func runDatabase(ctx context.Context, db *sql.DB, mux *http.ServeMux, cfg config
 	}
 
 	ws, sse := a.mountRoutes(ctx, db, mux, cfg, limiter)
-	a.registerGauges(ws, sse)
+	unregisterGauges := a.registerGauges(ws, sse)
+	defer unregisterGauges()
 	return serveHTTP(ctx, mux, cfg, logger, limiter, ws)
 }
 

@@ -25,7 +25,7 @@ actual executed test names/outcomes before claiming completion.
 | A1c | Invalid/expired callback state does not reach provider exchange | auth worker | Expiry and bindings/retry tests count provider calls and compare stored state | GREEN |
 | A2 | Existing supported built-ins resolve endpoints used by exchange | auth worker | Built-in resolution and local HTTP exchange tests | GREEN (Google/GitHub; Apple explicitly unsupported) |
 | Q4a | Adjacent exact numeric lookup values above 2^53 identify distinct entities | transaction worker | Actual lookup transaction changes only intended entity, exact readback | PENDING |
-| M1 | Repeated gauge registration does not break scraping | metrics worker | Existing scrape-time-value test with `-count=2`; real lifecycle regression | PENDING |
+| M1 | Repeated gauge registration does not break scraping; runtime releases callbacks | metrics worker; root runtime wiring | Repeated scrape and lifecycle tests; `TestRunDatabaseReleasesGaugesIntegration` | GREEN |
 | G1a | Unset metrics address uses default; explicit empty disables it | config worker | `TestLoadMetricsAddressConfiguration`: empty case RED then all cases GREEN; existing serveHTTP guard inspected | GREEN |
 | G1b | Empty read URL means same DSN, not shared pool | config worker; root docs | Corrected comment; default marker assertion; unchanged runDatabase creates separate pools after DSN fallback | GREEN (inspection/comment correction) |
 
@@ -92,3 +92,12 @@ additional post-fix guards, not separately claimed pre-fix failures. Local provi
 fixtures do not establish real Google/GitHub end-to-end acceptance.
 
 Other pending rows await their specific handoffs; completed rows do not close them.
+
+Metrics: repeated registration previously caused HTTP 500 on the second scrape
+test run. Registration now replaces a logical series and returns an idempotent,
+generation-aware close handle. The runtime releases all eight handles before its
+resources close, including startup failure. The startup regression first found
+three leaked gauge families, then passed twice with race detection (root 2.389s).
+Metrics package race tests passed twice (root 1.737s). Bounded review also caught
+one retained callback in removed slice storage; clearing that slot and a focused
+storage assertion close the issue without a new lifecycle harness.

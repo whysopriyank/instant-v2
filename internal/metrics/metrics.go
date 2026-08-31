@@ -11,6 +11,8 @@ package metrics
 
 import (
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -108,35 +110,82 @@ func init() {
 
 // fnCollector emits gauge series computed at scrape time — no polling
 // goroutine, no staleness: every scrape reads the live value. One instance
-// carries every callback-registered series; RegisterGauge appends to it.
+// carries every callback-registered series; RegisterGauge updates it.
 type fnCollector struct {
-	mu     sync.Mutex
-	descs  []*prometheus.Desc
-	values []func() float64
-	labels [][]string // const label values per desc
+	mu      sync.Mutex
+	entries []gaugeEntry
+	nextID  uint64
 }
 
-func (c *fnCollector) add(desc *prometheus.Desc, labelValues []string, fn func() float64) {
+type gaugeEntry struct {
+	key    string
+	id     uint64
+	desc   *prometheus.Desc
+	value  func() float64
+	labels []string // const label values per desc
+}
+
+// GaugeRegistration owns one callback registration. Closing it removes the
+// series from future scrapes; Close is safe to call more than once.
+type GaugeRegistration struct {
+	collector *fnCollector
+	key       string
+	id        uint64
+	once      sync.Once
+}
+
+// Close unregisters the gauge callback. If a later registration replaced this
+// logical series, the later registration is left intact. Close waits for an
+// in-progress scrape callback; callbacks must not call RegisterGauge or Close.
+func (r *GaugeRegistration) Close() {
+	if r == nil {
+		return
+	}
+	r.once.Do(func() { r.collector.remove(r.key, r.id) })
+}
+
+func (c *fnCollector) add(key string, desc *prometheus.Desc, labelValues []string, fn func() float64) *GaugeRegistration {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.descs = append(c.descs, desc)
-	c.values = append(c.values, fn)
-	c.labels = append(c.labels, labelValues)
+	c.nextID++
+	entry := gaugeEntry{key: key, id: c.nextID, desc: desc, value: fn,
+		labels: append([]string(nil), labelValues...)}
+	for i := range c.entries {
+		if c.entries[i].key == key {
+			c.entries[i] = entry
+			return &GaugeRegistration{collector: c, key: key, id: entry.id}
+		}
+	}
+	c.entries = append(c.entries, entry)
+	return &GaugeRegistration{collector: c, key: key, id: entry.id}
+}
+
+func (c *fnCollector) remove(key string, id uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i := range c.entries {
+		if c.entries[i].key == key && c.entries[i].id == id {
+			copy(c.entries[i:], c.entries[i+1:])
+			c.entries[len(c.entries)-1] = gaugeEntry{}
+			c.entries = c.entries[:len(c.entries)-1]
+			return
+		}
+	}
 }
 
 func (c *fnCollector) Describe(ch chan<- *prometheus.Desc) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for _, d := range c.descs {
-		ch <- d
+	for _, entry := range c.entries {
+		ch <- entry.desc
 	}
 }
 
 func (c *fnCollector) Collect(ch chan<- prometheus.Metric) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for i, d := range c.descs {
-		ch <- prometheus.MustNewConstMetric(d, prometheus.GaugeValue, c.values[i](), c.labels[i]...)
+	for _, entry := range c.entries {
+		ch <- prometheus.MustNewConstMetric(entry.desc, prometheus.GaugeValue, entry.value(), entry.labels...)
 	}
 }
 
@@ -146,8 +195,32 @@ func init() { Registry.MustRegister(&scrapeFns) }
 
 // RegisterGauge exposes a scrape-time gauge. labelValues are the const
 // values of the variable labels in labelNames; pass nils for an unlabeled
-// series. Duplicate fully-qualified names panic at registration — wiring
-// bugs surface at boot, not under load.
-func RegisterGauge(name, help string, labelNames, labelValues []string, fn func() float64) {
-	scrapeFns.add(prometheus.NewDesc(name, help, labelNames, nil), labelValues, fn)
+// series. Registering the same logical series replaces its callback, keeping
+// repeated runtime setup from emitting duplicate samples. The returned handle
+// removes the registration when its owner closes.
+func RegisterGauge(name, help string, labelNames, labelValues []string, fn func() float64) *GaugeRegistration {
+	return scrapeFns.add(gaugeKey(name, labelNames, labelValues),
+		prometheus.NewDesc(name, help, labelNames, nil), labelValues, fn)
+}
+
+func gaugeKey(name string, labelNames, labelValues []string) string {
+	var b strings.Builder
+	writeString := func(value string) {
+		b.WriteString(strconv.Itoa(len(value)))
+		b.WriteByte(':')
+		b.WriteString(value)
+	}
+	writeStrings := func(values []string) {
+		b.WriteString(strconv.Itoa(len(values)))
+		b.WriteByte(':')
+		for _, value := range values {
+			writeString(value)
+		}
+	}
+	writeString(name)
+	writeStrings(labelNames)
+	writeStrings(labelValues)
+	// Length prefixes keep the key unambiguous even when values contain
+	// delimiters, including NUL bytes.
+	return b.String()
 }
