@@ -3,11 +3,44 @@
 Date: 2026-08-31. Baseline: the uncommitted quality-refactor tree based on
 `5f78ca0877c1a8c04b173e5c502e8c948ecfb965`.
 
-Status: **PROPOSED IMPLEMENTATION PLAN; FULL PROGRAM PARTIAL**. The user requested
-this plan and immediate delivery/incident follow-up. Product repairs in Waves
-1–5 below have not been executed by this planning task. Approval of the plan
-authorizes the selected implementation scope, not push, destructive recovery,
-external benchmark runs, production credentials, or deployment.
+Status: **IMPLEMENTATION FIRST; PRODUCTION/BENCHMARK HARDENING DEFERRED**.
+The user's latest 2026-08-31 instruction supersedes earlier all-Sol routing and
+release-first sequencing. The detailed waves below remain a backlog, not an
+instruction to run them now. Current work closes the development incident and
+commits the existing implementation; it does not begin all remaining repairs.
+
+## Current authority — implementation first
+
+- Include relevant pre-existing implementation, regression tests and project
+  history; exclude generated/private artifacts. Commit coherent batches as they
+  pass their minimum meaningful checks rather than accumulate uncommitted work.
+- No pre-incident backup exists and the program is unreleased. Retain the current
+  development schema and documented uncertainty; no backup program, baseline hunt
+  or database rollback is needed to close the incident.
+- For each next requested implementation slice, make the smallest complete
+  functional change and run focused regression/package checks. Preserve existing
+  assertions. Do not add a new harness or exhaustive acceptance campaign. Stop at
+  this commit checkpoint instead of automatically launching the backlog.
+- **Production hardening and benchmark-harness hardening need new approval.**
+  B1, C1/C2, broad corpus/v1 capture expansion, soak/recovery, performance campaigns,
+  container/release certification, signing and deployment remain deferred. Do not
+  execute the unsafe chaos tool while its documented risks remain open.
+- Use Luna-heavy routing for bounded work, Terra for moderate integration or
+  ambiguity, and GPT-5.6 Sol for genuinely complex/security-sensitive/public-
+  compatibility/data-integrity decisions. Earlier all-Sol instructions are historical.
+- Local commits are authorized; push, PR, tags, publication and deployment are not.
+  No public-release claim follows from a development checkpoint.
+
+Existing strict targets and risk records stay available for the later approved
+phase. They are not newly required for every development commit. Deeper checks,
+when genuinely required by a changed behavior, remain scoped to that behavior.
+
+Checkpoint: existing implementation committed as `eb88232` on
+`codex/quality-implementation-checkpoint`; relevant pre-existing edits were
+included after Luna review, with generated/private artifacts excluded. The
+[incident record](../reference/quality-incident-followup.md#committed-development-checkpoint)
+contains the minimum checks. The next action is a bounded user-selected
+implementation slice, not automatic execution of the hardening roadmap.
 
 This completes implementation quality and its evidence, not a replacement service
 architecture. Read the [incident follow-up](../reference/quality-incident-followup.md)
@@ -49,18 +82,17 @@ Current detailed results and private evidence inventory are in the
 
 | Gate | Current outcome | Remaining action / exit criterion |
 |---|---|---|
-| D1 working-tree preservation | HEAD/main and empty index inspected; private tracked patch and 253-file allowlisted untracked-source checkpoint saved | Approve exact commit scope, especially pre-existing user edits; refresh the recovery checkpoint before staging if the tree changes |
+| D1 working-tree preservation | Private tracked patch and 253-file source checkpoint saved; user authorizes relevant pre-existing edits | Review relevance, exclude generated/private files and commit coherent batches |
 | D2 affected-DB inspection | Read-only snapshot: Goose versions 1–6 applied in incident window; all 15 application tables currently empty | Preserve findings; current emptiness does not prove historical emptiness |
-| D3 historical incident closure | BLOCKED: no known pre-incident baseline | Compare supplied baseline safely, or record owner acceptance of preserving schema with uncertainty; no inferred rollback |
+| D3 historical incident closure | ACCEPTED_EXCEPTION: user confirms no baseline and no public release | Keep current schema and uncertainty; no recovery/backup project needed |
 | D4 retained resources | Original cluster stopped; schema/log evidence preserved privately | Retain until explicit owner decision; any future cleanup names exact validated targets |
 | D5 recurrence regression | Fresh dedicated cluster: testkit unit/race and two live isolation executions passed; owned DBs cleaned; server stopped | Repeat fixture preflight on each new runtime environment |
 | D6 source sanitation | Root generated `corpusctl` ignored without masking command source | Keep binaries, credentials and private captures out of commits |
-| D7 source/external delivery | No commit, push, PR or deployment | Resolve commit inclusion and publication target independently of product readiness |
+| D7 source/external delivery | Local implementation commits authorized | Record checkpoint hashes/checks; external delivery remains out of scope |
 
-**Gate distinction:** D2/D4/D5 allow safe new work on newly owned resources. D3
-remains an open incident disposition; it need not force unrelated hermetic fixes
-to wait indefinitely. It must not be reported as resolved without baseline proof
-or owner acceptance. D7 does not authorize deployment of an incomplete candidate.
+**Gate distinction:** D3 is closed for development by owner disposition, not by
+proof of historical equality. Local commits and bounded implementation do not
+wait for production certification. D7 does not authorize deployment.
 
 ### Reviewable commit strategy
 
@@ -113,8 +145,8 @@ bounded project. No exception may silently redefine “full parity.”
 
 ## 4. Parallel-agent ownership and scheduling
 
-Use user-selected **GPT-5.6 Sol**, including complex implementation and security
-review. Request normal/Standard mode where the host supports it. Global
+Use **Luna-heavy routing**, reserving GPT-5.6 Sol for genuinely complex/high-risk
+work rather than every packet. Request normal/Standard mode where supported. Global
 `service_tier = "default"` was observed during this follow-up; the collaboration
 tool cannot set or prove an individual request's billing/service tier. Do not
 claim a per-agent tier change from model selection alone.
@@ -153,11 +185,11 @@ systems or delete unowned resources. Return changed paths, tests actually select
 and executed, assertion/output evidence, before/after behavior, unresolved gaps,
 and consumer changes needed from another owner. Do not return a generic “done.”
 
-Each defect: reproduce → minimal repair → focused green → clean repeated high-risk
-rerun → adjacent checks → non-author review → integration. After two failed
-focused repair attempts, stop that packet and bring the conflicting evidence to
-the coordinator. A model upgrade is not the escape hatch: these workers already
-use Sol. Revise the contract or obtain a user decision.
+Each selected defect: reproduce → minimal repair → minimum meaningful check →
+commit. Add repeated/race or independent review where the changed behavior needs
+it, not as an unrelated campaign. After two failed focused attempts, Luna escalates
+to Terra; unresolved complexity/security/compatibility/data-integrity questions go
+to Sol. Revise the contract or ask the user rather than run an open-ended rewrite.
 
 ## 5. Wave 1 — bounded product and tool repairs
 

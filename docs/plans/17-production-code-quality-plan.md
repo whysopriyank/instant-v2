@@ -2,6 +2,12 @@
 
 Status: **APPROVED — IMPLEMENTATION HANDED OFF; FULL PROGRAM PARTIAL**
 
+Current-policy note (2026-08-31): this retains the historical refactor plan and its
+original all-Sol routing. The later
+[implementation-first policy](production-completion-roadmap.md#current-authority--implementation-first)
+takes precedence: Luna-heavy bounded work, incremental local commits, minimum
+relevant tests and no production/benchmark hardening until new approval.
+
 The user approved execution. The original design below is retained as the plan,
 not rewritten into a success claim. Current results and remaining release gates
 are recorded in the [execution ledger](quality-execution.md) and

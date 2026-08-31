@@ -4,6 +4,13 @@ Status: IMPLEMENTATION HANDOFF; FULL PROGRAM PARTIAL. User approved execution
 and resumed on 2026-08-31.
 Coordinator owns this document; workers return evidence rather than editing it.
 
+Later development checkpoint (2026-08-31): the existing implementation is now
+committed as `eb88232`. The user closed the local incident for unreleased
+development without historical restoration and authorized relevant pre-existing
+edits/local commits. The [current implementation-first policy](production-completion-roadmap.md#current-authority--implementation-first)
+uses Luna-heavy routing and defers production/benchmark hardening until separate
+approval. Historical uncommitted/all-Sol statements below describe the earlier run.
+
 Forward work is now specified in the
 [production completion roadmap](production-completion-roadmap.md). The separate
 [incident follow-up](../reference/quality-incident-followup.md) contains the fresh

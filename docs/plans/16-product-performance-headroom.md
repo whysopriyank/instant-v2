@@ -1,5 +1,10 @@
 # Product performance headroom
 
+Current-policy note (2026-08-31): retained implementation/evidence history, not an
+active optimization or benchmarking assignment. The user's
+[implementation-first policy](production-completion-roadmap.md#current-authority--implementation-first)
+defers further performance and production-hardening work until separate approval.
+
 Status: implementation decision record, 2026-08-29. This document covers
 product-runtime performance only. It does not change the benchmark contract,
 claim eligibility, artifact handling, or the frozen client protocol.

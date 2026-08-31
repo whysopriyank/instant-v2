@@ -3,6 +3,12 @@
 Date: 2026-08-31. Baseline: `5f78ca0877c1a8c04b173e5c502e8c948ecfb965` on
 `main`; result is an uncommitted working tree, not a published release.
 
+Later checkpoint: that implementation was committed as `eb88232` on
+`codex/quality-implementation-checkpoint`. See the
+[incident/delivery closure](quality-incident-followup.md#committed-development-checkpoint)
+for the user's pre-release disposition and fresh minimum commit checks. The
+results below remain historical evidence, not a new production-hardening run.
+
 Status: **PARTIAL against the full approved program**. The structural and
 targeted correctness work is implemented, with non-author Sol reviews. Final
 repository checks are recorded below. Full corpus breadth and genuine pinned-v1

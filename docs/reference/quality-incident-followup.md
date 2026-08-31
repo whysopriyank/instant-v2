@@ -3,22 +3,24 @@
 Date: 2026-08-31. Source baseline:
 `5f78ca0877c1a8c04b173e5c502e8c948ecfb965`, branch `main`.
 
-Status: **PARTIAL**. Containment, current-state inspection, evidence preservation,
-and fixture regression checks are complete. Historical database restoration is
-not established or authorized. Commit scope and external delivery remain open.
-This is not a production-readiness declaration.
+Status: **RESOLVED FOR PRE-RELEASE DEVELOPMENT** by the user's 2026-08-31
+disposition: no pre-incident backup/baseline exists, the program has not been
+publicly released, and historical restoration/production backup work is not
+required. Keep the current development schema and documented uncertainty. The
+user authorized reviewing relevance and committing the useful existing edits.
+This is not proof of no historical impact or production readiness.
 
 ## Contract and result ledger
 
 | ID | Required invariant / observation | Result | Remaining condition |
 |---|---|---|---|
-| D1 | Preserve the mixed working tree and distinguish existing changes from this follow-up | GREEN: initial HEAD, branch, status and tracked diff inspected; index empty; 397 changed/untracked file entries before follow-up; private tracked patch and allowlisted untracked-source archive saved | Obtain approval for exact commit contents; do not stage all files indiscriminately |
+| D1 | Preserve the mixed working tree and distinguish existing changes from this follow-up | GREEN: private checkpoint retained; relevant pre-existing edits reviewed and included under user authorization | No unrelated user source removed; generated/private files excluded |
 | D2 | Observe the affected database without migrations, DDL, DML, slot changes, or application-row disclosure | GREEN: explicit loopback endpoint, read-only transactions, schema-only dump and row counts | Current snapshot is not a pre-incident baseline |
-| D3 | Establish the incident's historical schema/data delta before proposing reversal | BLOCKED: no trustworthy pre-incident snapshot supplied or identified in the bounded repository/document search | User supplies baseline/backup or explicitly accepts preserving the current schema; never infer an empty historical DB from empty current tables |
+| D3 | Resolve historical uncertainty without unsafe reversal | ACCEPTED_EXCEPTION: user confirms no baseline exists and declines historical recovery/production-backup work for this unreleased program | Preserve current schema; historical delta remains unknown, not a development blocker |
 | D4 | Preserve the original verification cluster and prove it is stopped | GREEN: `pg_ctl status` reports no server; `pg_controldata` reports shut down; server log hashed and copied | Intentional retention, not an unattended running service; deletion requires exact approval |
 | D5 | Revalidate the repaired fixture pool/DSN identity and owned cleanup away from the affected DB | GREEN: hermetic testkit lane plus two race-enabled live isolation executions on a new dedicated cluster | This proves the existing regression contract, not historical absence of side effects |
 | D6 | Keep generated root executable out of source delivery without masking command sources | GREEN: anchored `/corpusctl` ignore; executable retained | No binary deletion or broad cleanup performed |
-| D7 | Deliver reviewable commits/PR/CI/deployment with an explicit scope and target | BLOCKED: no stage/commit/push/PR/deploy performed | Confirm local commit scope first; external publication and deployment need separate target/approval |
+| D7 | Commit relevant implementation with proportionate checks | GREEN: implementation checkpoint `eb88232`; policy/closure recorded in the following documentation commit | Push/PR/deployment are outside this task; production certification is not required merely to save development progress |
 
 ## Confirmed current database state
 
@@ -135,17 +137,14 @@ safety, not historical database restoration or production acceptance.
 
 ## Database closure decision
 
-The user can supply a known pre-incident schema dump/backup with its capture time
-and identity. Compare schema metadata first; inspect application data only if
-needed and authorized. Restore a supplied backup only into an isolated comparison
-environment, never over the live default database as a diagnostic step.
-
-If no historical baseline exists, the honest alternative is owner acceptance of
-the current preserved schema and the documented historical uncertainty. Record
-that as acceptance of a residual incident limitation, not proof of no impact.
-If removal is requested, first establish dependencies/ownership and an exact
-recovery plan with backup and approval. Empty current tables alone do not permit
-deleting them.
+The user confirmed no pre-incident backup/schema baseline exists and the program
+is unreleased. Close the incident for development by retaining the current
+database, accepting the historical uncertainty and keeping the fixed fixture
+regression. No further baseline search, production backup project, database
+migration/reversal or recovery drill is required or authorized for this checkpoint.
+Existing stopped resources/evidence may remain; deletion is unnecessary to proceed.
+This disposition does not prove the original operation had no effect. Any later
+requested removal still requires an exact target/ownership check.
 
 ## Delivery closure decision
 
@@ -154,10 +153,43 @@ generated protocol changes, and new documents. The index was empty at inspection
 Tracked-only diff statistics omit untracked destination files and must not be
 presented as net code deletion.
 
-Do not manufacture a supposedly clean pre-refactor snapshot or rewrite `main`.
-Before local commits, approve the exact file/hunk scope, including whether to
-include the older README/reactive/storage/sync/performance-plan/query-benchmark
-edits. The [production roadmap](../plans/production-completion-roadmap.md)
-specifies atomic delivery units and verification. Push, PR creation and deployment
-remain separate actions with explicit destinations. Unresolved production gates
-must remain visible in the PR and release decision.
+The user authorized including relevant pre-existing work and committing coherent
+batches as progress is made. Preserve useful README/project history, reactive
+queue/routing changes, storage write simplification, canonical sync projection
+and fixtures, and the query-plan benchmark source. Keep historical performance
+plans as deferred context, not active instructions. Exclude generated executables,
+dependencies, private evidence and raw result bundles. No user source is deleted.
+
+The [implementation-first policy](../plans/production-completion-roadmap.md#current-authority--implementation-first)
+now controls execution. Do not fabricate a pure-rename history or rewrite `main`.
+Push/PR/deployment remain outside this task; deferred production checks do not
+block a clearly labeled development commit.
+
+## Committed development checkpoint
+
+Implementation commit: `eb88232` (`refactor: consolidate implementation and
+repository layout`) on `codex/quality-implementation-checkpoint`. This is an
+honest integrated change, not a pure rename: shared helpers, package splits,
+consumers, tests, command moves and document links are interdependent.
+
+Two Luna agents independently checked pre-existing-edit relevance and delivery
+inventory. They recommended inclusion of the product changes and their tests/
+historical plans, with no blocking integration issue identified. No new product
+or benchmark-hardening change was made while preparing the commits.
+
+Fresh minimum checks for this commit:
+
+- `INSTANT_TEST_INTEGRATION=0 DATABASE_URL= TEST_DATABASE_URL= go test ./... -short -count=1`
+  — exit 0; 31 packages passed, four had no tests; live integration disabled and
+  no benchmarks requested. This run did not enable the race detector.
+- `make check-generated` — exit 0; protocol outputs match their generator/schema.
+- `git diff --cached --check` — exit 0 before the implementation commit.
+- Staging inventory: only explicitly reviewed source/document paths; no binary
+  entries or private evidence. Generated root executables remain ignored locally.
+
+The following documentation-only commit records the user's incident disposition,
+Luna-heavy routing, deferred hardening and incremental commit policy. Its checks
+are local Markdown links/anchors and whitespace, not a repeated product test run.
+No database connections, migrations, cleanup, production backup project, live
+benchmarks, soak, release certification, push or deployment occurred in this
+commit-preparation task. Earlier evidence above retains its original scope.
