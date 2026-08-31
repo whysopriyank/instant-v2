@@ -19,7 +19,7 @@ import (
 	syncpkg "github.com/instant-v2/instant-v2/internal/sync"
 )
 
-func sseSrv(t *testing.T, mutate func(*syncpkg.SSEHandler)) (*httptest.Server, string) {
+func sseSrv(t *testing.T, mutate func(*syncpkg.SSEHandler)) (*httptest.Server, string, <-chan struct{}) {
 	t.Helper()
 	mgr, store, _, ex, appID, cats, _ := fakeStack(t)
 	h := &syncpkg.SSEHandler{
@@ -32,9 +32,15 @@ func sseSrv(t *testing.T, mutate func(*syncpkg.SSEHandler)) (*httptest.Server, s
 	if mutate != nil {
 		mutate(h)
 	}
-	srv := httptest.NewServer(h)
+	closed := make(chan struct{}, 16)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			defer func() { closed <- struct{}{} }()
+		}
+		h.ServeHTTP(w, r)
+	}))
 	t.Cleanup(srv.Close)
-	return srv, uuidStr(appID)
+	return srv, uuidStr(appID), closed
 }
 
 func nextLine(t *testing.T, sc *bufio.Scanner) string {

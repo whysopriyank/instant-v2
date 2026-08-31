@@ -454,7 +454,9 @@ func (s LiveTargetConfig) driverConfig(ids FixtureIDs, fixturePath, fixtureHash,
 		if err := verifyFixtureHandoff(fixturePath, fixtureHash, ids, family, scale, seed); err != nil {
 			return err
 		}
+		//nolint:staticcheck // SA4023: the non-Linux stub always fails closed; Linux can succeed.
 		executable, actualHash, e := openProvisionExecutable(s.ProvisionCommand[0])
+		//nolint:staticcheck // SA4023: the non-Linux stub always fails closed; Linux can succeed.
 		if e != nil {
 			return fmt.Errorf("provision executable open failed: %w", e)
 		}

@@ -28,36 +28,52 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      # Live-PG suites skip silently when DATABASE_URL is unset — providing
-      # the DB here keeps them honest (docs/10 §skeptical review). Packages
-      # reset the shared public schema, so tests MUST run sequentially (-p 1).
+      - name: Install pinned linter
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1
+      - name: Ensure fixture-audit prerequisite
+        run: command -v rg || (sudo apt-get update && sudo apt-get install -y ripgrep)
+      - name: Static checks and build
+        run: make vet lint build
+      - name: Hermetic unit and race tests
+        run: make test-unit
+      # Integration is explicitly enabled by Make; each testkit fixture owns
+      # its database. Four-package concurrency passed the local live/race gate.
       - name: Start postgres (wal_level=logical)
         run: |
           docker rm -f ci-pg 2>/dev/null || true
           docker run -d --name ci-pg \
             -e POSTGRES_USER=instant -e POSTGRES_PASSWORD=instant \
             -e POSTGRES_DB=instant_v2_test -p 5432:5432 postgres:17 \
-            -c wal_level=logical
+            -c wal_level=logical -c max_connections=200
+          ready=0
           for i in $(seq 1 30); do
-            ok=$(docker exec ci-pg pg_isready -U instant || true)
-            echo "$ok"
-            case "$ok" in *"accepting connections") break;; esac
+            if docker exec ci-pg pg_isready -U instant -d instant_v2_test; then
+              ready=1
+              break
+            fi
             sleep 1
           done
-      - name: Vet
-        run: go vet ./...
-      - name: Lint
-        uses: golangci/golangci-lint-action@v7
-        with:
-          # Pinned: 'latest' under v6 resolved to the v1 line (built on
-          # go1.24), which refuses go.mod targets >= 1.25 ("exit code 3").
-          # Action v6 also cannot drive golangci-lint v2 — hence v7.
-          version: v2.13.1
-      - name: Test (live PG, sequential packages)
-        run: go test ./... -race -count=1 -short -p 1
+          test "$ready" = 1
+      - name: Required isolated PostgreSQL integration tests
+        run: make test-integration
+      - name: Corpus contracts and real v2 replay
+        run: make test-contract
+      - name: Benchmark artifact acceptance
+        run: make bench-acceptance
+      - name: Stop disposable postgres
+        if: always()
+        run: docker rm -f ci-pg 2>/dev/null || true
+
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Container startup, health, non-root identity, and TLS roots
+        run: make container-verify
 
   # Soak-as-gate (docs/01 §6-B follow-up): correctness gate under sustained
-  # load. tools/soak exits 1 on ANY dropped refresh or protocol violation;
+  # load. cmd/soak exits 1 on ANY dropped refresh or protocol violation;
   # the lag + RSS budgets guard delivery latency and unbounded growth at CI
   # scale. Budgets are deliberately generous — gates regressions, not perf.
   soak-gate:
@@ -94,8 +110,8 @@ jobs:
       - name: Build server + harness
         run: |
           go build -o instantd ./cmd/instantd
-          go build -o soaksetup ./tools/soaksetup
-          go build -o soak ./tools/soak
+          go build -o soaksetup ./cmd/soaksetup
+          go build -o soak ./cmd/soak
       - name: Seed app + attr
         run: |
           ./soaksetup -database-url "$DATABASE_URL" -marker "$BENCHMARK_MARKER" | tee soaksetup.out
@@ -125,12 +141,7 @@ jobs:
       - name: Soak (150 sessions, 10s ramp + 30s warm-up + 60s measurement)
         timeout-minutes: 6
         run: |
-          ./soak \
-            -url ws://127.0.0.1:8888/runtime/session \
-            -app "$SOAK_APP" -attr "$SOAK_ATTR" \
-            -sessions 150 -ramp 10s -settle 30s -duration 100s \
-            -global-tx-rate 8 -tx-interval 2s \
-            -max-p99-lag 10s -events soak-events.jsonl 2>&1 | tee soak.log
+          make soak-gate SOAK_SERVER_PID="$(cat server.pid)"
       - name: RSS ceiling (1 GiB)
         if: always()
         run: |

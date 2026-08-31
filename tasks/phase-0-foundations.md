@@ -1,6 +1,6 @@
 # Phase 0 — Foundations + golden corpus
 
-**Read first**: `docs/04-roadmap.md` Phase 0 + `docs/05-conformance.md` §2.
+**Read first**: `docs/plans/04-roadmap.md` Phase 0 + `docs/guides/05-conformance.md` §2.
 
 ## Current status (2026-08-28)
 
@@ -37,20 +37,20 @@ Port verbatim, no redesign:
 
 ## 0.3  Protocol schema + schemagen
 
-See `docs/03-protocol.md` for the full contract.
+See `docs/reference/03-protocol.md` for the full contract.
 
 - [ ] `internal/protocol/schema/protocol.schema.json` — JSON Schema covering every `op` (client→server
       and server→client), tx-step tuple shapes, attr json shape, InstaQL option/operator enums,
       error envelope `{status,type,message,hint?}`, REST request/response maps for
       `/admin/*`, `/runtime/*`, `/storage/*`.
-- [ ] `tools/schemagen/` — reads the JSON Schema; emits:
+- [ ] `cmd/schemagen/` — reads the JSON Schema; emits:
       - Go types into `internal/protocol/` (wire envelopes, `TxStep` tagged union, `Attr` struct with `?`-suffix field tags mapped to Go names)
       - `internal/protocol/protocol.d.ts` for tooling / corpusctl consumption
       - Self-test: generated types round-trip the corpus frames under `go test ./internal/protocol`.
 
 ## 0.4  corpusctl (the oracle)
 
-- [~] `tools/corpusctl/` — `replay`/`differential` WebSocket entrypoints exist;
+- [~] `cmd/corpusctl/` — `replay`/`differential` WebSocket entrypoints exist;
       `record` requires a future SDK proxy and live-v1 workflow (see 05 §2.2).
 - [ ] Fixture seeding: ports of `server/test` fixtures + `examples/*` app seeds.
 - [ ] SDK pinning: `@instantdb/core` at ≥ 4 versions including `<0.17.5` and `<0.20.4`.

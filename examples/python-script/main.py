@@ -34,10 +34,8 @@ def main() -> None:
         status = "x" if todo.get("done") else " "
         print(f"  [{status}] {todo['text']}")
 
-    # round two: mutate + lookup-ref to prove update/merge/lookup lowering
-    db.transact(db.tx.todos[todo_id]["done"].update(True)) if False else db.transact(
-        db.tx.todos[todo_id].merge({"done": True})
-    )
+    # Round two: merge the existing entity and query the updated value.
+    db.transact(db.tx.todos[todo_id].merge({"done": True}))
     result = db.query({"todos": {"$": {"where": {"createdAt": stamp}}}})
     assert len(result["todos"]) == 1 and result["todos"][0]["done"] is True, result
     print("merge+query round-trip OK")

@@ -24,7 +24,7 @@ type WSHandler struct {
 	// Refresh compiles+runs a subscription query; wired from instaql in assembly.
 	Refresh func(ctx context.Context, sub *reactive.Subscription) (json.RawMessage, error)
 	// Compression selects permessage-deflate handling
-	// (docs/09-tier2-architecture.md §T2.2): "" | "disabled" |
+	// (docs/reference/09-tier2-architecture.md §T2.2): "" | "disabled" |
 	// "no-context-takeover" | "context-takeover". Empty/disabled keeps the
 	// historical byte-exact behavior; takeover mode persists the LZ77 window
 	// across frames, which is where large refresh envelopes win.

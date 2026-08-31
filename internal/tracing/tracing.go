@@ -1,5 +1,5 @@
 // Package tracing wires OpenTelemetry spans across the transact→commit→
-// fanout chain (docs/09-tier2-architecture.md §T3 observability). Export is
+// fanout chain (docs/reference/09-tier2-architecture.md §T3 observability). Export is
 // strictly opt-in: without OTEL_EXPORTER_OTLP_ENDPOINT the global tracer
 // provider stays the SDK no-op, so span creation costs a few ns and nothing
 // leaves the process. When configured, spans export over OTLP/HTTP — the
@@ -16,7 +16,7 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.34.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.40.0"
 	"go.opentelemetry.io/otel/trace"
 )
 

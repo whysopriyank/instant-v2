@@ -6,12 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/instant-v2/instant-v2/internal/testkit"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -411,14 +412,21 @@ func TestRunWithLoggerUsesProvidedLogger(t *testing.T) {
 	defer cancel()
 	done := make(chan struct{})
 	onEvent := func(Invalidation) { close(done); cancel() }
-	go func() { _ = RunWithLogger(ctx, fc, onEvent, logger) }()
+	stopped := make(chan struct{})
+	go func() {
+		_ = RunWithLogger(ctx, fc, onEvent, logger)
+		close(stopped)
+	}()
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout")
 	}
-	// allow Run to exit
-	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunWithLogger did not stop")
+	}
 	if !strings.Contains(buf.String(), "malformed") {
 		t.Fatalf("expected logger to capture malformed, got %q", buf.String())
 	}
@@ -450,56 +458,74 @@ func min(a, b int) int {
 
 // ---------------------------------------------------------------------------
 // Integration — real Postgres LISTEN/NOTIFY round-trip
-// Guarded by TEST_DATABASE_URL / DATABASE_URL like waltail (skip when absent).
+// Uses the shared integration opt-in and a private database per test.
 // ---------------------------------------------------------------------------
 
-func busDSN(t *testing.T) string {
-	t.Helper()
-	d := os.Getenv("TEST_DATABASE_URL")
-	if d == "" {
-		d = os.Getenv("DATABASE_URL")
+// listenReadyConn observes the real LISTEN completion without issuing a
+// second LISTEN outside Run or depending on scheduler timing.
+type listenReadyConn struct {
+	Conn
+	ready chan struct{}
+}
+
+func (c *listenReadyConn) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	tag, err := c.Conn.Exec(ctx, sql, args...)
+	if err == nil && sql == "LISTEN "+Channel {
+		close(c.ready)
 	}
-	if d == "" {
-		t.Skip("TEST_DATABASE_URL/DATABASE_URL not set — skipping bus integration test")
-	}
-	return d
+	return tag, err
 }
 
 func TestIntegrationBusRoundTrip(t *testing.T) {
-	dsn := busDSN(t)
+	db := testkit.NewPostgres(t, testkit.PostgresOptions{})
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	// Dedicated listener connection (LISTEN dies with the connection — must not be pooled).
-	listenConn, err := pgx.Connect(ctx, dsn)
+	listenConn, err := pgx.Connect(ctx, db.DSN)
 	if err != nil {
 		t.Fatalf("listen Connect: %v", err)
 	}
-	defer func() { _ = listenConn.Close(ctx) }()
+	t.Cleanup(func() { _ = listenConn.Close(context.Background()) })
 
 	// Publisher connection (separate, as in production — two nodes).
-	pubConn, err := pgx.Connect(ctx, dsn)
+	pubConn, err := pgx.Connect(ctx, db.DSN)
 	if err != nil {
 		t.Fatalf("pub Connect: %v", err)
 	}
-	defer func() { _ = pubConn.Close(ctx) }()
+	t.Cleanup(func() { _ = pubConn.Close(context.Background()) })
 
 	received := make(chan Invalidation, 4)
-	runErr := make(chan error, 1)
+	var runErr error
+	runDone := make(chan struct{})
 	runCtx, runCancel := context.WithCancel(ctx)
-	defer runCancel()
+	t.Cleanup(func() {
+		runCancel()
+		select {
+		case <-runDone:
+		case <-time.After(2 * time.Second):
+			t.Error("Run did not exit after cancel")
+		}
+	})
 
+	listener := &listenReadyConn{Conn: listenConn, ready: make(chan struct{})}
 	go func() {
-		runErr <- Run(runCtx, listenConn, func(iv Invalidation) {
+		runErr = Run(runCtx, listener, func(iv Invalidation) {
 			select {
 			case received <- iv:
 			default:
 			}
 		})
+		close(runDone)
 	}()
 
-	// Give LISTEN a moment to be issued before publishing
-	time.Sleep(300 * time.Millisecond)
+	select {
+	case <-listener.ready:
+	case <-runDone:
+		t.Fatalf("Run stopped before LISTEN completed: %v", runErr)
+	case <-ctx.Done():
+		t.Fatal("LISTEN did not complete")
+	}
 
 	want := Invalidation{AppID: "int-test-app", AttrIDs: []string{"attr-1", "attr-2"}, TxID: 12345}
 	if err := Publish(ctx, pubConn, want); err != nil {
@@ -508,7 +534,7 @@ func TestIntegrationBusRoundTrip(t *testing.T) {
 
 	select {
 	case got := <-received:
-		if got.AppID != want.AppID || got.TxID != want.TxID || len(got.AttrIDs) != len(want.AttrIDs) {
+		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("mismatch: got %+v want %+v", got, want)
 		}
 	case <-time.After(5 * time.Second):
@@ -538,10 +564,10 @@ func TestIntegrationBusRoundTrip(t *testing.T) {
 
 	runCancel()
 	select {
-	case err := <-runErr:
-		if err != context.Canceled && !strings.Contains(strings.ToLower(err.Error()), "canceled") && !strings.Contains(strings.ToLower(err.Error()), "cancelled") {
+	case <-runDone:
+		if runErr != nil && runErr != context.Canceled && !strings.Contains(strings.ToLower(runErr.Error()), "canceled") && !strings.Contains(strings.ToLower(runErr.Error()), "cancelled") {
 			// Run returns context.Canceled on cancel — accept either
-			t.Logf("Run returned: %v", err)
+			t.Logf("Run returned: %v", runErr)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not exit after cancel")

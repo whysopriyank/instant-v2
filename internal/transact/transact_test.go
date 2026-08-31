@@ -6,44 +6,32 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/instant-v2/instant-v2/internal/perms"
 	"github.com/instant-v2/instant-v2/internal/platform"
 	"github.com/instant-v2/instant-v2/internal/storage"
+	"github.com/instant-v2/instant-v2/internal/testkit"
 	"github.com/instant-v2/instant-v2/internal/transact"
 )
 
 func testDB(t *testing.T) *storage.DB {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set; skipping live transactor tests")
-	}
+	fixture := testkit.NewPostgres(t, testkit.PostgresOptions{})
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, dsn)
+	sqlDB, err := sql.Open("pgx", fixture.DSN)
 	if err != nil {
-		t.Fatalf("pgxpool: %v", err)
+		t.Fatalf("open migrations database: %v", err)
 	}
-	t.Cleanup(pool.Close)
-	if err := pool.Ping(ctx); err != nil {
-		t.Fatalf("ping: %v", err)
-	}
-	if _, err := pool.Exec(ctx, `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`); err != nil {
-		t.Fatalf("reset: %v", err)
-	}
-	sqlDB, _ := sql.Open("pgx", dsn)
 	defer sqlDB.Close()
 	if err := platform.Migrate(ctx, sqlDB); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	return storage.New(pool)
+	return storage.New(fixture.Pool)
 }
 
 func seed(t *testing.T, db *storage.DB) ([16]byte, *platform.AttrCatalog, attrIDs) {
@@ -154,11 +142,11 @@ func TestRetractTriple(t *testing.T) {
 	db := testDB(t)
 	ctx := context.Background()
 	appID, cat, ids := seed(t, db)
-	e, target := rand16(), rand16()
+	e, target, survivor := rand16(), rand16(), rand16()
 
 	steps := parseSteps(t,
 		mustJSON(t, []any{"add-triple", uuidStr(e), uuidToStr(ids.link), uuidStr(target)}),
-		mustJSON(t, []any{"add-triple", uuidStr(e), uuidToStr(ids.link), uuidStr(rand16())}),
+		mustJSON(t, []any{"add-triple", uuidStr(e), uuidToStr(ids.link), uuidStr(survivor)}),
 	)
 	if _, err := transact.Transact(ctx, db, cat, appID, steps, transact.Options{}, &perms.RuleDoc{Etypes: map[string]*perms.EtypeRule{}}); err != nil {
 		t.Fatal(err)
@@ -167,12 +155,11 @@ func TestRetractTriple(t *testing.T) {
 	if _, err := transact.Transact(ctx, db, cat, appID, steps2, transact.Options{}, &perms.RuleDoc{Etypes: map[string]*perms.EtypeRule{}}); err != nil {
 		t.Fatal(err)
 	}
-	rows, _ := db.FetchTriples(ctx, appID, storage.FetchFilter{EntityIDs: [][16]byte{e}})
-	if len(rows) != 1 || rows[0].Triple.V != uuidStr(rand16()) {
-		_ = rows
+	rows, err := db.FetchTriples(ctx, appID, storage.FetchFilter{EntityIDs: [][16]byte{e}})
+	if err != nil {
+		t.Fatal(err)
 	}
-	// Actual check: one row remains with the *other* target.
-	if len(rows) != 1 {
+	if len(rows) != 1 || rows[0].Triple.E != e || rows[0].Triple.A != ids.link || rows[0].Triple.V != uuidStr(survivor) {
 		t.Fatalf("rows after retract: %+v", rows)
 	}
 }

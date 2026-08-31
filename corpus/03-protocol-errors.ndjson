@@ -1,0 +1,13 @@
+{"dir":"meta","raw":{"suite":"03-protocol-errors","sdkVersion":"0.22.0","seedFixture":"smoke"}}
+{"dir":"c2s","raw":{"op":"add-query","q":{"posts":{}}}}
+{"dir":"s2c","raw":{"op":"error","status":401,"type":"not-initialized","message":"send init first"}}
+{"dir":"c2s","raw":{"op":"init"}}
+{"dir":"s2c","raw":{"op":"error","status":400,"type":"missing-app-id","message":"init requires app-id"}}
+{"dir":"c2s","raw":{"op":"init","app-id":"22222222-2222-4222-8222-222222222222","versions":{"@instantdb/core":"0.22.0"},"client-event-id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}}
+{"dir":"s2c","raw":{"op":"init-ok","session-id":"<session-id>","auth":{"admin?":false,"app":{"id":"22222222-2222-4222-8222-222222222222"},"user":null},"attrs":[{"cardinality":"one","checked-data-type":null,"forward-identity":["22222222-2222-4222-8222-222222222222","posts","title"],"id":"44444444-4444-4444-8444-444444444444","index?":false,"required?":false,"unique?":false,"value-type":"blob"}],"app-status":{"status":"active"},"client-event-id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}}
+{"dir":"c2s","raw":{"op":"add-query"}}
+{"dir":"s2c","raw":{"op":"error","status":400,"type":"bad-request","message":"add-query requires q"}}
+{"dir":"c2s","raw":{"op":"transact"}}
+{"dir":"s2c","raw":{"op":"error","status":400,"type":"bad-request","message":"transact requires tx-steps"}}
+{"dir":"c2s","raw":{"op":"transact","tx-steps":{}}}
+{"dir":"s2c","raw":{"op":"error","status":400,"type":"bad-request","message":"tx-steps must be an array"}}

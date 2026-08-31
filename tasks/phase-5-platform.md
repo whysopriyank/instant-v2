@@ -1,6 +1,6 @@
 # Phase 5 — Platform surfaces
 
-**Read first**: `docs/03-protocol.md` §9 (frozen REST paths), `docs/02-architecture.md` (stack).
+**Read first**: `docs/reference/03-protocol.md` §9 (frozen REST paths), `docs/reference/02-architecture.md` (stack).
 
 Three packages ship in parallel on disjoint paths. None may touch the protocol schema
 (that stayed frozen since Phase 0) or the Phase 4 invariants.

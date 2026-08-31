@@ -10,38 +10,29 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/instant-v2/instant-v2/internal/authn"
 	"github.com/instant-v2/instant-v2/internal/perms"
 	"github.com/instant-v2/instant-v2/internal/platform"
 	"github.com/instant-v2/instant-v2/internal/storage"
+	"github.com/instant-v2/instant-v2/internal/testkit"
 )
 
 func env(t *testing.T) (*authn.Service, *authn.Handler, [16]byte, func()) {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
-	}
+	db := testkit.NewPostgres(t, testkit.PostgresOptions{})
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, dsn)
+	pool := db.Pool
+	sqldb, err := sql.Open("pgx", db.DSN)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sqldb, err := sql.Open("pgx", dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`); err != nil {
-		t.Fatal(err)
-	}
+	t.Cleanup(func() { _ = sqldb.Close() })
 	if err := platform.Migrate(ctx, sqldb); err != nil {
 		t.Fatal(err)
 	}

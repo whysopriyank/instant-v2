@@ -10,7 +10,7 @@ import (
 // mirroring the WS loop's 401 not-initialized guard. Uses only pre-existing
 // handler API so it also compiles against the pre-fix implementation.
 func TestSSERejectsOpsBeforeInit(t *testing.T) {
-	srv, appID := sseSrv(t, nil)
+	srv, appID, _ := sseSrv(t, nil)
 	resp, err := http.Get(srv.URL + "/runtime/sse?app_id=" + appID)
 	if err != nil {
 		t.Fatalf("get: %v", err)

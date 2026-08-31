@@ -1,11 +1,11 @@
 package main
 
 import (
+	"net/http/httptest"
 	"strings"
+	"testing"
 
 	"github.com/instant-v2/instant-v2/internal/config"
-	"net/http/httptest"
-	"testing"
 )
 
 // Security invariant (audit S4/H4): the rate-limiter bucket key must be

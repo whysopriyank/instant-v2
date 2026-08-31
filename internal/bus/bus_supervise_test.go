@@ -38,8 +38,11 @@ func TestRunSupervisedReconnects(t *testing.T) {
 	defer cancel()
 
 	var acquires atomic.Int64
+	reconnected := make(chan struct{})
 	acquire := func(ctx context.Context) (Conn, func(), error) {
-		acquires.Add(1)
+		if acquires.Add(1) == 2 {
+			close(reconnected)
+		}
 		c := &dyingConn{}
 		c.failLeft.Store(1) // every conn dies once → forces repeat retries
 		return c, func() {}, nil
@@ -51,13 +54,17 @@ func TestRunSupervisedReconnects(t *testing.T) {
 		close(done)
 	}()
 
-	deadline := time.Now().Add(4 * time.Second)
-	for acquires.Load() < 2 {
-		if time.Now().After(deadline) {
-			t.Fatalf("supervisor did not re-acquire after connection loss (acquires=%d)", acquires.Load())
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Error("supervisor did not stop after cancellation")
 		}
-		time.Sleep(10 * time.Millisecond)
+	})
+	select {
+	case <-reconnected:
+	case <-ctx.Done():
+		t.Fatalf("supervisor did not re-acquire after connection loss (acquires=%d)", acquires.Load())
 	}
-	cancel()
-	<-done
 }

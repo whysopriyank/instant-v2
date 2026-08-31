@@ -56,12 +56,9 @@ func TestWSTeardownOnCapBreachClose(t *testing.T) {
 	}
 
 	// The deferred teardown must free the first subscription promptly.
-	pollDeadline := time.Now().Add(5 * time.Second)
-	for store.Len() > 0 {
-		if time.Now().After(pollDeadline) {
-			t.Fatalf("session closed but %d subscription(s) leaked: teardown missed an exit path", store.Len())
-		}
-		time.Sleep(10 * time.Millisecond)
+	env.waitClosed(t)
+	if store.Len() != 0 {
+		t.Fatalf("session closed but %d subscription(s) leaked: teardown missed an exit path", store.Len())
 	}
 }
 
@@ -92,11 +89,8 @@ func TestWSTeardownOnDeadConn(t *testing.T) {
 		t.Fatalf("CloseNow: %v", err)
 	}
 
-	deadline := time.Now().Add(5 * time.Second)
-	for store.Len() > 0 {
-		if time.Now().After(deadline) {
-			t.Fatalf("dead conn left %d subscription(s) attached: ghost session", store.Len())
-		}
-		time.Sleep(10 * time.Millisecond)
+	env.waitClosed(t)
+	if store.Len() != 0 {
+		t.Fatalf("dead conn left %d subscription(s) attached: ghost session", store.Len())
 	}
 }

@@ -10,7 +10,7 @@ import (
 	"github.com/coder/websocket"
 )
 
-// T2.2 (docs/09-tier2-architecture.md): permessage-deflate is negotiated only
+// T2.2 (docs/reference/09-tier2-architecture.md): permessage-deflate is negotiated only
 // when the handler's Compression knob enables it; the disabled default never
 // accepts the extension, keeping bytes on the wire identical for existing
 // clients/proxies.

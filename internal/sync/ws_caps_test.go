@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -22,14 +21,8 @@ import (
 // subscriptions and room memberships. Pre-fix, the orphaned member kept its
 // per-app subscription slot forever — an unauthenticated cap-exhaustion DoS.
 func TestWSReInitReleasesSubscriptionSlot(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
-	}
+	pool := newPostgres(t)
 	ctx := context.Background()
-	pool := mustPool(t, dsn)
-	resetSchema(t, pool)
-	migrate(t, dsn)
 
 	st := storage.New(pool)
 	cats := platform.NewCatalogCache(pool, pool)
@@ -47,7 +40,7 @@ func TestWSReInitReleasesSubscriptionSlot(t *testing.T) {
 			return runQuery(ex, cats, sub)
 		},
 	}
-	go notifier.Run(ctx)
+	runNotifier(t, notifier)
 	mgr := syncpkg.NewManager(syncpkg.Deps{
 		Rooms: syncpkg.NewRoomHub(), DB: st, Catalogs: cats, Store: store,
 		OnCommit: func(ctx context.Context, appID string, attrIDs []string, txID int64, attrsChanged bool) {
@@ -124,14 +117,8 @@ func TestWSReInitReleasesSubscriptionSlot(t *testing.T) {
 // Audit M4: presence payloads are bounded — a multi-megabyte blob would be
 // fanned to every room member on every mutation.
 func TestWSRejectsOversizedPresenceData(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
-	}
+	pool := newPostgres(t)
 	ctx := context.Background()
-	pool := mustPool(t, dsn)
-	resetSchema(t, pool)
-	migrate(t, dsn)
 
 	st := storage.New(pool)
 	cats := platform.NewCatalogCache(pool, pool)
@@ -148,7 +135,7 @@ func TestWSRejectsOversizedPresenceData(t *testing.T) {
 			return runQuery(ex, cats, sub)
 		},
 	}
-	go notifier.Run(ctx)
+	runNotifier(t, notifier)
 	mgr := syncpkg.NewManager(syncpkg.Deps{
 		Rooms: syncpkg.NewRoomHub(), DB: st, Catalogs: cats, Store: store,
 	})

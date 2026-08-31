@@ -1,4 +1,4 @@
-// Package metrics owns instantd's Prometheus collectors (docs/09-tier2-
+// Package metrics owns instantd's Prometheus collectors (docs/reference/09-tier2-
 // architecture.md §T3 observability). Collectors are package-level so hot
 // paths pay an atomic add and nothing else; gauges that mirror live state
 // (notifier queue depth, pool saturation, session count) are registered as

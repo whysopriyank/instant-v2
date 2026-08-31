@@ -2,6 +2,7 @@ package sync_test
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -18,9 +19,24 @@ func TestGracefulShutdownDrain(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	conn, frames := env.dial(t, ctx)
+	// This test owns the reader so it can assert the exact close status.
+	// env.dial starts a background reader that would consume that status.
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(env.Server.URL, "http")+"/runtime/session", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.CloseNow() }()
 	sendFrame(t, conn, ctx, map[string]any{"op": "init", "app-id": env.AppID})
-	expectOp(t, frames, "init-ok")
+	_, raw, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var init struct {
+		Op string `json:"op"`
+	}
+	if err := json.Unmarshal(raw, &init); err != nil || init.Op != "init-ok" {
+		t.Fatalf("init response=%s, error=%v", raw, err)
+	}
 
 	drained := make(chan struct{})
 	go func() {
@@ -32,30 +48,13 @@ func TestGracefulShutdownDrain(t *testing.T) {
 	readCtx, rcancel := context.WithTimeout(ctx, 5*time.Second)
 	defer rcancel()
 	for {
-		typ, r, err := conn.Reader(readCtx)
+		_, _, err := conn.Read(readCtx)
 		if err != nil {
 			st := websocket.CloseStatus(err)
-			// Primary contract: 1001 Going Away. Under -race the transport
-			// may tear down mid-handshake; a bare closed-connection error
-			// still proves the server closed first.
 			if st == websocket.StatusGoingAway {
 				break
 			}
-			if st == -1 && strings.Contains(err.Error(), "closed") {
-				break
-			}
 			t.Fatalf("close status = %v (%v), want 1001", st, err)
-		}
-		// Drain a control/data frame to keep the read loop fed.
-		buf := make([]byte, 512)
-		for {
-			n, rerr := r.Read(buf)
-			if rerr != nil || n > 0 && typ != websocket.MessageBinary {
-				break
-			}
-			if n == 0 {
-				break
-			}
 		}
 	}
 

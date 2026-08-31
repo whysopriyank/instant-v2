@@ -8,13 +8,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/instant-v2/instant-v2/internal/authn"
@@ -22,29 +20,21 @@ import (
 	"github.com/instant-v2/instant-v2/internal/platform"
 	"github.com/instant-v2/instant-v2/internal/runtimeapi"
 	"github.com/instant-v2/instant-v2/internal/storage"
+	"github.com/instant-v2/instant-v2/internal/testkit"
 	"github.com/instant-v2/instant-v2/internal/triple"
 )
 
-// env mirrors internal/authn's fixture: fresh pool, dropped schema, migrated
-// catalog, one seeded instant_user + app.
+// env uses an isolated database, migrated catalog, and one seeded user + app.
 func env(t *testing.T) (*authn.Service, *runtimeapi.Handler, [16]byte, func()) {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
-	}
+	fixture := testkit.NewPostgres(t, testkit.PostgresOptions{})
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, dsn)
+	pool := fixture.Pool
+	sqldb, err := sql.Open("pgx", fixture.DSN)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sqldb, err := sql.Open("pgx", dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`); err != nil {
-		t.Fatal(err)
-	}
+	t.Cleanup(func() { _ = sqldb.Close() })
 	if err := platform.Migrate(ctx, sqldb); err != nil {
 		t.Fatal(err)
 	}

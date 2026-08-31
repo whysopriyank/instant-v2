@@ -1,0 +1,3 @@
+{"dir":"meta","raw":{"suite":"09-old-sdk-init","sdkVersion":"0.22.0","seedFixture":"smoke"}}
+{"dir":"c2s","raw":{"op":"init","app-id":"22222222-2222-4222-8222-222222222222","versions":{"@instantdb/core":"0.17.4"},"client-event-id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}}
+{"dir":"s2c","raw":{"op":"init-ok","session-id":"<session-id>","auth":{"admin?":false,"app":{"id":"22222222-2222-4222-8222-222222222222"},"user":null},"attrs":[{"cardinality":"one","checked-data-type":null,"forward-identity":["22222222-2222-4222-8222-222222222222","posts","title"],"id":"44444444-4444-4444-8444-444444444444","index?":false,"required?":false,"unique?":false,"value-type":"blob"}],"app-status":{"status":"active"},"client-event-id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}}

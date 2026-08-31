@@ -451,9 +451,9 @@ func executeSaturation(ctx context.Context, plan RunPlan, hooks RunHooks, ledger
 	}
 	if err == nil && (len(ordered) != operations || acceptedRows != expectedRows) {
 		if ctx.Err() != nil {
-			err = fmt.Errorf("T saturation stopped before contract completion: %w (accepted %d/%d mutations, %d/%d rows)", ctx.Err(), len(ordered), operations, acceptedRows, expectedRows)
+			err = fmt.Errorf("T saturation stopped before contract completion: %w (accepted %d/%d mutations, %d/%d rows)", ctx.Err(), len(ordered), operations, acceptedRows, expectedRows) //nolint:staticcheck // ST1005: T is the frozen workload family identifier.
 		} else {
-			err = fmt.Errorf("T saturation incomplete: accepted %d/%d mutations and %d/%d rows", len(ordered), operations, acceptedRows, expectedRows)
+			err = fmt.Errorf("T saturation incomplete: accepted %d/%d mutations and %d/%d rows", len(ordered), operations, acceptedRows, expectedRows) //nolint:staticcheck // ST1005: T is the frozen workload family identifier.
 		}
 	}
 	if orderErr != nil {
@@ -511,7 +511,7 @@ func executeSaturation(ctx context.Context, plan RunPlan, hooks RunHooks, ledger
 		result.Acknowledged++
 	}
 	if err == nil && committedRows != expectedRows {
-		err = fmt.Errorf("T saturation produced %d/%d expected rows", committedRows, expectedRows)
+		err = fmt.Errorf("T saturation produced %d/%d expected rows", committedRows, expectedRows) //nolint:staticcheck // ST1005: T is the frozen workload family identifier.
 	}
 	return result, err
 }

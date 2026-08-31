@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 
@@ -20,29 +19,22 @@ import (
 	"github.com/instant-v2/instant-v2/internal/instaql"
 	"github.com/instant-v2/instant-v2/internal/platform"
 	"github.com/instant-v2/instant-v2/internal/storage"
+	"github.com/instant-v2/instant-v2/internal/testkit"
 )
 
 func qdb(t *testing.T) *storage.DB {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set; skipping live query tests")
-	}
+	fixture := testkit.NewPostgres(t, testkit.PostgresOptions{})
 	ctx := context.Background()
-	pool, err := newPool(dsn)
+	sdb, err := sql.Open("pgx", fixture.DSN)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`); err != nil {
-		t.Fatalf("reset: %v", err)
-	}
-	sdb, _ := sql.Open("pgx", dsn)
 	defer sdb.Close()
 	if err := platform.Migrate(ctx, sdb); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	return storage.New(pool)
+	return storage.New(fixture.Pool)
 }
 
 func qseed(t *testing.T, db *storage.DB) ([16]byte, *platform.AttrCatalog, qids) {

@@ -1,7 +1,7 @@
 # Phase 3 — Query engine
 
-**Read first**: `docs/02-architecture.md` §4 (datalog/instaql interfaces),
-`docs/03-protocol.md` §6 (InstaQL surface), v1 sources `db/datalog.clj` (3,500 LOC),
+**Read first**: `docs/reference/02-architecture.md` §4 (datalog/instaql interfaces),
+`docs/reference/03-protocol.md` §6 (InstaQL surface), v1 sources `db/datalog.clj` (3,500 LOC),
 `db/instaql.clj` (2,326 LOC).
 
 Agents `planner` and `instaql` run in parallel across the IR boundary. The first commit of this

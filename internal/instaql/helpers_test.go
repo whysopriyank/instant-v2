@@ -9,7 +9,6 @@ import (
 	"github.com/instant-v2/instant-v2/internal/platform"
 	"github.com/instant-v2/instant-v2/internal/triple"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func rand16() [16]byte {
@@ -35,8 +34,4 @@ var _ pgx.Tx = nil
 func mustAttr(t *testing.T, tx pgx.Tx, appID [16]byte, etype, label, vt, card string, uniq, idx bool) (platform.Attr, error) {
 	t.Helper()
 	return platform.GetOrCreateAttr(context.Background(), tx, appID, etype, label, vt, card, uniq, idx)
-}
-
-func newPool(dsn string) (*pgxpool.Pool, error) {
-	return pgxpool.New(context.Background(), dsn)
 }

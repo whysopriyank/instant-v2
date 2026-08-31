@@ -183,16 +183,12 @@ func (c ProcProcessCollector) Sample(ctx context.Context) (ProcessSample, error)
 	}, nil
 }
 
-// pidOwnsConfiguredEndpoint is deliberately Linux/procfs based. A configured
+// pidOwnsConfiguredEndpointWithNamespace is deliberately Linux/procfs based. A configured
 // PID is not sufficient provenance for a resource claim: at least one
 // configured loopback session/health/runtime endpoint must be backed by a
 // listening socket owned by that exact PID. A wildcard socket is accepted only
 // after the Linux namespace proof in network_provenance_linux.go. Unsupported
 // platforms and missing procfs evidence fail closed.
-func pidOwnsConfiguredEndpoint(pid int, endpoints []string) error {
-	return pidOwnsConfiguredEndpointWithNamespace(pid, endpoints, NetworkNamespaceProvenance{})
-}
-
 func pidOwnsConfiguredEndpointWithNamespace(pid int, endpoints []string, namespace NetworkNamespaceProvenance) error {
 	if runtime.GOOS != "linux" {
 		return errors.New("endpoint-serving PID binding is unsupported on this platform")
@@ -257,10 +253,7 @@ func pidOwnsConfiguredEndpointAt(pid int, endpoints []string, namespace NetworkN
 	}
 	for inode := range inodes {
 		if wildcards[inode] {
-			if err := certifyWildcardListenerAt(pid, namespace, procRoot, selfRoot); err != nil {
-				return err
-			}
-			return nil
+			return certifyWildcardListenerAt(pid, namespace, procRoot, selfRoot)
 		}
 	}
 	return errors.New("configured endpoint is not served by the signed process PID")
@@ -285,10 +278,6 @@ func endpointHostIPs(host string) ([]net.IP, error) {
 	return ips, nil
 }
 
-func processSocketInodes(pid int) (map[string]bool, error) {
-	return processSocketInodesAt(pid, "/proc")
-}
-
 func processSocketInodesAt(pid int, procRoot string) (map[string]bool, error) {
 	entries, err := os.ReadDir(filepath.Join(procRoot, strconv.Itoa(pid), "fd"))
 	if err != nil {
@@ -308,15 +297,6 @@ func processSocketInodesAt(pid int, procRoot string) (map[string]bool, error) {
 		return out, nil
 	}
 	return out, nil
-}
-
-func loopbackListeningInodes(pid int, endpointKeys map[string]bool) (map[string]bool, error) {
-	listeners, _, err := processListeningInodes(pid, endpointKeys)
-	return listeners, err
-}
-
-func processListeningInodes(pid int, endpointKeys map[string]bool) (map[string]bool, map[string]bool, error) {
-	return processListeningInodesAt(pid, "/proc", endpointKeys)
 }
 
 func processListeningInodesAt(pid int, procRoot string, endpointKeys map[string]bool) (map[string]bool, map[string]bool, error) {
@@ -385,11 +365,6 @@ func endpointPort(endpointKeys map[string]bool, port int) bool {
 		}
 	}
 	return false
-}
-
-func procAddressIP(value string, ipv6 bool) (net.IP, bool) {
-	ip, loopback, _, ok := procListenerAddress(value, ipv6)
-	return ip, loopback && ok
 }
 
 func procListenerAddress(value string, ipv6 bool) (net.IP, bool, bool, bool) {
@@ -511,7 +486,8 @@ func (c PrometheusRuntimeCollector) Sample(ctx context.Context) (RuntimeSample, 
 	if err != nil {
 		return failedRuntime(err.Error()), err
 	}
-	defer resp.Body.Close()
+	// Closing the read-only response does not change the sampled evidence.
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode/100 != 2 {
 		err := fmt.Errorf("runtime endpoint returned %s", resp.Status)
 		return failedRuntime(err.Error()), err

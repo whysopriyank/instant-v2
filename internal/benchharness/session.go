@@ -314,7 +314,7 @@ func DialSSE(ctx context.Context, opts SessionOptions) (Session, error) {
 		return nil, err
 	}
 	if resp.StatusCode/100 != 2 {
-		resp.Body.Close()
+		_ = resp.Body.Close() // The HTTP status remains the setup failure.
 		cancel()
 		return nil, fmt.Errorf("SSE GET status %s", resp.Status)
 	}
@@ -322,7 +322,7 @@ func DialSSE(ctx context.Context, opts SessionOptions) (Session, error) {
 	select {
 	case <-s.handshake:
 	case <-ctx.Done():
-		s.Close()
+		_ = s.Close() // Preserve the caller's cancellation error.
 		return nil, ctx.Err()
 	}
 	return s, nil
@@ -330,7 +330,7 @@ func DialSSE(ctx context.Context, opts SessionOptions) (Session, error) {
 func (s *SSESession) read(body io.ReadCloser) {
 	defer close(s.events)
 	defer s.failAckWaiters()
-	defer body.Close()
+	defer func() { _ = body.Close() }() // Reader termination owns cleanup, not a second protocol result.
 	sc := bufio.NewScanner(body)
 	sc.Buffer(make([]byte, 4096), 16<<20)
 	for sc.Scan() {
@@ -473,7 +473,7 @@ func (s *SSESession) Send(ctx context.Context, msg SessionMessage) (Ack, error) 
 	if err != nil {
 		return Ack{}, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }() // The correlated acknowledgement determines transaction success.
 	if resp.StatusCode/100 != 2 {
 		return Ack{}, fmt.Errorf("SSE POST status %s", resp.Status)
 	}

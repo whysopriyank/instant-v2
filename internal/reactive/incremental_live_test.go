@@ -1,6 +1,6 @@
 package reactive
 
-// Live-database variant of the incremental differential (docs/09-tier2-
+// Live-database variant of the incremental differential (docs/reference/09-tier2-
 // architecture.md §T2.5): the in-memory fuzz in incremental_test.go pins the
 // engine's logic against a model oracle; THIS file pins InstaqlSource's SQL
 // mirrors against the real instaql.Executor on a real Postgres — the drift
@@ -19,35 +19,23 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
-	"os"
 	"sync"
 	"testing"
 
 	"github.com/instant-v2/instant-v2/internal/instaql"
 	"github.com/instant-v2/instant-v2/internal/platform"
 	"github.com/instant-v2/instant-v2/internal/storage"
+	"github.com/instant-v2/instant-v2/internal/testkit"
 	"github.com/instant-v2/instant-v2/internal/transact"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 func TestLiveIncrementalMatchesExecutor(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
-	}
+	db := testkit.NewPostgres(t, testkit.PostgresOptions{})
 	ctx := context.Background()
-
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
-	if err := pool.Ping(ctx); err != nil {
-		t.Fatal(err)
-	}
-	sqldb, err := sql.Open("pgx", dsn)
+	pool := db.Pool
+	sqldb, err := sql.Open("pgx", db.DSN)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -23,14 +22,8 @@ import (
 // fakeDeps builds a Manager+Store+Refresh wired to a live DB without HTTP.
 func fakeStack(t *testing.T) (*syncpkg.Manager, *reactive.Store, *reactive.Notifier, *instaql.Executor, [16]byte, *platform.CatalogCache, qattr) {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
-	}
+	pool := newPostgres(t)
 	ctx := context.Background()
-	pool := mustPool(t, dsn)
-	resetSchema(t, pool)
-	migrate(t, dsn)
 
 	st := storage.New(pool)
 	cats := platform.NewCatalogCache(pool, pool)
@@ -38,7 +31,7 @@ func fakeStack(t *testing.T) (*syncpkg.Manager, *reactive.Store, *reactive.Notif
 	seedApp(t, st, appID)
 
 	var title, done, link platform.Attr
-	_ = st.WithTx(ctx, func(tx pgx.Tx) error {
+	if err := st.WithTx(ctx, func(tx pgx.Tx) error {
 		var e1, e2, e3 error
 		title, e1 = platform.GetOrCreateAttr(ctx, tx, appID, "todos", "text", "blob", "one", false, true)
 		done, e2 = platform.GetOrCreateAttr(ctx, tx, appID, "todos", "done", "boolean", "one", false, true)
@@ -51,7 +44,9 @@ func fakeStack(t *testing.T) (*syncpkg.Manager, *reactive.Store, *reactive.Notif
 			return e2
 		}
 		return e3
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := cats.For(ctx, uuidStr(appID)); err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +59,7 @@ func fakeStack(t *testing.T) (*syncpkg.Manager, *reactive.Store, *reactive.Notif
 			return runQuery(ex, cats, sub)
 		},
 	}
-	go notifier.Run(ctx)
+	runNotifier(t, notifier)
 
 	mgr := syncpkg.NewManager(syncpkg.Deps{
 		Rooms:    syncpkg.NewRoomHub(),
@@ -75,7 +70,6 @@ func fakeStack(t *testing.T) (*syncpkg.Manager, *reactive.Store, *reactive.Notif
 			notifier.Notify(ctx, appID, attrIDs, txID)
 		},
 	})
-	t.Cleanup(func() { _ = pool })
 	return mgr, store, notifier, ex, appID, cats, qattr{title: title.ID, done: done.ID, link: link.ID}
 }
 

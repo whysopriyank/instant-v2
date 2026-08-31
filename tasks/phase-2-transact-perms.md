@@ -1,7 +1,7 @@
 # Phase 2 — Transactor + permissions
 
-**Read first**: `docs/03-protocol.md` §4 (tx-steps grammar), §8 (permission doc + fallback chain),
-`docs/02-architecture.md` §4 (transact/perms interfaces).
+**Read first**: `docs/reference/03-protocol.md` §4 (tx-steps grammar), §8 (permission doc + fallback chain),
+`docs/reference/02-architecture.md` §4 (transact/perms interfaces).
 
 Agents `transact` and `permissions` run in parallel on disjoint packages behind the Phase 0 schema.
 

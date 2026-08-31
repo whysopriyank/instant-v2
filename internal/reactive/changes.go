@@ -1,7 +1,7 @@
 package reactive
 
 // Entity-level change records riding along with invalidations, plus the
-// shared enqueue plumbing they funnel through (docs/09-tier2-architecture.md
+// shared enqueue plumbing they funnel through (docs/reference/09-tier2-architecture.md
 // §T2.5). Legacy Notify callers attach no change records and keep the exact
 // full-recompute path they had before.
 
@@ -32,7 +32,7 @@ const maxTrackedChanges = 1024
 
 // NotifyChanges enqueues invalidation for appID after txID committed,
 // carrying entity-level changes for the incremental engine
-// (docs/09-tier2-architecture.md §T2.5).
+// (docs/reference/09-tier2-architecture.md §T2.5).
 //
 // A nil/empty changes slice means "changes unknown": every subscription of
 // the app is dirtied with no change record — the legacy full-recompute path,
@@ -53,13 +53,14 @@ func (n *Notifier) NotifyChanges(ctx context.Context, appID string, changes []Ch
 		n.enqueue(appID, n.Store.SubsForApp(appID), txID, nil)
 		return
 	}
-	n.enqueue(appID, n.Store.SubsForTopics(topics), txID, dedupeChanges(changes))
+	n.enqueue(appID, n.Store.SubsForTopics(dedupeTopicIDs(topics)), txID, dedupeChanges(changes))
 }
 
 // enqueue dirties subs at txID under n.mu, attaching ch (non-nil = known
 // change set) for the drain loop. Shared by Notify (ch nil) and
 // NotifyChanges; coalescing keeps the newest tx-id per sub and merges known
-// change sets until the cap degrades them to unknown.
+// change sets until an unknown notification or the cap degrades them to
+// unknown. That full-refresh obligation lasts until the batch is detached.
 //
 // subs arrive as live *Subscription pointers straight from a Store snapshot
 // (SubsForTopics/SubsForApp) — no per-id Store.Get re-locking on the
@@ -76,12 +77,22 @@ func (n *Notifier) enqueue(appID string, subs []*Subscription, txID int64, ch []
 			continue
 		}
 		id := sub.ID
-		n.pending[id] = txID
-		added++
+		pendingTx, alreadyPending := n.pending[id]
+		if !alreadyPending {
+			n.pending[id] = txID
+			added++
+		} else if txID > pendingTx {
+			// Never move a coalesced entry backwards when an older
+			// notification races with a newer one.
+			n.pending[id] = txID
+		}
 		switch ch {
 		case nil:
-			delete(n.pendingCh, id) // unknown swallows accumulated knowledge
+			delete(n.pendingCh, id) // discard the currently accumulated knowledge
 		default:
+			if alreadyPending && n.pendingCh[id] == nil {
+				continue // a known suffix cannot account for earlier unknown changes
+			}
 			merged := mergeChanges(n.pendingCh[id], ch)
 			if len(merged) > maxTrackedChanges {
 				delete(n.pendingCh, id) // degrade to unknown; oracle re-seeds cheaply
@@ -102,26 +113,6 @@ func (n *Notifier) enqueue(appID string, subs []*Subscription, txID int64, ch []
 	case n.wake <- struct{}{}:
 	default:
 	}
-}
-
-// takeChanges pops the pending change set for id inside refreshResult's
-// caller flow. known=true means the coalesced invalidations carried a usable
-// entity-level change set; false means full-refresh territory.
-func (n *Notifier) takeChanges(id string) ([]Change, bool) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	ch, ok := n.pendingCh[id]
-	delete(n.pendingCh, id)
-	return ch, ok && ch != nil
-}
-
-// dropChanges discards any pending change set for id — used when a drain is
-// skipped outright (stale watermark, cancelled sub) so bookkeeping cannot
-// outlive its refresh.
-func (n *Notifier) dropChanges(id string) {
-	n.mu.Lock()
-	delete(n.pendingCh, id)
-	n.mu.Unlock()
 }
 
 // dedupeChanges collapses repeated touches of the same entity; order is not

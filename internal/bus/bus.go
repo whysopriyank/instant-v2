@@ -1,5 +1,5 @@
 // Package bus provides the symmetric Postgres LISTEN/NOTIFY invalidation
-// bus for horizontal scale-out (docs/09-tier2-architecture.md §T2.4).
+// bus for horizontal scale-out (docs/reference/09-tier2-architecture.md §T2.4).
 //
 // WHY this shape:
 //
@@ -45,7 +45,7 @@ type Invalidation struct {
 	TxID    int64    `json:"tx_id"`
 	// Changes carries entity-level change records so peers can run the
 	// incremental splice instead of a full recompute
-	// (docs/09-tier2-architecture.md §T2.5). Optional: older payloads and
+	// (docs/reference/09-tier2-architecture.md §T2.5). Optional: older payloads and
 	// size-degraded ones omit it, which receivers treat as topic-granular.
 	Changes []EntityChange `json:"ch,omitempty"`
 	// AttrsChanged marks commits that created attributes. Peers must drop

@@ -2,7 +2,7 @@
 // the v1 fallback chain, bind expansion, and program evaluation. Port of
 // instant.model.rule + the evaluation half of instant.db.cel.
 //
-// Frozen surface (docs/03-protocol.md section 8):
+// Frozen surface (docs/reference/03-protocol.md section 8):
 //   - one JSONB doc per app: {<etype>|attrs|$default|$rateLimits: {...}}
 //   - resolution chain etype.allow.action -> etype.allow.$default
 //     -> $default.allow.action -> $default.allow.$default -> etype.fallback.action

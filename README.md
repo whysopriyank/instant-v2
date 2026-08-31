@@ -19,19 +19,26 @@ Single-binary, self-host-first realtime backend providing:
 - Multi-cloud clustering (Hazelcast/gRPC/SNS mesh) — single-node first, optional HA later
 - Aurora-specific failover machinery
 - Stripe billing / dashboard plane (CLI + API only)
-- Breaking the frozen wire protocol (see `docs/03-protocol.md`)
+- Breaking the frozen wire protocol (see `docs/reference/03-protocol.md`)
 
 ## Documents
 
+For the production-quality refactor, start with the
+[repository quality guide](docs/guides/repository-quality.md),
+[package scorecard](docs/reference/quality-scorecard.md), and
+[verification report](docs/reference/quality-verification.md). The last report
+separates completed implementation from remaining release and parity gaps.
+
 | Doc | Contents |
 |---|---|
-| [`docs/01-state.md`](docs/01-state.md) | V1 assessment: subsystem map, LOC, hot paths, what is kept/dropped |
-| [`docs/02-architecture.md`](docs/02-architecture.md) | V2 target design: packages, data flow, key type contracts |
-| [`docs/03-protocol.md`](docs/03-protocol.md) | Frozen wire protocol contract (WS ops, tx-steps, REST surface) |
-| [`docs/04-roadmap.md`](docs/04-roadmap.md) | Phased roadmap with milestones and acceptance criteria |
-| [`docs/05-conformance.md`](docs/05-conformance.md) | Cross-verification strategy against v1 (golden corpus, differential testing) |
-| [`docs/13-benchmark-contract.md`](docs/13-benchmark-contract.md) | Accepted Wave 4 benchmark contract for the Wave 5 harness and Wave 6 measurement |
-| [`docs/06-agent-orchestration.md`](docs/06-agent-orchestration.md) | Sub-agent architecture: ownership map, contracts, escalation gates |
+| [`docs/archive/01-state.md`](docs/archive/01-state.md) | V1 assessment: subsystem map, LOC, hot paths, what is kept/dropped |
+| [`docs/reference/02-architecture.md`](docs/reference/02-architecture.md) | V2 target design: packages, data flow, key type contracts |
+| [`docs/reference/03-protocol.md`](docs/reference/03-protocol.md) | Frozen wire protocol contract (WS ops, tx-steps, REST surface) |
+| [`docs/plans/04-roadmap.md`](docs/plans/04-roadmap.md) | Phased roadmap with milestones and acceptance criteria |
+| [`docs/guides/05-conformance.md`](docs/guides/05-conformance.md) | Cross-verification strategy against v1 (golden corpus, differential testing) |
+| [`docs/reference/13-benchmark-contract.md`](docs/reference/13-benchmark-contract.md) | Accepted Wave 4 benchmark contract for the Wave 5 harness and Wave 6 measurement |
+| [`docs/plans/16-product-performance-headroom.md`](docs/plans/16-product-performance-headroom.md) | Product-only performance opportunities, evidence, risk classification, and low-risk implementation order |
+| [`docs/guides/06-agent-orchestration.md`](docs/guides/06-agent-orchestration.md) | Sub-agent architecture: ownership map, contracts, escalation gates |
 | [`tasks/`](tasks/) | Per-phase task backlogs consumed by agents |
 
 ## Stack decision (record)
@@ -59,7 +66,7 @@ partial.
 
 | Area | Status | Evidence / remaining boundary |
 |---|---|---|
-| Foundations, protocol schema, migrations | Partial | `internal/protocol`, embedded migrations, and corpus tooling exist; the checked-in corpus is still a small smoke/transact set, not the original ≥50-scenario gate. |
+| Foundations, protocol schema, migrations | Partial | `internal/protocol`, embedded migrations, and corpus tooling exist; 16 authored regression scenarios run against isolated v2 fixtures, not the original ≥50-scenario or genuine v1-oracle gate. |
 | Storage, catalog, triple CRUD | Complete for the implemented surface | Real-Postgres storage tests, typed value encoding, catalog flags, batching, limits, and migrations are covered. |
 | Transactions and permissions | Partial | Tx-step, CEL, cascades, required attributes, and admin bypass are implemented and tested; rules persistence is not wired into every write plane. |
 | Query engine | Partial | InstaQL, pagination, indexes, local evaluation, and differential fixtures exist; broad v1 corpus and JS-harness coverage remain incomplete. |
@@ -67,8 +74,8 @@ partial.
 | Platform APIs and backups | Partial | Admin/runtime/storage routes and v1/v2 backup import/export are implemented; HTTP corpus coverage and some platform parity scenarios remain open. |
 | Hardening | Partial | Rate limits, queue gates, resource caps, security fixes, chaos checks, and race validation are present; Wave 4 benchmark methodology and Wave 6 hardened v1 comparison are still pending. |
 
-Start with [`docs/04-roadmap.md`](docs/04-roadmap.md) for the reconciled
-roadmap and [`docs/05-conformance.md`](docs/05-conformance.md) for the actual
+Start with [`docs/plans/04-roadmap.md`](docs/plans/04-roadmap.md) for the reconciled
+roadmap and [`docs/guides/05-conformance.md`](docs/guides/05-conformance.md) for the actual
 corpus and verification limits. Performance numbers in the historical audit
 sections are evidence from named runs, not a current v1-versus-v2 claim until
 the Wave 4/5 harness and Wave 6 paired measurement are complete.

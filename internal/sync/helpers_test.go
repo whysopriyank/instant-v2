@@ -7,13 +7,16 @@ import (
 	"fmt"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/instant-v2/instant-v2/internal/platform"
+	"github.com/instant-v2/instant-v2/internal/reactive"
 	"github.com/instant-v2/instant-v2/internal/storage"
+	"github.com/instant-v2/instant-v2/internal/testkit"
 )
 
 func rand16() [16]byte {
@@ -52,21 +55,27 @@ func rawMap(raw json.RawMessage) map[string]any {
 	return m
 }
 
-func mustPool(t *testing.T, dsn string) *pgxpool.Pool {
+func newPostgres(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	pool, err := pgxpool.New(context.Background(), dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
+	fixture := testkit.NewPostgres(t, testkit.PostgresOptions{})
+	migrate(t, fixture.DSN)
+	return fixture.Pool
 }
 
-func resetSchema(t *testing.T, pool *pgxpool.Pool) {
+// Stop background work before the isolated database is closed and removed.
+func runNotifier(t *testing.T, notifier *reactive.Notifier) {
 	t.Helper()
-	if _, err := pool.Exec(context.Background(), `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`); err != nil {
-		t.Fatalf("reset: %v", err)
-	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); notifier.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("notifier did not stop")
+		}
+	})
 }
 
 func migrate(t *testing.T, dsn string) {

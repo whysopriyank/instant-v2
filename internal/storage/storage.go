@@ -3,7 +3,7 @@
 // delete-by-triple, and the per-app transaction journal. Port of v1's
 // db/model/triple.clj insert-multi!/delete-multi!/fetch + jdbc/sql layer.
 //
-// Invariants (docs/02-architecture.md §5):
+// Invariants (docs/reference/02-architecture.md §5):
 //   - value_md5 is computed by Postgres (md5(value::text)) — never client-side.
 //   - JSON-null values are stored as SQL NULL with triple.JSONNullMD5.
 package storage
@@ -130,51 +130,48 @@ func insertBatch(ctx context.Context, tx pgx.Tx, appID [16]byte, cat *platform.A
 		vs[i] = t.V
 		idxs = append(idxs, i)
 	}
-	// Batched value encoding: one shared encoder/buffer for the whole
-	// batch instead of a fresh Buffer+Encoder per triple (audit backlog).
-	// encodeOrNull semantics fold in: nil → JSON 'null' literal.
+	// Keep encoding the complete input before executing either branch. This
+	// preserves the existing all-or-nothing validation behavior.
 	vals, err := triple.EncodeValues(vs)
 	if err != nil {
 		return InsertResult{}, err
 	}
-
-	var res InsertResult
 
 	setClause := "SET value = EXCLUDED.value, value_md5 = EXCLUDED.value_md5"
 	if overwriteT {
 		setClause += ", created_at = now()"
 	}
 
-	// --- cardinality-one overwrite path -------------------------------------
-	eaSQL := enhancedRowsCTE + `,
+	// Keep routing authoritative in PostgreSQL: both data-modifying CTEs use
+	// the cardinality joined from attrs, so a stale in-memory catalog cannot
+	// silently omit a write. The single statement also avoids a second
+	// round-trip for homogeneous batches.
+	insertSQL := enhancedRowsCTE + `,
 	ea_distinct AS (
 		SELECT DISTINCT ON (entity_id, attr_id) *
 		  FROM enhanced WHERE ea ORDER BY entity_id, attr_id, idx DESC
-	)
-	INSERT INTO triples (` + insertCols + `)
-	SELECT ` + insertCols + ` FROM ea_distinct
-ON CONFLICT (app_id, entity_id, attr_id) WHERE ea DO UPDATE ` + setClause
-
-	eaTag, err := tx.Exec(ctx, eaSQL, apps, ents, attrs, vals, idxs)
-	if err != nil {
-		return res, fmt.Errorf("ea upsert: %w", wrapUnique(err))
-	}
-	res.Upserted = eaTag.RowsAffected()
-
-	// --- remaining (refs / many-cardinality) path ----------------------------
-	const remSQL = enhancedRowsCTE + `
-	INSERT INTO triples (app_id, entity_id, attr_id, value, value_md5,
+	),
+	ea_rows AS (
+		INSERT INTO triples (` + insertCols + `)
+		SELECT ` + insertCols + ` FROM ea_distinct
+		ON CONFLICT (app_id, entity_id, attr_id) WHERE ea DO UPDATE ` + setClause + `
+		RETURNING 1
+	),
+	rem_rows AS (
+		INSERT INTO triples (app_id, entity_id, attr_id, value, value_md5,
 	                     ea, eav, av, ave, vae, checked_data_type)
-	SELECT app_id, entity_id, attr_id, value, value_md5,
-	       ea, eav, av, ave, vae, checked_data_type
-	  FROM enhanced WHERE NOT ea
-	ON CONFLICT (app_id, entity_id, attr_id, value_md5) DO NOTHING`
+		SELECT app_id, entity_id, attr_id, value, value_md5,
+		       ea, eav, av, ave, vae, checked_data_type
+		  FROM enhanced WHERE NOT ea
+		ON CONFLICT (app_id, entity_id, attr_id, value_md5) DO NOTHING
+		RETURNING 1
+	)
+	SELECT (SELECT count(*) FROM ea_rows), (SELECT count(*) FROM rem_rows)`
 
-	remTag, err := tx.Exec(ctx, remSQL, apps, ents, attrs, vals, idxs)
-	if err != nil {
-		return res, fmt.Errorf("remaining insert: %w", wrapUnique(err))
+	var res InsertResult
+	if err := tx.QueryRow(ctx, insertSQL, apps, ents, attrs, vals, idxs).Scan(&res.Upserted, &res.Inserted); err != nil {
+		return res, fmt.Errorf("triple insert: %w", wrapUnique(err))
 	}
-	res.Inserted = remTag.RowsAffected()
 	return res, nil
 }
 

@@ -2,14 +2,14 @@
 
 This directory contains the versioned benchmark schemas and local result
 bundles. The accepted methodology is in
-[`docs/13-benchmark-contract.md`](../docs/13-benchmark-contract.md). Wave 5
+[`docs/reference/13-benchmark-contract.md`](../docs/reference/13-benchmark-contract.md). Wave 5
 hardens collection and reporting; Wave 6 is the first comparative measurement
 wave. A bundle produced before Wave 6 is diagnostic evidence unless it passes
 the complete claim gate.
 
 For the credit-efficient V1 smoke, one-attempt triad smoke, detached full run,
 and checkpoint prompts, use
-[`docs/15-wave6-execution.md`](../docs/15-wave6-execution.md) and
+[`docs/plans/15-wave6-execution.md`](../docs/plans/15-wave6-execution.md) and
 [`benchmarks/scripts/wave6-orchestrate.sh`](scripts/wave6-orchestrate.sh).
 The controller requires the canonical H-append/300 triad timings (30/30/60/180/30),
 proves the dedicated loopback-only Linux namespace, snapshots and rehashes its

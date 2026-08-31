@@ -2,6 +2,7 @@ package platform
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -10,10 +11,11 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// gatedQ blocks every Query until the gate closes, then returns zero rows.
+// gatedQ signals and blocks its first Query, then returns zero rows.
 type gatedQ struct {
-	gate  chan struct{}
-	first atomic.Bool
+	gate    chan struct{}
+	entered chan struct{}
+	first   atomic.Bool
 }
 
 func (g *gatedQ) QueryRow(ctx context.Context, _ string, _ ...any) pgx.Row {
@@ -26,6 +28,7 @@ func (g *gatedQ) QueryRow(ctx context.Context, _ string, _ ...any) pgx.Row {
 
 func (g *gatedQ) Query(ctx context.Context, _ string, _ ...any) (pgx.Rows, error) {
 	if g.first.CompareAndSwap(false, true) {
+		close(g.entered)
 		select {
 		case <-g.gate:
 		case <-ctx.Done():
@@ -57,7 +60,9 @@ func (r *gatedRows) Conn() *pgx.Conn        { return nil }
 // in the process behind it.
 func TestForDoesNotBlockAcrossApps(t *testing.T) {
 	gate := make(chan struct{})
-	q := &gatedQ{gate: gate}
+	var release sync.Once
+	t.Cleanup(func() { release.Do(func() { close(gate) }) })
+	q := &gatedQ{gate: gate, entered: make(chan struct{})}
 	c := NewCatalogCache(q, q)
 	appA := "6f8e99dd-4f28-450b-85df-001f945c425e"
 	appB := "77436b4c-1d7f-4760-b9f9-b97081c10431"
@@ -67,7 +72,11 @@ func TestForDoesNotBlockAcrossApps(t *testing.T) {
 		_, err := c.For(context.Background(), appA) // parks inside the stubbed DB query
 		errA <- err
 	}()
-	time.Sleep(50 * time.Millisecond) // let A enter its query
+	select {
+	case <-q.entered:
+	case <-time.After(time.Second):
+		t.Fatal("appA did not enter its database query")
+	}
 
 	done := make(chan struct{})
 	go func() {
@@ -83,7 +92,7 @@ func TestForDoesNotBlockAcrossApps(t *testing.T) {
 		t.Fatal("For(appB) blocked behind appA's in-flight load: mutex held across DB query")
 	}
 
-	close(gate)
+	release.Do(func() { close(gate) })
 	select {
 	case err := <-errA:
 		if err != nil {
@@ -95,14 +104,20 @@ func TestForDoesNotBlockAcrossApps(t *testing.T) {
 
 	// RuleDocFor must follow the same discipline.
 	gate2 := make(chan struct{})
-	q2 := &gatedQ{gate: gate2}
+	var release2 sync.Once
+	t.Cleanup(func() { release2.Do(func() { close(gate2) }) })
+	q2 := &gatedQ{gate: gate2, entered: make(chan struct{})}
 	c2 := NewCatalogCache(q2, q2)
 	errC := make(chan error, 1)
 	go func() {
 		_, err := c2.RuleDocFor(context.Background(), appA)
 		errC <- err
 	}()
-	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-q2.entered:
+	case <-time.After(time.Second):
+		t.Fatal("appA did not enter its rule query")
+	}
 
 	done2 := make(chan struct{})
 	go func() {
@@ -116,8 +131,13 @@ func TestForDoesNotBlockAcrossApps(t *testing.T) {
 	case <-time.After(1 * time.Second):
 		t.Fatal("RuleDocFor(appB) blocked behind appA's load")
 	}
-	close(gate2)
-	if err := <-errC; err != nil {
-		t.Fatalf("RuleDocFor(appA): %v", err)
+	release2.Do(func() { close(gate2) })
+	select {
+	case err := <-errC:
+		if err != nil {
+			t.Fatalf("RuleDocFor(appA): %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("appA rule load never finished after gate release")
 	}
 }

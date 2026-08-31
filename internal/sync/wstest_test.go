@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/coder/websocket"
 
@@ -23,6 +24,7 @@ type wsEnv struct {
 	Server *httptest.Server
 	WS     *syncpkg.WSHandler
 	SSE    *syncpkg.SSEHandler
+	closed <-chan struct{} // emitted after a WebSocket handler and its teardown return
 }
 
 func newWSEnv(t *testing.T) *wsEnv {
@@ -41,7 +43,11 @@ func newWSEnv(t *testing.T) *wsEnv {
 		Refresh: handler.Refresh,
 	}
 	mux := http.NewServeMux()
-	mux.Handle("/runtime/session", handler)
+	closed := make(chan struct{}, 32)
+	mux.HandleFunc("/runtime/session", func(w http.ResponseWriter, r *http.Request) {
+		defer func() { closed <- struct{}{} }()
+		handler.ServeHTTP(w, r)
+	})
 	mux.Handle("/runtime/sse", sseHandler)
 	env := &wsEnv{
 		Mgr:    mgr,
@@ -50,9 +56,19 @@ func newWSEnv(t *testing.T) *wsEnv {
 		Server: httptest.NewServer(mux),
 		WS:     handler,
 		SSE:    sseHandler,
+		closed: closed,
 	}
 	t.Cleanup(env.Server.Close)
 	return env
+}
+
+func (e *wsEnv) waitClosed(t *testing.T) {
+	t.Helper()
+	select {
+	case <-e.closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("WebSocket handler did not complete teardown")
+	}
 }
 
 // dial opens a WebSocket to env's server and starts a reader pump.

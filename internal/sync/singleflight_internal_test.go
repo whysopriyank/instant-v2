@@ -1,7 +1,7 @@
 package sync
 
 // Internal tests for the add-query single-flight primitive and the
-// single-encode tree dispatch (docs/08-tier1-hotpath.md §T1.1).
+// single-encode tree dispatch (docs/archive/08-tier1-hotpath.md §T1.1).
 
 import (
 	"bytes"

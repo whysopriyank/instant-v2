@@ -3,9 +3,7 @@ package reactive
 import (
 	"context"
 	"encoding/json"
-	"sync"
 	"testing"
-	"time"
 )
 
 func TestAddRemoveAndTopicIndex(t *testing.T) {
@@ -43,7 +41,6 @@ func TestAddRemoveAndTopicIndex(t *testing.T) {
 
 func TestNotifierCoalesces(t *testing.T) {
 	s := NewStore()
-	var mu sync.Mutex
 	frames := 0
 	sub := &Subscription{
 		ID:     "s1",
@@ -51,9 +48,10 @@ func TestNotifierCoalesces(t *testing.T) {
 		Query:  json.RawMessage(`{"posts":{}}`),
 		Topics: map[string]bool{"attr-a": true},
 		Emit: func(f Frame) {
-			mu.Lock()
 			frames++
-			mu.Unlock()
+			if f.ProcessedTxID != 15 {
+				t.Errorf("coalesced frame tx = %d, want 15", f.ProcessedTxID)
+			}
 		},
 	}
 	sub.TxID.Store(5)
@@ -65,29 +63,73 @@ func TestNotifierCoalesces(t *testing.T) {
 	n.Refresh = func(ctx context.Context, sub *Subscription) (json.RawMessage, error) {
 		return json.RawMessage(`{"posts":[]}`), nil
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go n.Run(ctx)
+	ctx := context.Background()
 
-	// Burst of notifications; all after TxID 5 → exactly one refresh expected
-	// once the drain loop catches up (coalescing collapses the queue).
+	// Queue the complete burst before draining, so coalescing doesn't depend
+	// on whether a worker happened to run between two notifications.
 	for i := range 10 {
 		n.Notify(ctx, "app1", []string{"attr-a"}, int64(6+i))
 	}
-	// Poll instead of a fixed sleep: under -race the drain goroutine may
-	// not have started within any fixed window.
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		mu.Lock()
-		got := frames
-		mu.Unlock()
-		if got > 0 {
-			return
+	if !n.drainPass(ctx, nil) {
+		t.Fatal("expected queued work")
+	}
+	if frames != 1 || n.drainPass(ctx, nil) {
+		t.Fatalf("burst must produce exactly one refresh, got %d", frames)
+	}
+}
+
+func TestNotifierQueueDepthCountsUniquePendingSubscriptions(t *testing.T) {
+	s := NewStore()
+	sub := &Subscription{
+		ID: "s1", AppID: "app1", Query: json.RawMessage(`{}`),
+		Topics: map[string]bool{"a": true, "b": true}, Emit: func(Frame) {},
+	}
+	if _, err := s.Add(sub); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	n := &Notifier{Store: s, Refresh: func(context.Context, *Subscription) (json.RawMessage, error) {
+		return json.RawMessage(`{}`), nil
+	}}
+	ctx := context.Background()
+
+	// The repeated topic and repeated notification both target the same
+	// subscription. They must occupy one pending queue slot while the latest
+	// transaction watermark still wins.
+	n.Notify(ctx, "app1", []string{"a", "a", "b", "a"}, 6)
+	n.Notify(ctx, "app1", []string{"b", "a"}, 7)
+	n.Notify(ctx, "app1", []string{"a"}, 4) // an older coalesced notification
+	if got := n.QueueDepth(); got != 1 {
+		t.Fatalf("queue depth for one coalesced subscription = %d, want 1", got)
+	}
+	n.mu.Lock()
+	gotTx := n.pending[sub.ID]
+	n.mu.Unlock()
+	if gotTx != 7 {
+		t.Fatalf("coalesced watermark = %d, want 7", gotTx)
+	}
+
+	if !n.drainPass(ctx, nil) {
+		t.Fatal("expected pending work")
+	}
+	if got := n.QueueDepth(); got != 0 {
+		t.Fatalf("queue depth after drain = %d, want 0", got)
+	}
+}
+
+func TestDedupeTopicIDsPreservesFirstSeenOrder(t *testing.T) {
+	got := dedupeTopicIDs([]string{"b", "a", "b", "c", "a"})
+	want := []string{"b", "a", "c"}
+	if len(got) != len(want) {
+		t.Fatalf("deduped topics = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("deduped topics = %v, want %v", got, want)
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("no frames emitted")
-		}
-		time.Sleep(10 * time.Millisecond)
+	}
+	noDup := []string{"a", "b"}
+	if got := dedupeTopicIDs(noDup); &got[0] != &noDup[0] {
+		t.Fatal("duplicate-free topics should not be copied")
 	}
 }
 
@@ -108,12 +150,9 @@ func TestNotifierIgnoresStaleTxIDs(t *testing.T) {
 	n.Refresh = func(ctx context.Context, sub *Subscription) (json.RawMessage, error) {
 		return json.RawMessage(`{}`), nil
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go n.Run(ctx)
+	ctx := context.Background()
 	n.Notify(ctx, "app1", []string{"a"}, 3) // stale
-	time.Sleep(50 * time.Millisecond)
-	if called {
+	if n.drainPass(ctx, nil) || called {
 		t.Fatal("stale tx should not refresh")
 	}
 }

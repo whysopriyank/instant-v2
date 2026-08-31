@@ -1,8 +1,8 @@
 // Package protocol holds the frozen wire types that every other package shares.
 // The schema at internal/protocol/schema/protocol.schema.json is authoritative;
 // internal/protocol/protocol.go defines the Go surface that layers depend on;
-// tools/schemagen validates that the two agree and emits protocol.d.ts.
-// See docs/03-protocol.md for the human-readable contract.
+// cmd/schemagen validates that the two agree and emits protocol.d.ts.
+// See docs/reference/03-protocol.md for the human-readable contract.
 package protocol
 
 import (
@@ -11,7 +11,7 @@ import (
 )
 
 // Op enumerates every value that the "op" field may take on the wire (kebab-case).
-// The set is the enum in definitions/wsOp of the JSON Schema; tools/schemagen derives
+// The set is the enum in definitions/wsOp of the JSON Schema; cmd/schemagen derives
 // the corresponding d.ts string union.
 const (
 	OpInit              = "init"

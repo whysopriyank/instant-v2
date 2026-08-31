@@ -14,5 +14,5 @@ experiment agents `trial_luna_*` etc. registered; map as follows:
 
 Concretely, when dispatching a task batch, omit `agent` only when the spawn-policy
 default matches the task; otherwise prefer the most specific agent above. See
-`docs/06-agent-orchestration.md` for the exclusive ownership map and day-to-day
+`docs/guides/06-agent-orchestration.md` for the exclusive ownership map and day-to-day
 `context`/`task` contract.

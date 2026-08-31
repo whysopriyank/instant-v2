@@ -22,6 +22,8 @@ type CatalogCache struct {
 	mu    sync.Mutex
 	cache map[string]*AttrCatalog
 	rules map[string]*perms.RuleDoc
+	// Versions survive eviction so an in-flight load cannot undo Invalidate.
+	versions map[string]uint64
 }
 
 // RowQueryer is the query surface the catalog cache needs.
@@ -37,37 +39,47 @@ func NewCatalogCache(q Queryer, rq RowQueryer) *CatalogCache {
 
 // For returns the app's catalog, loading it on first use.
 func (c *CatalogCache) For(ctx context.Context, appID string) (*AttrCatalog, error) {
-	c.mu.Lock()
-	if cat, ok := c.cache[appID]; ok {
+	for {
+		c.mu.Lock()
+		if cat, ok := c.cache[appID]; ok {
+			c.mu.Unlock()
+			return cat, nil
+		}
+		version := c.versions[appID]
+		c.mu.Unlock()
+
+		// Database I/O stays outside the mutex; another app's cold load must
+		// not block behind this one. Retry if this snapshot was invalidated.
+		var id [16]byte
+		if err := ScanUUID(appID, &id); err != nil {
+			return nil, err
+		}
+		cat, err := LoadAttrCatalog(ctx, c.Pool, id)
+		if err != nil {
+			return nil, err
+		}
+		c.mu.Lock()
+		if c.versions[appID] != version {
+			c.mu.Unlock()
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		c.cache[appID] = cat
 		c.mu.Unlock()
 		return cat, nil
 	}
-	c.mu.Unlock()
-
-	// Load OUTSIDE the mutex: c.mu guards the maps, not the database. The
-	// previous hold-across-query serialized EVERY app's cold load behind one
-	// lock — one slow catalog load stalled all transacts and refreshes
-	// process-wide (audit: lock-across-I/O). Concurrent first-touches of the
-	// same app may race duplicate loads; last-writer-wins keeps both results
-	// correct at the cost of one redundant query per cold key.
-	var id [16]byte
-	if err := ScanUUID(appID, &id); err != nil {
-		return nil, err
-	}
-	cat, err := LoadAttrCatalog(ctx, c.Pool, id)
-	if err != nil {
-		return nil, err
-	}
-	c.mu.Lock()
-	c.cache[appID] = cat
-	c.mu.Unlock()
-	return cat, nil
 }
 
 // Invalidate drops one app's cached catalog and rule doc.
 func (c *CatalogCache) Invalidate(appID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.versions == nil {
+		c.versions = make(map[string]uint64)
+	}
+	c.versions[appID]++
 	delete(c.cache, appID)
 	delete(c.rules, appID)
 }
@@ -77,18 +89,39 @@ func (c *CatalogCache) Invalidate(appID string) {
 // callers can pass the result straight into perms.Check. The cache shares the
 // catalog's invalidation cycle (Invalidate clears both).
 func (c *CatalogCache) RuleDocFor(ctx context.Context, appID string) (*perms.RuleDoc, error) {
-	c.mu.Lock()
-	if d, ok := c.rules[appID]; ok {
+	for {
+		c.mu.Lock()
+		if d, ok := c.rules[appID]; ok {
+			c.mu.Unlock()
+			return d, nil
+		}
+		version := c.versions[appID]
 		c.mu.Unlock()
-		return d, nil
-	}
-	c.mu.Unlock()
 
-	// Same lock-across-I/O discipline as For: query outside the mutex.
-	var id [16]byte
-	if err := ScanUUID(appID, &id); err != nil {
-		return nil, err
+		var id [16]byte
+		if err := ScanUUID(appID, &id); err != nil {
+			return nil, err
+		}
+		doc, err := c.loadRuleDoc(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		c.mu.Lock()
+		if c.versions[appID] != version {
+			c.mu.Unlock()
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		c.rules[appID] = doc
+		c.mu.Unlock()
+		return doc, nil
 	}
+}
+
+// loadRuleDoc closes the read before RuleDocFor decides whether to retry.
+func (c *CatalogCache) loadRuleDoc(ctx context.Context, id [16]byte) (*perms.RuleDoc, error) {
 	rows, err := c.RowQ.Query(ctx,
 		`SELECT code FROM rules WHERE app_id=$1::uuid`, id)
 	if err != nil {
@@ -104,14 +137,7 @@ func (c *CatalogCache) RuleDocFor(ctx context.Context, appID string) (*perms.Rul
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	doc, err := perms.ParseRuleDoc(raw)
-	if err != nil {
-		return nil, err
-	}
-	c.mu.Lock()
-	c.rules[appID] = doc
-	c.mu.Unlock()
-	return doc, nil
+	return perms.ParseRuleDoc(raw)
 }
 
 // CheckAdminToken verifies an admin token belongs to the app.

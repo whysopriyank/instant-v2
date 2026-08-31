@@ -2,7 +2,7 @@ package sync_test
 
 // Phase-6 hardening tests for workstream 6A: delta-refresh negotiation
 // (≥0.23.0), per-app subscription caps, and v1-conformant refresh result
-// shaping (docs/03-protocol.md §5 + frozen client extractTriples parity).
+// shaping (docs/reference/03-protocol.md §5 + frozen client extractTriples parity).
 
 import (
 	"bufio"
@@ -334,8 +334,9 @@ func TestSubscriptionCap(t *testing.T) {
 
 	// Tearing down session A's connection releases its subscription,
 	// freeing per-app capacity for a fresh session.
+	env.waitClosed(t) // session B's rejected handler has finished
 	_ = connA.Close(websocket.StatusNormalClosure, "")
-	time.Sleep(300 * time.Millisecond) // let the server reap the conn
+	env.waitClosed(t) // session A's membership has been detached
 	connC, framesC := dialInit(t, ctx, env, "0.23.0")
 	addQueryTodos(t, ctx, connC, framesC)
 }

@@ -126,7 +126,7 @@ func TestWave6OrchestratorOutputLockSerializesLaunch(t *testing.T) {
 		t.Fatal(err)
 	}
 	helper := filepath.Join(root, "benchsmoke")
-	build := exec.Command("go", "build", "-o", helper, "../../tools/benchsmoke")
+	build := exec.Command("go", "build", "-o", helper, "../../cmd/benchsmoke")
 	if outputBytes, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build lock helper: %v: %s", err, outputBytes)
 	}
@@ -137,7 +137,7 @@ func TestWave6OrchestratorOutputLockSerializesLaunch(t *testing.T) {
 	if err := first.Start(); err != nil {
 		t.Fatal(err)
 	}
-	defer first.Wait()
+	defer func() { _ = first.Wait() }()
 	// The first process has to reach the secure helper before the contender is started.
 	deadline := time.Now().Add(2 * time.Second)
 	for {
@@ -145,7 +145,7 @@ func TestWave6OrchestratorOutputLockSerializesLaunch(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			first.Process.Kill()
+			_ = first.Process.Kill()
 			t.Fatal("first controller did not acquire its output lock")
 		}
 		time.Sleep(10 * time.Millisecond)

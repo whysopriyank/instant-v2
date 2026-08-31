@@ -1,7 +1,7 @@
 // Package reactive owns live query subscriptions: registration, topic-indexed
 // invalidation, and coalesced refresh fan-out. Port surface of v1's
 // reactive/store + reactive/invalidator with the DataScript session state
-// replaced by plain structures (docs/02-architecture.md §5.3).
+// replaced by plain structures (docs/reference/02-architecture.md §5.3).
 //
 // Invalidation sources: the direct post-commit notifier (single-instance
 // default) and waltail records (multi-instance). Both funnel into Invalidate.
@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -57,7 +56,7 @@ type Subscription struct {
 	Cancelled bool
 
 	mu sync.Mutex
-	// mat is the optional incremental-engine state (docs/09-tier2-architecture.md
+	// mat is the optional incremental-engine state (docs/reference/09-tier2-architecture.md
 	// §T2.5): materialized member lists per top-level form, seeded only by full
 	// refresh results. Guarded by mu alongside last. Zero value = disabled.
 	mat  matState
@@ -163,58 +162,12 @@ func (s *Store) Remove(id string) bool {
 	return true
 }
 
-// Get returns a copy-on-read view of the subscription.
+// Get returns the live subscription pointer, not a copy.
 func (s *Store) Get(id string) (*Subscription, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	sub, ok := s.byID[id]
 	return sub, ok
-}
-
-// SubsForTopics returns the subscriptions watching any of the changed attrs,
-// as a snapshot sorted by subscription id (deterministic iteration parity
-// with the previous id-slice form). Callers own the slice; the *Subscription
-// pointers are the store's live entries.
-func (s *Store) SubsForTopics(attrIDs []string) []*Subscription {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	seen := map[string]struct{}{}
-	var out []*Subscription
-	for _, t := range attrIDs {
-		for id := range s.topics[t] {
-			if _, dup := seen[id]; !dup {
-				seen[id] = struct{}{}
-				if sub, ok := s.byID[id]; ok {
-					out = append(out, sub)
-				}
-			}
-		}
-	}
-	sortSubsByID(out)
-	return out
-}
-
-// SubsForApp returns every active subscription of an app — the routing
-// set when an invalidation carries no topic information at all
-// (NotifyChanges with unknown changes, docs/09-tier2-architecture.md §T2.5).
-// Snapshot sorted by id, same ownership contract as SubsForTopics.
-func (s *Store) SubsForApp(appID string) []*Subscription {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	var out []*Subscription
-	for _, sub := range s.byID {
-		if sub.AppID == appID {
-			out = append(out, sub)
-		}
-	}
-	sortSubsByID(out)
-	return out
-}
-
-// sortSubsByID keeps enqueue iteration order identical to the old
-// sort.Strings(id-list) pipeline.
-func sortSubsByID(subs []*Subscription) {
-	sort.Slice(subs, func(i, j int) bool { return subs[i].ID < subs[j].ID })
 }
 
 // Len reports active subscriptions (test hook).
@@ -234,13 +187,14 @@ type Notifier struct {
 	Logger  *slog.Logger
 
 	// Inc, when non-nil, enables incremental result maintenance behind the
-	// Refresh seam (docs/09-tier2-architecture.md §T2.5). nil — the default —
+	// Refresh seam (docs/reference/09-tier2-architecture.md §T2.5). nil — the default —
 	// keeps today's byte-for-byte full-recompute path.
 	Inc *Incremental
 
 	pending map[string]int64 // subID → latest tx-id awaiting refresh
-	// pendingCh holds coalesced known change sets alongside pending; absent
-	// entry = unknown changes = full recompute. Guarded by mu.
+	// pendingCh belongs to the same queued epoch as pending. Both maps are
+	// detached together by drainPass. Absent entry means unknown changes and
+	// full recompute. Guarded by mu; changes.go owns accumulation.
 	pendingCh map[string][]Change
 
 	mu   sync.Mutex
@@ -255,7 +209,7 @@ type Notifier struct {
 // checkpoint frequency when it climbs); it never blocks.
 func (n *Notifier) QueueDepth() int { return int(n.gauge.Load()) }
 
-// shedRetryAfter is the fixed denial hint (docs/09-tier2-architecture.md
+// shedRetryAfter is the fixed denial hint (docs/reference/09-tier2-architecture.md
 // §T2.1: "Denial is *ShedError{RetryAfter} (250 ms fixed)").
 const shedRetryAfter = 250 * time.Millisecond
 
@@ -309,7 +263,7 @@ func (n *Notifier) Gate(maxDepth int64) func(appID string) error {
 // recompute exactly as before (docs/09 §T2.5).
 func (n *Notifier) Notify(ctx context.Context, appID string, attrIDs []string, txID int64) {
 	_ = ctx
-	n.enqueue(appID, n.Store.SubsForTopics(attrIDs), txID, nil)
+	n.enqueue(appID, n.Store.SubsForTopics(dedupeTopicIDs(attrIDs)), txID, nil)
 }
 
 // Workers is the refresh concurrency. Queries hit Postgres independently, so
@@ -350,7 +304,9 @@ func (n *Notifier) drainPass(ctx context.Context, log *slog.Logger) bool {
 		return false
 	}
 	batch := n.pending
+	batchChanges := n.pendingCh
 	n.pending = map[string]int64{}
+	n.pendingCh = nil
 	n.gauge.Add(-int64(len(batch)))
 	n.mu.Unlock()
 
@@ -372,34 +328,32 @@ func (n *Notifier) drainPass(ctx context.Context, log *slog.Logger) bool {
 		}
 		go func(id string, txID int64) {
 			defer func() { <-sem; wg.Done() }()
-			n.refreshOne(ctx, log, id, txID)
+			n.refreshOne(ctx, log, id, txID, batchChanges[id])
 		}(id, txID)
 	}
 	wg.Wait()
 	return true
 }
 
-func (n *Notifier) refreshOne(ctx context.Context, log *slog.Logger, id string, txID int64) {
+func (n *Notifier) refreshOne(ctx context.Context, log *slog.Logger, id string, txID int64, changes []Change) {
 	// Covers requery/splice + the synchronous Emit → group fanout, so one
 	// waterfall span shows query cost and per-member dispatch together.
 	ctx, span := tracing.Tracer.Start(ctx, "notifier.refresh")
 	defer span.End()
 	sub, ok := n.Store.Get(id)
 	if !ok || sub.Cancelled || txID <= sub.TxID.Load() {
-		n.dropChanges(id) // don't leak change bookkeeping for a skipped drain
 		return
 	}
-	result, err := n.refreshResult(ctx, id, sub)
+	result, err := n.refreshResult(ctx, sub, changes)
 	if err != nil {
 		log.Error("reactive: refresh failed", "sub", id, "err", err)
 		// Re-arm the invalidation: this batch already left `pending`, so
 		// without re-enqueue a transient read-pool/query error would leave
 		// every subscriber of this sub stale until an unrelated commit
 		// happened to re-dirty it. Re-enqueue with the SAME txID — watermark
-		// dedupe makes it a no-op if a newer commit already won, and retries
-		// only fire when fresh commits wake the drain (no hot spin on a
-		// persistent failure). Change knowledge degrades to unknown (nil),
-		// which is correct: the retry takes the full-refresh path anyway.
+		// dedupe makes it a no-op if a newer commit already won. Run takes
+		// the re-enqueued work on its next drain pass. Change knowledge
+		// degrades to unknown (nil), forcing a full refresh for the retry.
 		n.enqueue(sub.AppID, []*Subscription{sub}, txID, nil)
 		return
 	}
@@ -433,10 +387,9 @@ func (n *Notifier) refreshOne(ctx context.Context, log *slog.Logger, id string, 
 
 // refreshResult produces one drain's envelope. When the invalidation carried
 // a known change set and the engine is wired, incremental maintenance gets
-// first crack (docs/09-tier2-architecture.md §T2.5); any bail-out falls back
-func (n *Notifier) refreshResult(ctx context.Context, id string, sub *Subscription) (json.RawMessage, error) {
-	changes, known := n.takeChanges(id)
-	if known && n.Inc != nil {
+// first crack (docs/reference/09-tier2-architecture.md §T2.5); any bail-out falls back
+func (n *Notifier) refreshResult(ctx context.Context, sub *Subscription, changes []Change) (json.RawMessage, error) {
+	if changes != nil && n.Inc != nil {
 		if out, ok := n.Inc.apply(ctx, sub, changes); ok {
 			metrics.Refreshes.WithLabelValues("spliced").Inc()
 			return out, nil

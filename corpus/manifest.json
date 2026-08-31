@@ -1,0 +1,437 @@
+{
+  "version": 1,
+  "v1Ref": "a4d2ef33b60f281a437191006e4541d4780f9e4a",
+  "fixtures": [
+    {
+      "id": "smoke",
+      "path": "fixtures/smoke.json"
+    },
+    {
+      "id": "posts",
+      "path": "fixtures/posts.json"
+    },
+    {
+      "id": "deny",
+      "path": "fixtures/deny.json"
+    },
+    {
+      "id": "admin",
+      "path": "fixtures/admin.json"
+    },
+    {
+      "id": "relations",
+      "path": "fixtures/relations.json"
+    },
+    {
+      "id": "unique",
+      "path": "fixtures/unique.json"
+    },
+    {
+      "id": "required",
+      "path": "fixtures/required.json"
+    }
+  ],
+  "surfaces": [
+    {
+      "id": "http.auth-admin-runtime-storage-backup",
+      "status": "gap",
+      "note": "HTTP and SDK capture are not implemented in corpusctl."
+    },
+    {
+      "id": "sse",
+      "status": "gap",
+      "note": "HTTP/SSE transport is outside WS NDJSON; package integration tests remain authoritative."
+    },
+    {
+      "id": "ws.auth.tokens",
+      "status": "gap",
+      "note": "Auth lifecycle is HTTP; WS refresh-token initialization fixture is not yet authored."
+    },
+    {
+      "id": "ws.errors",
+      "status": "covered",
+      "note": "Pre-init and missing/malformed operation input errors."
+    },
+    {
+      "id": "ws.init",
+      "status": "covered",
+      "note": "Anonymous initialization with exact attrs/auth/status envelopes."
+    },
+    {
+      "id": "ws.init.reinitialize",
+      "status": "covered",
+      "note": "Re-init detaches previous query registration."
+    },
+    {
+      "id": "ws.init.versions",
+      "status": "covered",
+      "note": "Old SDK initialization still includes attributes."
+    },
+    {
+      "id": "ws.permissions.dynamic",
+      "status": "gap",
+      "note": "Binding and fallback corpus pending; dynamic shared subscriptions are intentionally rejected."
+    },
+    {
+      "id": "ws.permissions.view-deny",
+      "status": "covered",
+      "note": "Seeded records are hidden by a closed view rule."
+    },
+    {
+      "id": "ws.permissions.write-deny",
+      "status": "covered",
+      "note": "Closed update rule rejects a mutation."
+    },
+    {
+      "id": "ws.query.aggregate",
+      "status": "covered",
+      "note": "Admin-authenticated aggregate count over two seeded entities."
+    },
+    {
+      "id": "ws.query.empty",
+      "status": "covered",
+      "note": "Empty posts node-list result."
+    },
+    {
+      "id": "ws.query.filter",
+      "status": "covered",
+      "note": "Seeded nonempty equality filter selects the matching entity."
+    },
+    {
+      "id": "ws.query.lifecycle",
+      "status": "covered",
+      "note": "Duplicate subscription, removal, re-add."
+    },
+    {
+      "id": "ws.query.offset",
+      "status": "covered",
+      "note": "Two seeded limit/offset pages, exact emitted cursors and next/previous boundary flags; no cursor advancement claim."
+    },
+    {
+      "id": "ws.query.pagination",
+      "status": "gap",
+      "note": "Known gap: after-cursor request repeats the first page. Desired behavior retained in opt-in TestCorpusKnownGapIntegration/after-cursor."
+    },
+    {
+      "id": "ws.query.relations",
+      "status": "gap",
+      "note": "Known gap: aliased cardinality-one forward relation drops link/child data. Desired behavior retained in opt-in TestCorpusKnownGapIntegration/forward-relation."
+    },
+    {
+      "id": "ws.reactive.delta",
+      "status": "gap",
+      "note": "v2 delta path is package-tested; no v1 parity claim."
+    },
+    {
+      "id": "ws.reactive.full",
+      "status": "covered",
+      "note": "Subscribed query receives full result after commit."
+    },
+    {
+      "id": "ws.rooms.boundaries",
+      "status": "covered",
+      "note": "Missing room errors, empty resync, leave; not peer fanout."
+    },
+    {
+      "id": "ws.rooms.cross-node",
+      "status": "unsupported",
+      "note": "No cross-node ephemeral-state bus."
+    },
+    {
+      "id": "ws.rooms.fanout",
+      "status": "gap",
+      "note": "Multi-session peer fanout/dynamic session-key snapshots need an explicit multi-client capture contract."
+    },
+    {
+      "id": "ws.sync-stream-placeholders",
+      "status": "unsupported",
+      "note": "Acknowledgement-only start/remove-sync and stream handlers are not implemented features."
+    },
+    {
+      "id": "ws.transact.add-attr",
+      "status": "covered",
+      "note": "In-band add-attr preserves existing schema identity."
+    },
+    {
+      "id": "ws.transact.add-triple",
+      "status": "covered",
+      "note": "Concrete persisted title write."
+    },
+    {
+      "id": "ws.transact.extended",
+      "status": "gap",
+      "note": "Deep merge, full cardinality/cascade matrix and missing-entity lookup variants remain package-test evidence only."
+    },
+    {
+      "id": "ws.transact.lookup",
+      "status": "covered",
+      "note": "Unique entity lookup updates the existing concrete entity."
+    },
+    {
+      "id": "ws.transact.number",
+      "status": "covered",
+      "note": "Integer above 2^53 survives write, storage, query, and node-list projection."
+    },
+    {
+      "id": "ws.transact.required",
+      "status": "covered",
+      "note": "Required-field retraction fails and leaves exact original data."
+    },
+    {
+      "id": "ws.transact.retract",
+      "status": "covered",
+      "note": "Persisted triple removal followed by empty query."
+    },
+    {
+      "id": "ws.transact.rollback",
+      "status": "covered",
+      "note": "Unknown attribute rejects multi-step transaction without a partial write."
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "00-smoke",
+      "path": "00-smoke.ndjson",
+      "owner": "internal/corpus",
+      "fixture": "smoke",
+      "normalization": "canonical-v1",
+      "oracle": {
+        "kind": "regression",
+        "source": "Authored from the implemented v2 WS contract; verified by TestCorpusReplayIntegration. Not a captured v1 oracle."
+      },
+      "surfaces": [
+        "ws.init",
+        "ws.query.empty"
+      ],
+      "ordering": "ordered-frames"
+    },
+    {
+      "id": "01-transact-refresh",
+      "path": "01-transact-refresh.ndjson",
+      "owner": "internal/corpus",
+      "fixture": "smoke",
+      "normalization": "canonical-v1",
+      "oracle": {
+        "kind": "regression",
+        "source": "Authored from the implemented v2 WS contract; verified by TestCorpusReplayIntegration. Not a captured v1 oracle."
+      },
+      "surfaces": [
+        "ws.transact.add-attr",
+        "ws.transact.add-triple",
+        "ws.reactive.full"
+      ],
+      "ordering": "ordered-frames"
+    },
+    {
+      "id": "02-subscription-lifecycle",
+      "path": "02-subscription-lifecycle.ndjson",
+      "owner": "internal/corpus",
+      "fixture": "smoke",
+      "normalization": "canonical-v1",
+      "oracle": {
+        "kind": "regression",
+        "source": "Authored from the implemented v2 WS contract; verified by TestCorpusReplayIntegration. Not a captured v1 oracle."
+      },
+      "surfaces": [
+        "ws.query.lifecycle"
+      ],
+      "ordering": "ordered-frames"
+    },
+    {
+      "id": "03-protocol-errors",
+      "path": "03-protocol-errors.ndjson",
+      "owner": "internal/corpus",
+      "fixture": "smoke",
+      "normalization": "canonical-v1",
+      "oracle": {
+        "kind": "regression",
+        "source": "Authored from the implemented v2 WS contract; verified by TestCorpusReplayIntegration. Not a captured v1 oracle."
+      },
+      "surfaces": [
+        "ws.errors"
+      ],
+      "ordering": "ordered-frames"
+    },
+    {
+      "id": "04-query-filter",
+      "path": "04-query-filter.ndjson",
+      "owner": "internal/corpus",
+      "fixture": "posts",
+      "normalization": "canonical-v1",
+      "oracle": {
+        "kind": "regression",
+        "source": "Authored from the implemented v2 WS contract; verified by TestCorpusReplayIntegration. Not a captured v1 oracle."
+      },
+      "surfaces": [
+        "ws.query.filter"
+      ],
+      "ordering": "ordered-frames"
+    },
+    {
+      "id": "05-permission-deny",
+      "path": "05-permission-deny.ndjson",
+      "owner": "internal/corpus",
+      "fixture": "deny",
+      "normalization": "canonical-v1",
+      "oracle": {
+        "kind": "regression",
+        "source": "Authored from the implemented v2 WS contract; verified by TestCorpusReplayIntegration. Not a captured v1 oracle."
+      },
+      "surfaces": [
+        "ws.permissions.view-deny",
+        "ws.permissions.write-deny"
+      ],
+      "ordering": "ordered-frames"
+    },
+    {
+      "id": "06-room-boundaries",
+      "path": "06-room-boundaries.ndjson",
+      "owner": "internal/corpus",
+      "fixture": "smoke",
+      "normalization": "canonical-v1",
+      "oracle": {
+        "kind": "regression",
+        "source": "Authored from the implemented v2 WS contract; verified by TestCorpusReplayIntegration. Not a captured v1 oracle."
+      },
+      "surfaces": [
+        "ws.rooms.boundaries"
+      ],
+      "ordering": "ordered-frames"
+    },
+    {
+      "id": "07-reinitialize",
+      "path": "07-reinitialize.ndjson",
+      "owner": "internal/corpus",
+      "fixture": "smoke",
+      "normalization": "canonical-v1",
+      "oracle": {
+        "kind": "regression",
+        "source": "Authored from the implemented v2 WS contract; verified by TestCorpusReplayIntegration. Not a captured v1 oracle."
+      },
+      "surfaces": [
+        "ws.init.reinitialize"
+      ],
+      "ordering": "ordered-frames"
+    },
+    {
+      "id": "08-transact-retract",
+      "path": "08-transact-retract.ndjson",
+      "owner": "internal/corpus",
+      "fixture": "smoke",
+      "normalization": "canonical-v1",
+      "oracle": {
+        "kind": "regression",
+        "source": "Authored from the implemented v2 WS contract; verified by TestCorpusReplayIntegration. Not a captured v1 oracle."
+      },
+      "surfaces": [
+        "ws.transact.retract"
+      ],
+      "ordering": "ordered-frames"
+    },
+    {
+      "id": "09-old-sdk-init",
+      "path": "09-old-sdk-init.ndjson",
+      "owner": "internal/corpus",
+      "fixture": "smoke",
+      "normalization": "canonical-v1",
+      "oracle": {
+        "kind": "regression",
+        "source": "Authored from the implemented v2 WS contract; verified by TestCorpusReplayIntegration. Not a captured v1 oracle."
+      },
+      "surfaces": [
+        "ws.init.versions"
+      ],
+      "ordering": "ordered-frames"
+    },
+    {
+      "id": "10-transact-rollback",
+      "path": "10-transact-rollback.ndjson",
+      "owner": "internal/corpus",
+      "fixture": "smoke",
+      "normalization": "canonical-v1",
+      "oracle": {
+        "kind": "regression",
+        "source": "Authored from the implemented v2 WS contract; verified by TestCorpusReplayIntegration. Not a captured v1 oracle."
+      },
+      "surfaces": [
+        "ws.transact.rollback"
+      ],
+      "ordering": "ordered-frames"
+    },
+    {
+      "id": "11-query-pagination",
+      "path": "11-query-pagination.ndjson",
+      "owner": "internal/corpus",
+      "fixture": "posts",
+      "normalization": "canonical-v1",
+      "oracle": {
+        "kind": "regression",
+        "source": "Authored from the implemented v2 WS contract; verified by TestCorpusReplayIntegration. Not a captured v1 oracle."
+      },
+      "surfaces": [
+        "ws.query.offset"
+      ],
+      "ordering": "ordered-frames"
+    },
+    {
+      "id": "12-query-aggregate",
+      "path": "12-query-aggregate.ndjson",
+      "owner": "internal/corpus",
+      "fixture": "admin",
+      "normalization": "canonical-v1",
+      "oracle": {
+        "kind": "regression",
+        "source": "Authored from the implemented v2 WS contract; verified by TestCorpusReplayIntegration. Not a captured v1 oracle."
+      },
+      "surfaces": [
+        "ws.query.aggregate"
+      ],
+      "ordering": "ordered-frames"
+    },
+    {
+      "id": "14-transact-lookup",
+      "path": "14-transact-lookup.ndjson",
+      "owner": "internal/corpus",
+      "fixture": "unique",
+      "normalization": "canonical-v1",
+      "oracle": {
+        "kind": "regression",
+        "source": "Authored from the implemented v2 WS contract; verified by TestCorpusReplayIntegration. Not a captured v1 oracle."
+      },
+      "surfaces": [
+        "ws.transact.lookup"
+      ],
+      "ordering": "ordered-frames"
+    },
+    {
+      "id": "15-transact-required",
+      "path": "15-transact-required.ndjson",
+      "owner": "internal/corpus",
+      "fixture": "required",
+      "normalization": "canonical-v1",
+      "oracle": {
+        "kind": "regression",
+        "source": "Authored from the implemented v2 WS contract; verified by TestCorpusReplayIntegration. Not a captured v1 oracle."
+      },
+      "surfaces": [
+        "ws.transact.required"
+      ],
+      "ordering": "ordered-frames"
+    },
+    {
+      "id": "16-exact-number",
+      "path": "16-exact-number.ndjson",
+      "owner": "internal/corpus",
+      "fixture": "smoke",
+      "normalization": "canonical-v1",
+      "oracle": {
+        "kind": "regression",
+        "source": "Authored from the implemented v2 WS contract; verified by TestCorpusReplayIntegration. Not a captured v1 oracle."
+      },
+      "surfaces": [
+        "ws.transact.number"
+      ],
+      "ordering": "ordered-frames"
+    }
+  ]
+}

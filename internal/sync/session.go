@@ -1,6 +1,6 @@
 // Package sync owns the WebSocket session protocol at /runtime/session.
 // Port surface of v1's reactive/session.clj op dispatcher + lib/ring/websocket,
-// collapsed onto coder/websocket. The frozen surface (docs/03-protocol.md):
+// collapsed onto coder/websocket. The frozen surface (docs/reference/03-protocol.md):
 //
 //	client→server: init, add-query, remove-query, transact, error,
 //	  join-room/leave-room/set-presence/client-broadcast (rooms), …
@@ -22,14 +22,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/instant-v2/instant-v2/internal/instaql"
-	"github.com/instant-v2/instant-v2/internal/metrics"
 	"github.com/instant-v2/instant-v2/internal/perms"
 	"github.com/instant-v2/instant-v2/internal/platform"
 	"github.com/instant-v2/instant-v2/internal/reactive"
 	"github.com/instant-v2/instant-v2/internal/storage"
-	"github.com/instant-v2/instant-v2/internal/tracing"
-	"github.com/instant-v2/instant-v2/internal/transact"
 )
 
 // Feature gates and their minimum SDK versions.
@@ -100,12 +96,12 @@ type Deps struct {
 		Allow(appID string, class string) (bool, time.Duration)
 	}
 	// TransactGate consults overload state (notifier queue depth,
-	// docs/09-tier2-architecture.md §T2.1) before executing a transact
+	// docs/reference/09-tier2-architecture.md §T2.1) before executing a transact
 	// op. nil means always allow. A *reactive.ShedError denial becomes
 	// the 429-shaped error frame carrying RetryAfter as the hint.
 	TransactGate func(appID string) error
 	// OnCommitChanges is the change-annotated invalidation path
-	// (docs/09-tier2-architecture.md §T2.5): when set and every step of a
+	// (docs/reference/09-tier2-architecture.md §T2.5): when set and every step of a
 	// transact resolves to a plain triple write, it is preferred over
 	// OnCommit so the incremental engine can splice instead of recompute.
 	OnCommitChanges func(ctx context.Context, appID string, changes []reactive.Change, txID int64, attrsChanged bool)
@@ -137,7 +133,7 @@ type Manager struct {
 	log  *slog.Logger
 	nm   sync.Mutex
 
-	// Query-group registry (docs/08-tier1-hotpath.md §T1.1).
+	// Query-group registry (docs/archive/08-tier1-hotpath.md §T1.1).
 	groupsMu   sync.Mutex
 	groups     map[string]*queryGroup
 	appMembers map[string]int // appID -> total attached members (cap accounting)
@@ -145,7 +141,7 @@ type Manager struct {
 	// flight serializes the synchronous add-query initial answer per group
 	// key: the first arriver computes and seeds the group snapshot,
 	// concurrent duplicates wait and reuse it (docs/08 §T1.1 single-flight).
-	flight sync.Map // group key -> *sync.Mutex
+	flight sync.Map // group key -> *snapshotFlight
 }
 
 func NewManager(d Deps) *Manager {
@@ -161,56 +157,6 @@ func (m *Manager) logger() *slog.Logger {
 		return m.log
 	}
 	return slog.Default()
-}
-
-// QueryGate is the permission snapshot stored on every subscription at
-// attach time (Subscription.AttachCtx). Refresh executors rebuild the same
-// visibility the group was admitted under: Rules drives instaql's view gate
-// (closed etypes render empty; dynamic ones were rejected pre-attach for
-// non-admin callers), Admin bypasses.
-type QueryGate struct {
-	Rules *perms.RuleDoc
-	Admin bool
-}
-
-// collectEtypes walks a raw InstaQL body and returns every etype name at any
-// nesting level (the "$" options key excluded).
-func collectEtypes(rawQ json.RawMessage) []string {
-	var q map[string]any
-	if err := json.Unmarshal(rawQ, &q); err != nil {
-		return nil
-	}
-	var out []string
-	var walk func(map[string]any)
-	seen := map[string]bool{}
-	walk = func(m map[string]any) {
-		for k, v := range m {
-			if k == "$" || seen[k] {
-				continue
-			}
-			seen[k] = true
-			out = append(out, k)
-			if child, ok := v.(map[string]any); ok {
-				walk(child)
-			}
-		}
-	}
-	walk(q)
-	return out
-}
-
-// gateQuery enforces view rules for a would-be subscription. Returns:
-//   - err non-nil → dynamic view rule and caller is not admin (reject).
-//
-// Closed etypes are allowed through with an empty-result gate: refreshes
-// render [] via instaql's Executor, so live updates never leak denied data.
-func gateQuery(doc *perms.RuleDoc, rawQ json.RawMessage) error {
-	for _, etype := range collectEtypes(rawQ) {
-		if perms.ViewGate(doc, etype) == perms.ViewDynamic {
-			return &instaql.ErrRuleFilterUnsupported{Etype: etype}
-		}
-	}
-	return nil
 }
 
 // Security invariant: an unloadable rule doc must never widen access. The
@@ -234,7 +180,6 @@ func (m *Manager) HandleInit(ctx context.Context, f Frame) (*Session, Frame, err
 	if appID == "" {
 		return nil, ErrFrame(400, "missing-app-id", "init requires app-id"), fmt.Errorf("missing app-id")
 	}
-	_ = ctx // reserved for async auth resolution
 	var versions map[string]string
 	if raw, ok := f["versions"]; ok {
 		_ = json.Unmarshal(raw, &versions)
@@ -299,10 +244,6 @@ func (m *Manager) Handle(ctx context.Context, sess *Session, f Frame) ([]Frame, 
 	case "add-query":
 		return m.handleAddQuery(ctx, sess, f)
 	case "remove-query":
-		subID, _ := f.String("client-event-id")
-		_ = subID
-		qid, _ := f.String("q")
-		_ = qid
 		// Removal resolves the same group key add-query registered.
 		id, _ := f.String("subscription-id")
 		if id == "" {
@@ -342,236 +283,3 @@ func (m *Manager) Handle(ctx context.Context, sess *Session, f Frame) ([]Frame, 
 		return nil, nil
 	}
 }
-
-func (m *Manager) handleAddQuery(ctx context.Context, sess *Session, f Frame) ([]Frame, error) {
-	rawQ, ok := f["q"]
-	if !ok {
-		return []Frame{ErrFrame(400, "bad-request", "add-query requires q")}, nil
-	}
-	eventID, _ := f.String("client-event-id")
-
-	class := wireNodelist
-	if sess.TreeResults {
-		class = wireTree
-	}
-	key := groupKey(sess.AppID, class, rawQ, sess.Admin)
-
-	// Same session re-adding its own query → v1 add-query-exists.
-	sess.mu.Lock()
-	dup := sess.Subs[key]
-	sess.mu.Unlock()
-	if dup {
-		fr := Frame{"op": json.RawMessage(`"add-query-exists"`)}
-		if eventID != "" {
-			fr["client-event-id"] = json.RawMessage(mustJSON(eventID))
-		}
-		return []Frame{fr}, nil
-	}
-
-	// Compile topics + catalog BEFORE touching the registry (same order as
-	// the pre-group code; failures never create groups).
-	topics, err := m.topicsFor(ctx, sess.AppID, rawQ)
-	if err != nil {
-		return []Frame{ErrFrame(400, "invalid-query", err.Error())}, nil
-	}
-	cat, err := m.Deps.Catalogs.For(ctx, sess.AppID)
-	if err != nil {
-		return []Frame{ErrFrame(404, "unknown-app", "no such app")}, nil
-	}
-
-	// View-rule gate: dynamic rules cannot be honored on shared subscriptions
-	// (no rule-where pushdown yet) — refuse them for non-admin callers rather
-	// than leak. Closed rules proceed with an empty-result gate.
-	doc, rerr := m.rulesFor(ctx, sess.AppID)
-	if rerr != nil {
-		return []Frame{ErrFrame(503, "rules-unavailable",
-			"permission rules temporarily unavailable; retry shortly")}, nil
-	}
-	if !sess.Admin {
-		if gerr := gateQuery(doc, rawQ); gerr != nil {
-			return []Frame{ErrFrame(400, "invalid-query", gerr.Error())}, nil
-		}
-	}
-
-	// Attach (creates the shared subscription on first use). Cap breaches
-	// reject with the exact 429 protocol frames and close the connection.
-	if _, aerr := m.attachGroup(sess, rawQ, topics, cat, class, doc); aerr != nil {
-		var capErr *reactive.SubLimitError
-		if errors.As(aerr, &capErr) {
-			return []Frame{ErrFrame(429, "subscription-limit",
-					fmt.Sprintf("per-app subscription cap (%d) exceeded", capErr.Max))},
-				fmt.Errorf("%w: %v", ErrCloseSession, aerr)
-		}
-		return []Frame{ErrFrame(500, "internal", platform.ClientMessage(aerr))}, aerr
-	}
-
-	reply := Frame{"op": json.RawMessage(`"add-query-ok"`)}
-	if eventID != "" {
-		reply["client-event-id"] = json.RawMessage(mustJSON(eventID))
-	}
-	return []Frame{reply}, nil
-}
-
-func (m *Manager) handleTransact(ctx context.Context, sess *Session, f Frame) ([]Frame, error) {
-	// WS frames carry no trace context; each op is a fresh root span. The
-	// span covers parse→commit→notify so a waterfall shows the full chain.
-	ctx, span := tracing.Tracer.Start(ctx, "transact.ws")
-	defer span.End()
-	rawSteps, ok := f["tx-steps"]
-	if !ok {
-		return []Frame{ErrFrame(400, "bad-request", "transact requires tx-steps")}, nil
-	}
-	// Per-app write budget: shed before parsing/DB work.
-	if m.Deps.Limiter != nil {
-		if ok2, retry := m.Deps.Limiter.Allow(sess.AppID, "transact"); !ok2 {
-			return []Frame{ErrFrame(429, "rate-limited",
-				fmt.Sprintf("rate limited; retry after %s", retry.Round(time.Millisecond)))}, nil
-		}
-	}
-	// Shed before doing any work: an overloaded drain loop must shed
-	// publishers at the gate, not after they burned a Postgres txn
-	// (docs/09-tier2-architecture.md §T2.1).
-	if m.Deps.TransactGate != nil {
-		if gerr := m.Deps.TransactGate(sess.AppID); gerr != nil {
-			var shed *reactive.ShedError
-			hint := "server busy"
-			if errors.As(gerr, &shed) && shed.RetryAfter > 0 {
-				hint = fmt.Sprintf("server busy; retry after %s", shed.RetryAfter)
-			}
-			return []Frame{ErrFrame(429, "shed", hint)}, nil
-		}
-	}
-	var steps []json.RawMessage
-	if err := json.Unmarshal(rawSteps, &steps); err != nil {
-		return []Frame{ErrFrame(400, "bad-request", "tx-steps must be an array")}, nil
-	}
-	parsed, err := transact.ParseSteps(steps)
-	if err != nil {
-		return []Frame{ErrFrame(400, "tx-step-validation", err.Error())}, nil
-	}
-	cat, err := m.Deps.Catalogs.For(ctx, sess.AppID)
-	if err != nil {
-		return []Frame{ErrFrame(404, "unknown-app", "no such app")}, nil
-	}
-	appID := parseUUIDOrZero(sess.AppID)
-	doc, rerr := m.rulesFor(ctx, sess.AppID)
-	if rerr != nil {
-		return []Frame{ErrFrame(503, "rules-unavailable",
-			"permission rules temporarily unavailable; retry shortly")}, nil
-	}
-	opts := transact.Options{
-		Admin:    sess.Admin,
-		AuthUser: sess.AuthUser,
-	}
-	started := time.Now()
-	res, err := transact.Transact(ctx, m.Deps.DB, cat, appID, parsed, opts, doc)
-	metrics.TransactDuration.WithLabelValues("ws").Observe(time.Since(started).Seconds())
-	if err != nil {
-		return []Frame{ErrFrame(403, "transact-error", platform.ClientMessage(err))}, nil
-	}
-	if res.AttrsChanged && m.Deps.Catalogs != nil {
-		m.Deps.Catalogs.Invalidate(sess.AppID)
-	}
-	if m.Deps.OnCommit != nil {
-		var attrIDs []string
-		for _, st := range parsed {
-			if st.Op == "add-triple" || st.Op == "deep-merge-triple" || st.Op == "retract-triple" {
-				if len(st.Args) >= 2 {
-					var a string
-					if json.Unmarshal(st.Args[1], &a) == nil && a != "" {
-						attrIDs = append(attrIDs, a)
-					}
-				}
-			}
-		}
-		// Change-routed path (docs/09 §T2.5): fully-resolved plain triple
-		// writes carry entity identity so the incremental engine can splice;
-		// anything else keeps the topic-wide Notify semantics.
-		if m.Deps.OnCommitChanges != nil {
-			if triples, ok := transact.ResolveTriples(parsed, cat); ok && len(triples) > 0 {
-				changes := make([]reactive.Change, 0, len(triples))
-				for _, tt := range triples {
-					changes = append(changes, reactive.Change{
-						Etype:    tt.Etype,
-						EntityID: tt.EntityID,
-						AttrIDs:  []string{tt.AttrID},
-					})
-				}
-				m.Deps.OnCommitChanges(ctx, sess.AppID, changes, res.TxID, res.AttrsChanged)
-			} else {
-				m.Deps.OnCommit(ctx, sess.AppID, attrIDs, res.TxID, res.AttrsChanged)
-			}
-		} else {
-			m.Deps.OnCommit(ctx, sess.AppID, attrIDs, res.TxID, res.AttrsChanged)
-		}
-	}
-	txID, _ := f.String("client-event-id")
-	fr := Frame{
-		"op":    json.RawMessage(`"transact-ok"`),
-		"tx-id": json.RawMessage(mustJSON(res.TxID)),
-	}
-	if txID != "" {
-		fr["client-event-id"] = json.RawMessage(mustJSON(txID))
-	}
-	return []Frame{fr}, nil
-}
-
-// topicsFor compiles the query to its attr-id topic set.
-func (m *Manager) topicsFor(ctx context.Context, appID string, rawQ json.RawMessage) (map[string]bool, error) {
-	cat, err := m.Deps.Catalogs.For(ctx, appID)
-	if err != nil {
-		return nil, err
-	}
-	var q map[string]any
-	if err := json.Unmarshal(rawQ, &q); err != nil {
-		return nil, err
-	}
-	topics := map[string]bool{}
-	var walk func(prefixEtype string, node map[string]any) error
-	walk = func(etype string, node map[string]any) error {
-		for k, v := range node {
-			if k == "$" {
-				if wm, ok := v.(map[string]any); ok {
-					if w, ok := wm["where"].(map[string]any); ok {
-						for label := range w {
-							if a := cat.FindByEtypeLabel(etype, label); a != nil {
-								topics[platform.UUIDToStr(a.ID)] = true
-							}
-						}
-					}
-				}
-				continue
-			}
-			child, ok := v.(map[string]any)
-			if !ok {
-				child = map[string]any{}
-			}
-			// child level invalidates on the link attr of this etype too
-			if a := cat.FindByEtypeLabel(etype, k); a != nil {
-				topics[platform.UUIDToStr(a.ID)] = true
-			}
-			if err := walk(k, child); err != nil {
-				return err
-			}
-		}
-		// The level itself depends on every attr of its etype (new entities).
-		for _, a := range cat.ByEtype(etype) {
-			topics[a] = true
-		}
-		return nil
-	}
-	if err := walk("", q); err != nil {
-		return nil, err
-	}
-	if len(topics) == 0 {
-		// conservative fallback: invalidate on everything of known etypes
-		for etype := range q {
-			for _, a := range cat.ByEtype(etype) {
-				topics[a] = true
-			}
-		}
-	}
-	return topics, nil
-}
-
-var _ = perms.Bindings{}

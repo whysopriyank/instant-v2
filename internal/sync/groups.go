@@ -2,7 +2,7 @@ package sync
 
 // Query-group registry: one logical subscription per
 // (app, wire-class, canonical query) shared by every session that asked for
-// it. Spec: docs/08-tier1-hotpath.md §T1.1.
+// it. Spec: docs/archive/08-tier1-hotpath.md §T1.1.
 //
 // Without grouping, N clients holding the same query are N independent
 // pipelines — N recomputes + N renders + N marshals of byte-identical frames
@@ -212,7 +212,7 @@ func (m *Manager) DetachAll(sess *Session) {
 // subscription under the per-key flight: the first arriver runs the full
 // refresh and seeds the group snapshot; concurrent duplicates of the same
 // group wait and reuse the baseline instead of stacking N recomputes on the
-// read pool (docs/08-tier1-hotpath.md §T1.1 single-flight).
+// read pool (docs/archive/08-tier1-hotpath.md §T1.1 single-flight).
 //
 // Reuse safety: the baseline covers exactly this group's query. Any commit
 // newer than the baseline either already dirtied the group (the drain pushes

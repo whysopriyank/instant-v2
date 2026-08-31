@@ -9,136 +9,99 @@ import (
 	"github.com/coder/websocket"
 )
 
-// ReplayResult is the outcome of one scenario replay against a live server.
+// ReplayResult retains raw evidence separately from policy-normalized outputs.
 type ReplayResult struct {
-	Scenario   *Scenario
-	Expected   [][]byte // canonical golden s2c frames
-	Collected  [][]byte // canonical frames actually received
-	DurationMS int64
-	Err        error
-	Delta      string // Diff(Expected,Collected); empty on pass
-	Passed     bool
+	Scenario     *Scenario
+	Expected     [][]byte
+	Collected    [][]byte
+	RawCollected []json.RawMessage
+	DurationMS   int64
+	Err          error
+	Delta        string
+	Passed       bool
 }
 
-// Replay drives the c2s frames of sc against the WebSocket at wsURL (ws:// or wss://),
-// collects s2c frames until the golden count is reached or the deadline expires,
-// canonicalizes both sides, and returns the delta.
-// A live server is required; use FakeServer in unit tests (replay_test.go).
+// Replay executes NDJSON in order. An s2c step is a receive barrier before the
+// next c2s step. Existing grouped-send scenarios retain their grouped semantics.
+// The scenario declares the complete expected frame sequence; this bounded
+// replay does not claim the absence of additional frames after its final step.
 func Replay(ctx context.Context, wsURL string, sc *Scenario, timeout time.Duration) ReplayResult {
-	return replay(ctx, wsURL, sc, timeout, CanonicalOptions{}, 0)
+	return replay(ctx, wsURL, sc, timeout, CanonicalOptions{})
 }
 
-// replay is the tunable core: canonicalization mode and inter-frame send gap
-// (differential mode spaces frames because v1's grouped-queue races
-// back-to-back messages against session init).
-func replay(ctx context.Context, wsURL string, sc *Scenario, timeout time.Duration, opts CanonicalOptions, sendGap time.Duration) ReplayResult {
+func replay(ctx context.Context, wsURL string, sc *Scenario, timeout time.Duration, opts CanonicalOptions) (res ReplayResult) {
 	start := time.Now()
-	res := ReplayResult{Scenario: sc}
-
-	c2s := sc.C2S()
-	expectedRaw := sc.ExpectedS2C()
-	res.Expected = canonicalizeAll(expectedRaw)
-
-	if timeout == 0 {
+	res.Scenario = sc
+	defer func() {
+		res.DurationMS = time.Since(start).Milliseconds()
+		res.Delta = Diff(res.Expected, res.Collected)
+		res.Passed = res.Err == nil && res.Delta == ""
+	}()
+	if len(sc.C2S()) == 0 || len(sc.ExpectedS2C()) == 0 {
+		res.Err = fmt.Errorf("replay requires client frames and expected server frames")
+		return
+	}
+	for i, raw := range sc.ExpectedS2C() {
+		canonical, err := CanonicalBytesOpts(raw, opts)
+		if err != nil {
+			res.Err = fmt.Errorf("expected frame %d: %w", i, err)
+			return
+		}
+		res.Expected = append(res.Expected, canonical)
+	}
+	if timeout <= 0 {
 		timeout = 12 * time.Second
 	}
 	dctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-
 	conn, _, err := websocket.Dial(dctx, wsURL, nil)
 	if err != nil {
-		res.Err = fmt.Errorf("dial %s: %w", wsURL, err)
-		return res
+		res.Err = fmt.Errorf("dial: %w", err)
+		return
 	}
-	defer conn.Close(websocket.StatusNormalClosure, "")
-
-	// Send all c2s frames in client order; sendGap spaces them when the
-	// peer's message queue processes frames concurrently with session setup.
-	for _, raw := range c2s {
-		if sendGap > 0 {
-			select {
-			case <-dctx.Done():
-			case <-time.After(sendGap):
-			}
-		}
-		if err := conn.Write(dctx, websocket.MessageText, raw); err != nil {
-			res.Err = fmt.Errorf("write: %w", err)
-			return res
-		}
-	}
-
-	// Collect until golden count or timeout. If golden is empty (record-only
-	// scenario), collect for 500ms and report what arrived.
-	goal := len(expectedRaw)
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
-	var got [][]byte
-	for goal == 0 || len(got) < goal {
-		// Per-message read with remaining time; treat deadline expiry as completion.
-		msgType, data, err := conn.Read(dctx)
-		if err != nil {
-			if goal == 0 {
-				// record-only shape — read ending is expected
-				break
-			}
-			// Closed before goal — record what we have and let the delta surface it.
-			if len(got) == goal {
-				break
-			}
-			res.Err = fmt.Errorf("read (%d/%d): %w", len(got), goal, err)
-			break
-		}
-		if msgType != websocket.MessageText {
+	defer func() { _ = conn.CloseNow() }() // best-effort transport cleanup
+	for i, step := range sc.Steps {
+		switch step.Dir {
+		case "meta":
 			continue
-		}
-		c, err := CanonicalBytesOpts(data, opts)
-		if err != nil {
-			c = data
-		}
-		got = append(got, c)
-		if goal == 0 {
-			// No golden: if we stalled for the full timeout window, stop rather than hang.
-			select {
-			case <-dctx.Done():
-				goto finish
-			default:
+		case "c2s":
+			if err := conn.Write(dctx, websocket.MessageText, step.Raw); err != nil {
+				res.Err = fmt.Errorf("step %d write: %w", i+1, err)
+				return
 			}
+		case "s2c":
+			typ, data, err := conn.Read(dctx)
+			if err != nil {
+				res.Err = fmt.Errorf("step %d read (%d/%d): %w", i+1, len(res.Collected), len(res.Expected), err)
+				return
+			}
+			if typ != websocket.MessageText {
+				res.Err = fmt.Errorf("step %d: expected text frame, got %v", i+1, typ)
+				return
+			}
+			res.RawCollected = append(res.RawCollected, append(json.RawMessage(nil), data...))
+			canonical, err := CanonicalBytesOpts(data, opts)
+			if err != nil {
+				res.Err = fmt.Errorf("step %d server JSON: %w", i+1, err)
+				return
+			}
+			res.Collected = append(res.Collected, canonical)
+		default:
+			res.Err = fmt.Errorf("step %d: invalid direction %q", i+1, step.Dir)
+			return
 		}
 	}
-finish:
-	res.Collected = got
-	res.DurationMS = time.Since(start).Milliseconds()
-	// Canonicalize expected as well when constructing the golden from file bytes.
-	// Already done into res.Expected above.
-	res.Delta = Diff(res.Expected, res.Collected)
-	res.Passed = res.Err == nil && res.Delta == ""
-	return res
+	return
 }
 
-func canonicalizeAll(in []json.RawMessage) [][]byte {
-	out := make([][]byte, 0, len(in))
-	for _, b := range in {
-		c, err := CanonicalBytes(b)
-		if err != nil {
-			c = b
-		}
-		out = append(out, c)
-	}
-	return out
-}
-
-// Differential replays the same scenario against two WebSocket endpoints and diffs
-// their collected outputs against each other (v1 vs v2 side-by-side). The golden
-// is not consulted — the two servers are the oracles for each other.
+// Differential compares actual outputs, not authored goldens. Failed transport
+// or decoding is inconclusive evidence and always produces a nonempty delta.
 func Differential(ctx context.Context, sc *Scenario, aURL, bURL string, timeout time.Duration) (aRes, bRes ReplayResult, delta string) {
-	if timeout == 0 {
-		timeout = 12 * time.Second
-	}
 	opts := CanonicalOptions{Differential: true}
-	const sendGap = 120 * time.Millisecond
-	aRes = replay(ctx, aURL, sc, timeout, opts, sendGap)
-	bRes = replay(ctx, bURL, sc, timeout, opts, sendGap)
-	// Compare collected sides even if golden mismatches — the point is side-by-side fidelity.
-	d := Diff(aRes.Collected, bRes.Collected)
-	return aRes, bRes, d
+	aRes = replay(ctx, aURL, sc, timeout, opts)
+	bRes = replay(ctx, bURL, sc, timeout, opts)
+	if aRes.Err != nil || bRes.Err != nil {
+		return aRes, bRes, fmt.Sprintf("replay incomplete: target=%v; other=%v", aRes.Err, bRes.Err)
+	}
+	return aRes, bRes, Diff(aRes.Collected, bRes.Collected)
 }

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/instant-v2/instant-v2/internal/testkit"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -67,15 +68,11 @@ func TestBootstrapSQLIntegrity(t *testing.T) {
 	t.Skip("bootstrap SQL not found on disk; embedded check already passed")
 }
 
-// TestMigrationsApply runs the embedded migrations against a real Postgres when
-// DATABASE_URL is set; otherwise it is skipped. CI sets it via testcontainers
-// (docs/05-conformance.md).
+// TestMigrationsApply runs embedded migrations against a test-owned database
+// when integration mode is explicitly enabled.
 func TestMigrationsApply(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set; skipping live migration run (set it or run `make test` in CI)")
-	}
-	db, err := sql.Open("pgx", dsn)
+	fixture := testkit.NewPostgres(t, testkit.PostgresOptions{})
+	db, err := sql.Open("pgx", fixture.DSN)
 	if err != nil {
 		t.Fatalf("sql.Open: %v", err)
 	}

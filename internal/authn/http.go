@@ -2,10 +2,10 @@ package authn
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"strings"
 
+	"github.com/instant-v2/instant-v2/internal/httpjson"
 	"github.com/instant-v2/instant-v2/internal/platform"
 )
 
@@ -48,17 +48,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+	// Headers are committed before encoding; a failed write cannot be replaced
+	// with a second response.
+	_ = httpjson.Write(w, status, v, true)
 }
 
-func readBody(r *http.Request) map[string]any {
-	var m map[string]any
-	if r.Body != nil {
-		_ = json.NewDecoder(r.Body).Decode(&m)
+func readBody(w http.ResponseWriter, r *http.Request) (map[string]any, bool) {
+	m, err := httpjson.DecodeObject(r.Body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"message": "invalid JSON body"})
+		return nil, false
 	}
-	return m
+	return m, true
 }
 
 func str(m map[string]any, key string) string {
@@ -83,7 +84,10 @@ type errStr string
 func (e errStr) Error() string { return string(e) }
 
 func (h *Handler) sendMagicCode(w http.ResponseWriter, r *http.Request) {
-	m := readBody(r)
+	m, ok := readBody(w, r)
+	if !ok {
+		return
+	}
 	email := strings.TrimSpace(str(m, "email"))
 	appID, err := h.parseAppID(m)
 	if err != nil || email == "" {
@@ -98,7 +102,10 @@ func (h *Handler) sendMagicCode(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) verifyMagicCode(w http.ResponseWriter, r *http.Request) {
-	m := readBody(r)
+	m, ok := readBody(w, r)
+	if !ok {
+		return
+	}
 	email := strings.TrimSpace(str(m, "email"))
 	code := strings.TrimSpace(str(m, "code"))
 	appID, err := h.parseAppID(m)
@@ -126,7 +133,10 @@ func (h *Handler) verifyMagicCode(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) signInGuest(w http.ResponseWriter, r *http.Request) {
-	m := readBody(r)
+	m, ok := readBody(w, r)
+	if !ok {
+		return
+	}
 	appID, err := h.parseAppID(m)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"message": err.Error()})
@@ -142,7 +152,10 @@ func (h *Handler) signInGuest(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) verifyRefreshToken(w http.ResponseWriter, r *http.Request) {
-	m := readBody(r)
+	m, ok := readBody(w, r)
+	if !ok {
+		return
+	}
 	token := str(m, "refresh-token")
 	appID, err := h.parseAppID(m)
 	if err != nil || token == "" {
@@ -159,7 +172,10 @@ func (h *Handler) verifyRefreshToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) signOut(w http.ResponseWriter, r *http.Request) {
-	m := readBody(r)
+	m, ok := readBody(w, r)
+	if !ok {
+		return
+	}
 	// v1 signout-post reads :refresh_token / :app_id (snake_case).
 	token := str(m, "refresh_token")
 	if token == "" {
@@ -261,7 +277,10 @@ func (h *Handler) oauthCallback(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) oauthToken(w http.ResponseWriter, r *http.Request) {
-	m := readBody(r)
+	m, ok := readBody(w, r)
+	if !ok {
+		return
+	}
 	appID, err := h.parseAppID(m)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"message": err.Error()})
@@ -279,7 +298,10 @@ func (h *Handler) oauthToken(w http.ResponseWriter, r *http.Request) {
 // oauthIDToken ports oauth-id-token-callback: the client presents a
 // third-party id_token directly; we verify it against the provider JWKS.
 func (h *Handler) oauthIDToken(w http.ResponseWriter, r *http.Request) {
-	m := readBody(r)
+	m, ok := readBody(w, r)
+	if !ok {
+		return
+	}
 	appID, err := h.parseAppID(m)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"message": err.Error()})

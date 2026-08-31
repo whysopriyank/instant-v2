@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -23,14 +22,8 @@ import (
 // fixed 64 MiB. A session that exceeds the configured read limit gets its
 // connection closed before the payload is parsed.
 func TestWSReadLimitClosesOversizedFrames(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
-	}
+	pool := newPostgres(t)
 	ctx := context.Background()
-	pool := mustPool(t, dsn)
-	resetSchema(t, pool)
-	migrate(t, dsn)
 
 	st := storage.New(pool)
 	cats := platform.NewCatalogCache(pool, pool)
@@ -47,7 +40,7 @@ func TestWSReadLimitClosesOversizedFrames(t *testing.T) {
 			return runQuery(ex, cats, sub)
 		},
 	}
-	go notifier.Run(ctx)
+	runNotifier(t, notifier)
 	mgr := syncpkg.NewManager(syncpkg.Deps{
 		Rooms:    syncpkg.NewRoomHub(),
 		DB:       st,

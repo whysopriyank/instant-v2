@@ -10,7 +10,7 @@ import (
 )
 
 // BenchmarkGroupDispatchFanout measures one generation fanned to N members
-// through the shared-render path (docs/08-tier1-hotpath.md §T1.1): render +
+// through the shared-render path (docs/archive/08-tier1-hotpath.md §T1.1): render +
 // marshal happen ONCE; each member send is a pre-encoded byte copy.
 func BenchmarkGroupDispatchFanout(b *testing.B) {
 	const members = 100

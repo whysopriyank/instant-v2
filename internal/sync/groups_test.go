@@ -10,7 +10,7 @@ import (
 
 // TestGroupDedupeSharedSubscription proves query-group dedupe end-to-end:
 // two sessions holding the identical query share ONE store subscription and
-// receive byte-identical full envelopes per write (docs/08-tier1-hotpath.md
+// receive byte-identical full envelopes per write (docs/archive/08-tier1-hotpath.md
 // §T1.1).
 func TestGroupDedupeSharedSubscription(t *testing.T) {
 	env := newWSEnv(t)

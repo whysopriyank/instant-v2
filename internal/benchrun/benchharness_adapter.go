@@ -440,8 +440,6 @@ func unsupportedProcessSample(sample ProcessSample) bool {
 	return sample.UserCPU.Status == StatusUnsupported && sample.SystemCPU.Status == StatusUnsupported && sample.RSS.Status == StatusUnsupported
 }
 
-const maxPersistedFrameEvidence = 64 << 10
-
 func mapRawFrame(runID string, raw benchharness.RawFrameEvidence) Frame {
 	if runID == "" {
 		runID = "unknown-run"

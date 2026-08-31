@@ -2,9 +2,9 @@ package waltail_test
 
 import (
 	"database/sql"
-	"os"
 	"testing"
 
+	"github.com/instant-v2/instant-v2/internal/testkit"
 	"github.com/instant-v2/instant-v2/internal/waltail"
 )
 
@@ -12,20 +12,13 @@ import (
 // a confirmed LSN survives process restart (fresh Checkpoint handle), and
 // stale confirms (older LSN) can never move the watermark backwards.
 func TestCheckpointRestartProvesMonotonicity(t *testing.T) {
-	d := os.Getenv("DATABASE_URL")
-	if d == "" {
-		t.Skip("DATABASE_URL not set")
-	}
-	db, err := sql.Open("pgx", d)
+	fixture := testkit.NewPostgres(t, testkit.PostgresOptions{LogicalWAL: true})
+	db, err := sql.Open("pgx", fixture.DSN)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
 
-	// Fresh namespace for this test.
-	if _, err := db.Exec(`DROP TABLE IF EXISTS tail_state`); err != nil {
-		t.Fatal(err)
-	}
 	cp1, err := waltail.OpenCheckpoint(db)
 	if err != nil {
 		t.Fatal(err)

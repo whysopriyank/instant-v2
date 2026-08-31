@@ -1,0 +1,74 @@
+{
+  "appId": "22222222-2222-4222-8222-222222222222",
+  "creatorId": "11111111-1111-4111-8111-111111111111",
+  "txSteps": [
+    [
+      "add-attr",
+      {
+        "id": "44444444-4444-4444-8444-444444444444",
+        "forward-identity": [
+          "22222222-2222-4222-8222-222222222222",
+          "posts",
+          "title"
+        ],
+        "value-type": "blob",
+        "cardinality": "one",
+        "index?": false,
+        "unique?": false
+      }
+    ],
+    [
+      "add-attr",
+      {
+        "id": "66666666-6666-4666-8666-666666666666",
+        "forward-identity": [
+          "68686868-6868-4868-8868-686868686868",
+          "posts",
+          "author"
+        ],
+        "reverse-identity": [
+          "69696969-6969-4969-8969-696969696969",
+          "users",
+          "posts"
+        ],
+        "value-type": "ref",
+        "cardinality": "one",
+        "unique?": false,
+        "index?": false
+      }
+    ],
+    [
+      "add-attr",
+      {
+        "id": "77777777-7777-4777-8777-777777777777",
+        "forward-identity": [
+          "78787878-7878-4878-8878-787878787878",
+          "users",
+          "name"
+        ],
+        "value-type": "blob",
+        "cardinality": "one",
+        "unique?": false,
+        "index?": false
+      }
+    ],
+    [
+      "add-triple",
+      "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "44444444-4444-4444-8444-444444444444",
+      "by-user"
+    ],
+    [
+      "add-triple",
+      "55555555-5555-4555-8555-555555555555",
+      "77777777-7777-4777-8777-777777777777",
+      "Ada"
+    ],
+    [
+      "add-triple",
+      "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "66666666-6666-4666-8666-666666666666",
+      "55555555-5555-4555-8555-555555555555"
+    ]
+  ]
+}

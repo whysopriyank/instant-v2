@@ -1,6 +1,6 @@
 package reactive
 
-// Incremental result maintenance tests (docs/09-tier2-architecture.md §T2.5).
+// Incremental result maintenance tests (docs/reference/09-tier2-architecture.md §T2.5).
 //
 // The centerpiece is TestIncrementalMatchesFullRefresh: a randomized
 // workload of creates/updates/deletes runs against an in-memory world; every

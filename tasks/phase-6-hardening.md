@@ -1,6 +1,6 @@
 # Phase 6 — Hardening + release polish
 
-**Read first**: `docs/03-protocol.md` §5 (refresh-ok shape),  `01-state.md` §4 debt list.
+**Read first**: `docs/reference/03-protocol.md` §5 (refresh-ok shape),  `01-state.md` §4 debt list.
 
 Everything in this phase is additive; the Phase 4 invariants stay green with every change.
 Each workstream may run independently — none shares a package with another.
@@ -34,8 +34,8 @@ paired, reproducible v1/V2 measurement.
 - [ ] pprof-guided tuning (partially: notifier parallel drain + benchmarks in place; JSON pools/CTE cache open): JSON encode pools, pgx batch, topic-index hot loop, CTE planning cache; connector stats hook.
 - [x] Connection + per-app rate-limit policy (`internal/ratelimit`, token buckets per app+class, 429+Retry-After) (Bucket4j-equivalent, local-first; interface stub from Phase 2 made concrete).
 - [x] Resource limits: per-app subscription cap (+429 close) and invalidator queue-depth gauge, WAL backpressure signal when invalidator queue depth grows.
-- [x] Chaos harness: PG bounce mid-stream (`tools/chaos`; 8/8 reconnect, LSN checkpoint resume, zero phantom reads, journal-exact final state) → sessions reconnect, LSN resumes without phantom reads; `replay --target v2` still diffs 0 post-chaos.
-- [x] Capacity target — MEASURED-V2-ONLY (comparative claim withdrawn): v2 numbers from Phase 4 soak stand (5000 sessions × 30 min, 13.4k tx @ 8/s sustained, 60k refreshes delivered, 0 drops; delta-refresh benchmark ~4285× wire savings on single-row mutation of 10k entities). Later paired V1/V2 smoke runs are retained as historical observations, but their raw artifacts and methodology do not satisfy `docs/13-benchmark-contract.md`; Wave 6 remains the only path to a publishable comparison.
+- [x] Chaos harness: PG bounce mid-stream (`cmd/chaos`; 8/8 reconnect, LSN checkpoint resume, zero phantom reads, journal-exact final state) → sessions reconnect, LSN resumes without phantom reads; `replay --target v2` still diffs 0 post-chaos.
+- [x] Capacity target — MEASURED-V2-ONLY (comparative claim withdrawn): v2 numbers from Phase 4 soak stand (5000 sessions × 30 min, 13.4k tx @ 8/s sustained, 60k refreshes delivered, 0 drops; delta-refresh benchmark ~4285× wire savings on single-row mutation of 10k entities). Later paired V1/V2 smoke runs are retained as historical observations, but their raw artifacts and methodology do not satisfy `docs/reference/13-benchmark-contract.md`; Wave 6 remains the only path to a publishable comparison.
 - [x] Browser examples replay — vite-vanilla ported with self-host URI overrides; exact browser surface driven via frozen @instantdb/core 1.0.65 from the example's node_modules (subscribeQuery snapshot on enriched ack, transact add/toggle/delete, live push each mutation). Visual browser verification NOT performed (no working browser device in session); found+fixed app-status 'ok'→'active' conformance bug during replay.
 - [x] Corpus fixture regeneration — 00-smoke rewritten to real v1 shapes (init-ok auth/app-status:'active', enriched add-query-ok); canonicalizer normalizes volatile session-id; replay green; chaos corpus step green.
 - [x] S3 backup backend — ObjectStore interface + minio-go S3Store; /object export-download + restore-object routes; fake-S3 tests under -race.
@@ -44,7 +44,7 @@ paired, reproducible v1/V2 measurement.
 
 ## 6D — Docs + examples + release
 
-- [x] Docs narrative: "self-host first" getting-started, replacing hosted-docs assumptions (`instantdb.com` → local). → docs/07-selfhost.md
+- [x] Docs narrative: "self-host first" getting-started, replacing hosted-docs assumptions (`instantdb.com` → local). → docs/guides/07-selfhost.md
 - [x] `examples/python-script` replayed end-to-end against instantd with the frozen PyPI SDK (high-level tx ops, admin query, merge, where-filters, LIVE subscriptions over `/admin/subscribe-query` SSE with push-on-write). Browser-based examples remain OPEN (need browser harness).
       FOUND+FIXED during replay: `/admin/transact` lacked high-level→low-level tx lowering (`internal/transact/highlevel.go` port of admin/model.clj); admin writes did not invalidate subscribers (OnCommit bridge); `/admin/subscribe-query` did not exist.
 - [x] Signed container image (`goreleaser`), SBOM, `UPGRADE.md` for v1 self-host operators, migration guide for admin tokens. → .goreleaser.yaml (cosign sign-blob for image+checksums, syft SBOM step), UPGRADE.md; actual publishing happens at tag time

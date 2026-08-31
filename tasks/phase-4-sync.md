@@ -1,7 +1,7 @@
 # Phase 4 — Reactive sync layer (release gate)
 
-**Read first**: `docs/02-architecture.md` §5 (invariants), §1 (process model),
-`docs/03-protocol.md` §1–5 (op tables + feature flags), `docs/05-conformance.md` row "WAL / invalidation".
+**Read first**: `docs/reference/02-architecture.md` §5 (invariants), §1 (process model),
+`docs/reference/03-protocol.md` §1–5 (op tables + feature flags), `docs/guides/05-conformance.md` row "WAL / invalidation".
 
 This is the first phase where the SDK talks to v2 as a real server.
 Three packages run in parallel on disjoint paths: `waltail` / `reactive` / `sync`;
@@ -102,7 +102,7 @@ Replaces `reactive/session.clj` (1,584 LOC op dispatcher) + `lib/ring/websocket`
 
 - [x] Wire-up complete incl. OnCommit invalidation bridge; shutdown order: stop accept →
       drain WS (1001) → close server (single-node: no WAL lag to flush).
-- [x] pprof via tools/soak harness endpoint; OTel wiring Phase 6.
+- [x] pprof via cmd/soak harness endpoint; OTel wiring Phase 6.
 
 ## Phase 4 exit gate — **the service is shippable here**
 

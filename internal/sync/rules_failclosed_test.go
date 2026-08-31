@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -25,14 +24,8 @@ import (
 // the sync plane must REFUSE ops — never degrade to default-open enforcement.
 // The HTTP transact plane already fails closed; this proves WS parity.
 func TestSyncFailsClosedOnRulesLoadError(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
-	}
+	pool := newPostgres(t)
 	ctx := context.Background()
-	pool := mustPool(t, dsn)
-	resetSchema(t, pool)
-	migrate(t, dsn)
 
 	st := storage.New(pool)
 	cats := platform.NewCatalogCache(pool, pool)
@@ -50,7 +43,7 @@ func TestSyncFailsClosedOnRulesLoadError(t *testing.T) {
 			return runQuery(ex, cats, sub)
 		},
 	}
-	go notifier.Run(ctx)
+	runNotifier(t, notifier)
 
 	rulesErr := errors.New("pg: connection refused (simulated outage)")
 	mgr := syncpkg.NewManager(syncpkg.Deps{

@@ -1,5 +1,5 @@
-// Package corpus implements the deterministic scenario replay engine that proves
-// v2 is byte-compatible with v1. See docs/05-conformance.md.
+// Package corpus implements scenario replay and explicit wire comparisons.
+// Only a successful live differential run establishes agreement with v1.
 package corpus
 
 import (
@@ -8,31 +8,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"sort"
+	"io"
+	"math/big"
 	"strings"
 )
-
-// Step is one line of a corpus NDJSON file.
-type Step struct {
-	Dir string          `json:"dir"` // "c2s" | "s2c" | "meta"
-	Raw json.RawMessage `json:"raw"` // bound by Dir (frame bytes or meta envelope)
-}
-
-// Meta is the header line (dir=="meta") of a scenario.
-type Meta struct {
-	Suite       string            `json:"suite"`
-	SDKVersion  string            `json:"sdkVersion,omitempty"`
-	SeedFixture string            `json:"seedFixture,omitempty"`
-	FeatureBits map[string]bool   `json:"featureGates,omitempty"`
-	Expect      map[string]string `json:"expect,omitempty"`
-}
-
-// Scenario is the decoded form of a single corpus *.ndjson file.
-type Scenario struct {
-	Meta  Meta
-	Steps []Step
-	File  string // source path, for diagnostics only
-}
 
 // CanonicalOptions tunes canonicalization per comparison mode.
 type CanonicalOptions struct {
@@ -51,10 +30,15 @@ func CanonicalBytes(b []byte) ([]byte, error) {
 // CanonicalBytesOpts is CanonicalBytes with mode-dependent masking.
 func CanonicalBytesOpts(b []byte, opts CanonicalOptions) ([]byte, error) {
 	var v any
-	if err := json.Unmarshal(b, &v); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber()
+	if err := dec.Decode(&v); err != nil {
 		return nil, fmt.Errorf("canonical: %w", err)
 	}
-	norm := canonicalizeValue(v, opts)
+	if err := dec.Decode(new(any)); err != io.EOF {
+		return nil, fmt.Errorf("canonical: expected exactly one JSON value")
+	}
+	norm := canonicalizeValue(v, opts, false)
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
@@ -76,75 +60,24 @@ const NormalizedSessionID = "<session-id>"
 // NormalizedTxID masks the global tx watermark (v1 and v2 count independently).
 const NormalizedTxID = "<tx-id>"
 
-func canonicalizeValue(v any, opts CanonicalOptions) any {
+// Traversal allocates each output container once; field policy is independent
+// of traversal. authObject marks only a map reached through an "auth" field.
+func canonicalizeValue(v any, opts CanonicalOptions, authObject bool) any {
 	switch x := v.(type) {
 	case map[string]any:
-		if opts.Differential {
-			if _, ok := x["attrs"]; ok {
-				x = cloneMap(x)
-				x["attrs"] = "<attrs>"
-			}
-			// Environment-volatile fields: delete from both sides —
-			// presence/absence itself differs between servers (v1 stamps
-			// trace-id on every frame; v2 doesn't emit it).
-			for _, k := range []string{"processed-isn", "isn",
-				"trace-id", "server-hostname", "server-port"} {
-				if _, ok := x[k]; ok {
-					x = cloneMap(x)
-					delete(x, k)
-				}
-			}
-		}
-		// Tx watermarks are a global sequence in BOTH servers — never
-		// reproducible across runs, so every mode masks them.
-		for _, k := range []string{"tx-id", "processed-tx-id"} {
-			if _, ok := x[k]; ok {
-				x = cloneMap(x)
-				x[k] = NormalizedTxID
-			}
-		}
-		if opts.Differential {
-			// v1 dumps the full app row into auth.app (connection string
-			// included); v2 projects {id}. Keep the meaningful parts.
-			if auth, ok := x["auth"].(map[string]any); ok {
-				x = cloneMap(x)
-				na := cloneMap(auth)
-				if app, ok := na["app"].(map[string]any); ok {
-					na["app"] = map[string]any{"id": app["id"]}
-				}
-				if admin, ok := na["admin?"]; ok {
-					if admin == nil {
-						na["admin?"] = false
-					}
-				}
-				x["auth"] = na
-			}
-			// result-meta: v1 null, v2 {} — cosmetic.
-			if rm, ok := x["result-meta"]; ok && rm == nil {
-				x = cloneMap(x)
-				x["result-meta"] = map[string]any{}
-			}
-		}
-		if sv, ok := x["session-id"]; ok {
-			if _, isStr := sv.(string); isStr {
-				x = cloneMap(x)
-				x["session-id"] = NormalizedSessionID
-			}
-		}
-		keys := make([]string, 0, len(x))
-		for k := range x {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
 		out := make(map[string]any, len(x))
-		for _, k := range keys {
-			out[k] = canonicalizeValue(x[k], opts)
+		for k, value := range x {
+			value, keep := canonicalField(k, value, opts, authObject)
+			if keep {
+				out[k] = canonicalizeValue(value, opts, k == "auth")
+			}
 		}
+		// encoding/json emits object keys in sorted order.
 		return out
 	case []any:
 		out := make([]any, len(x))
 		for i, e := range x {
-			out[i] = canonicalizeValue(e, opts)
+			out[i] = canonicalizeValue(e, opts, false)
 		}
 		return out
 	case string:
@@ -152,17 +85,91 @@ func canonicalizeValue(v any, opts CanonicalOptions) any {
 			return strings.ToLower(x)
 		}
 		return x
+	case json.Number:
+		return canonicalNumber(x)
 	default:
 		return v
 	}
 }
 
-func cloneMap(m map[string]any) map[string]any {
-	out := make(map[string]any, len(m))
-	for k, v := range m {
-		out[k] = v
+// These are the existing exclusions, not permission to ignore new differences.
+// Their recursive scope is retained for compatibility; see corpus/README.md.
+func canonicalField(key string, value any, opts CanonicalOptions, authObject bool) (any, bool) {
+	switch key {
+	case "tx-id", "processed-tx-id":
+		return NormalizedTxID, true
+	case "session-id":
+		if _, ok := value.(string); ok {
+			return NormalizedSessionID, true
+		}
 	}
-	return out
+	if !opts.Differential {
+		return value, true
+	}
+	switch key {
+	case "attrs":
+		return "<attrs>", true
+	case "processed-isn", "isn", "trace-id", "server-hostname", "server-port":
+		return nil, false
+	case "result-meta":
+		if value == nil {
+			return map[string]any{}, true
+		}
+	case "admin?":
+		if authObject && value == nil {
+			return false, true
+		}
+	case "app":
+		if app, ok := value.(map[string]any); authObject && ok {
+			return map[string]any{"id": app["id"]}, true
+		}
+	}
+	return value, true
+}
+
+// Exact decimal semantic equality: 1, 1.0 and 1e0 compare equal, while integers
+// above 2^53 and arbitrary fractional digits remain distinct. The exponent is
+// manipulated symbolically so a huge exponent never allocates a huge decimal.
+func canonicalNumber(n json.Number) json.Number {
+	s := string(n)
+	sign := ""
+	if strings.HasPrefix(s, "-") {
+		sign, s = "-", s[1:]
+	}
+	exponent := new(big.Int)
+	if i := strings.IndexAny(s, "eE"); i >= 0 {
+		exponent.SetString(s[i+1:], 10) // decoder already validated the number
+		s = s[:i]
+	}
+	if i := strings.IndexByte(s, '.'); i >= 0 {
+		exponent.Sub(exponent, big.NewInt(int64(len(s)-i-1)))
+		s = s[:i] + s[i+1:]
+	}
+	s = strings.TrimLeft(s, "0")
+	if s == "" {
+		return "0"
+	}
+	digits := strings.TrimRight(s, "0")
+	exponent.Add(exponent, big.NewInt(int64(len(s)-len(digits))))
+	point := new(big.Int).Add(exponent, big.NewInt(int64(len(digits))))
+	if point.IsInt64() && point.Int64() > -6 && point.Int64() <= 21 {
+		p := int(point.Int64())
+		switch {
+		case p <= 0:
+			s = "0." + strings.Repeat("0", -p) + digits
+		case p >= len(digits):
+			s = digits + strings.Repeat("0", p-len(digits))
+		default:
+			s = digits[:p] + "." + digits[p:]
+		}
+	} else {
+		s = digits[:1]
+		if len(digits) > 1 {
+			s += "." + digits[1:]
+		}
+		s += "e" + point.Sub(point, big.NewInt(1)).String()
+	}
+	return json.Number(sign + s)
 }
 
 func isUUIDish(s string) bool {

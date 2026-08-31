@@ -2,12 +2,35 @@ package corpus
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 )
+
+// Step is one line of a corpus NDJSON file.
+type Step struct {
+	Dir string          `json:"dir"` // "c2s" | "s2c" | "meta"
+	Raw json.RawMessage `json:"raw"` // bound by Dir (frame bytes or meta envelope)
+}
+
+// Meta is the header line (dir=="meta") of a scenario.
+type Meta struct {
+	Suite       string            `json:"suite"`
+	SDKVersion  string            `json:"sdkVersion,omitempty"`
+	SeedFixture string            `json:"seedFixture,omitempty"`
+	FeatureBits map[string]bool   `json:"featureGates,omitempty"`
+	Expect      map[string]string `json:"expect,omitempty"`
+}
+
+// Scenario is the decoded form of a single corpus *.ndjson file.
+type Scenario struct {
+	Meta  Meta
+	Steps []Step
+	File  string // source path, for diagnostics only
+}
 
 // LoadScenario decodes a single NDJSON scenario file.
 // Each non-empty line must be a JSON object with a "dir" field ("meta"|"c2s"|"s2c")
@@ -26,7 +49,7 @@ func LoadScenario(path string) (*Scenario, error) {
 	for s.Scan() {
 		lineno++
 		raw := s.Bytes()
-		if len(bytesTrimSpace(raw)) == 0 {
+		if len(bytes.TrimSpace(raw)) == 0 {
 			continue
 		}
 		var outer struct {
@@ -38,17 +61,33 @@ func LoadScenario(path string) (*Scenario, error) {
 		}
 		switch outer.Dir {
 		case "meta":
+			if len(sc.Steps) != 0 {
+				return nil, fmt.Errorf("%s:%d: meta must occur exactly once, before frames", path, lineno)
+			}
 			var m Meta
 			if err := json.Unmarshal(outer.Raw, &m); err != nil {
 				return nil, fmt.Errorf("%s:%d meta: %w", path, lineno, err)
 			}
 			sc.Meta = m
+			if strings.TrimSpace(m.Suite) == "" {
+				return nil, fmt.Errorf("%s:%d: meta requires a suite", path, lineno)
+			}
 			sc.Steps = append(sc.Steps, Step{Dir: "meta", Raw: outer.Raw})
 		case "c2s", "s2c":
+			if len(sc.Steps) == 0 {
+				return nil, fmt.Errorf("%s:%d: missing initial meta", path, lineno)
+			}
 			// Validate it is JSON.
 			var v any
 			if err := json.Unmarshal(outer.Raw, &v); err != nil {
 				return nil, fmt.Errorf("%s:%d %s: %w", path, lineno, outer.Dir, err)
+			}
+			if outer.Dir == "s2c" {
+				frame, ok := v.(map[string]any)
+				op, _ := frame["op"].(string)
+				if !ok || op == "" {
+					return nil, fmt.Errorf("%s:%d: expected server frame requires an op", path, lineno)
+				}
 			}
 			sc.Steps = append(sc.Steps, Step{Dir: outer.Dir, Raw: outer.Raw})
 		default:
@@ -57,6 +96,9 @@ func LoadScenario(path string) (*Scenario, error) {
 	}
 	if err := s.Err(); err != nil {
 		return nil, err
+	}
+	if len(sc.C2S()) == 0 || len(sc.ExpectedS2C()) == 0 {
+		return nil, fmt.Errorf("%s: scenario requires client and expected server frames", path)
 	}
 	return sc, nil
 }
@@ -75,10 +117,6 @@ func LoadCorpus(dir, suiteFilter string) ([]*Scenario, error) {
 		if filepath.Ext(path) != ".ndjson" {
 			return nil
 		}
-		if suiteFilter != "" && !containsSuite(path, suiteFilter) {
-			// also check Meta.Suite post-load, but cheap path filter prunes walk
-			_ = suiteFilter
-		}
 		paths = append(paths, path)
 		return nil
 	}); err != nil {
@@ -96,11 +134,6 @@ func LoadCorpus(dir, suiteFilter string) ([]*Scenario, error) {
 		out = append(out, sc)
 	}
 	return out, nil
-}
-
-func containsSuite(path, filter string) bool {
-	base := filepath.Base(path)
-	return strings.Contains(base, filter)
 }
 
 // C2S returns all client-to-server frames in wire order.
@@ -123,15 +156,4 @@ func (sc *Scenario) ExpectedS2C() []json.RawMessage {
 		}
 	}
 	return out
-}
-
-func bytesTrimSpace(b []byte) []byte {
-	start, end := 0, len(b)
-	for start < end && (b[start] == ' ' || b[start] == '\n' || b[start] == '\r' || b[start] == '\t') {
-		start++
-	}
-	for end > start && (b[end-1] == ' ' || b[end-1] == '\n' || b[end-1] == '\r' || b[end-1] == '\t') {
-		end--
-	}
-	return b[start:end]
 }

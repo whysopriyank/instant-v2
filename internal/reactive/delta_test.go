@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"sort"
-	"sync"
 	"testing"
 	"time"
 )
@@ -72,6 +71,47 @@ func TestDiffResultsAddRemovePageInfo(t *testing.T) {
 	}
 }
 
+// JSON spelling is not entity identity: unchanged nested values and page
+// metadata must remain a no-op even when the producer changes key order.
+func TestDiffResultsEquivalentJSON(t *testing.T) {
+	oldJ := envJSON(`[{"id":"a","v":{"n":1,"items":[true,null]}},{"id":"b","v":"keep"}]`,
+		`"page-info":{"endCursor":"b","hasNextPage":false}`)
+	newJ := envJSON(`[{"v":{"items":[true,null],"n":1.0},"id":"a"},{"v":"keep","id":"b"}]`,
+		`"page-info":{"hasNextPage":false,"endCursor":"b"}`)
+	p, ok := DiffResults(oldJ, newJ)
+	if !ok || len(p.Ops) != 0 || p.PageInfo != nil {
+		t.Fatalf("equivalent JSON changed the result: patch=%+v ok=%v", p, ok)
+	}
+}
+
+func TestDiffResultsEntityOrderAndRawPayload(t *testing.T) {
+	oldJ := envJSON(`[{"id":"z"},{"id":"a"},{"id":"b"},{"id":"c"},{"id":"d"},{"id":"e"},{"id":"f"},{"id":"g"}]`)
+	newJ := envJSON(`[{"id":"b"},{"id":"c"},{"id":"d"},{"id":"e"},{"id":"f"},{"id":"g","v": {"n": 2}},{"id":"h"}]`)
+	p, ok := DiffResults(oldJ, newJ)
+	if !ok || len(p.Ops) != 4 {
+		t.Fatalf("expected four operations at the churn boundary: patch=%+v ok=%v", p, ok)
+	}
+	for i, want := range []struct{ kind, id string }{{OpRemove, "a"}, {OpRemove, "z"}, {OpUpdate, "g"}, {OpAdd, "h"}} {
+		if got := p.Ops[i]; got.Op != want.kind || got.ID != want.id || got.Etype != "todos" {
+			t.Fatalf("op %d = %+v, want %s %s", i, got, want.kind, want.id)
+		}
+	}
+	if got := string(p.Ops[2].Entity); got != `{"id":"g","v": {"n": 2}}` {
+		t.Fatalf("update must preserve new raw payload, got %s", got)
+	}
+}
+
+func TestDiffResultsEmptyEntitiesAndPageOnly(t *testing.T) {
+	for _, empty := range []string{`null`, `[]`} {
+		t.Run(empty, func(t *testing.T) {
+			p, ok := DiffResults(envJSON(empty), envJSON(`[]`, `"page-info":{"hasNextPage":false}`))
+			if !ok || len(p.Ops) != 0 || string(p.PageInfo) != `{"hasNextPage":false}` {
+				t.Fatalf("empty entity/page-only diff: patch=%+v ok=%v", p, ok)
+			}
+		})
+	}
+}
+
 // TestPatchFallbacks pins every documented fallback trigger.
 func TestPatchFallbacks(t *testing.T) {
 	cases := []struct {
@@ -119,6 +159,9 @@ func TestPatchFallbacks(t *testing.T) {
 			oldJ: envJSON(`{"not":"array"}`),
 			newJ: envJSON(`{"not":"array"}`),
 		},
+		{name: "missing-id", oldJ: envJSON(`[{"v":1}]`), newJ: envJSON(`[]`)},
+		{name: "non-string-id", oldJ: envJSON(`[]`), newJ: envJSON(`[{"id":1}]`)},
+		{name: "non-object-entity", oldJ: envJSON(`[]`), newJ: envJSON(`[null]`)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -259,15 +302,11 @@ func errorsAsSubLimit(err error, target **SubLimitError) bool {
 // change; a non-negotiating sub gets only the full envelope.
 func TestNotifierEmitsDeltaPatches(t *testing.T) {
 	s := NewStore()
-	var mu sync.Mutex
-	got := map[string]Frame{}
+	frames := make(chan Frame, 2)
+	emit := func(fr Frame) { frames <- fr }
 	sub := &Subscription{
 		ID: "sub-1", AppID: "app1", Topics: map[string]bool{"attr-a": true},
-		Emit: func(fr Frame) {
-			mu.Lock()
-			got[fr.SubID] = fr
-			mu.Unlock()
-		},
+		Emit: emit,
 	}
 	sub.Delta.Store(true)
 	if _, err := s.Add(sub); err != nil {
@@ -275,11 +314,7 @@ func TestNotifierEmitsDeltaPatches(t *testing.T) {
 	}
 	plain := &Subscription{
 		ID: "sub-2", AppID: "app1", Topics: map[string]bool{"attr-a": true},
-		Emit: func(fr Frame) {
-			mu.Lock()
-			got[fr.SubID] = fr
-			mu.Unlock()
-		},
+		Emit: emit,
 	}
 	if _, err := s.Add(plain); err != nil {
 		t.Fatal(err)
@@ -293,8 +328,19 @@ func TestNotifierEmitsDeltaPatches(t *testing.T) {
 		return edited, nil
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go n.Run(ctx)
+	runDone := make(chan struct{})
+	go func() {
+		n.Run(ctx)
+		close(runDone)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-runDone:
+		case <-time.After(3 * time.Second):
+			t.Error("notifier did not stop")
+		}
+	})
 
 	// Initial snapshots are seeded outside the notifier (ws/sse direct path).
 	baseline := envJSON(ents("a", `"1"`, "b", `"2"`))
@@ -303,21 +349,15 @@ func TestNotifierEmitsDeltaPatches(t *testing.T) {
 
 	n.Notify(ctx, "app1", []string{"attr-a"}, 7)
 	deadline := time.After(3 * time.Second)
-	count := func() int {
-		mu.Lock()
-		defer mu.Unlock()
-		return len(got)
-	}
-	for count() < 2 {
+	got := map[string]Frame{}
+	for len(got) < 2 {
 		select {
+		case fr := <-frames:
+			got[fr.SubID] = fr
 		case <-deadline:
-			t.Fatalf("timed out; got %d frames", count())
-		default:
-			time.Sleep(5 * time.Millisecond)
+			t.Fatalf("timed out; got %d frames", len(got))
 		}
 	}
-	mu.Lock()
-	defer mu.Unlock()
 
 	fr := got["sub-1"]
 	if len(fr.PatchJSON) == 0 {
@@ -338,10 +378,13 @@ func TestNotifierEmitsDeltaPatches(t *testing.T) {
 // TestQueueDepthGauge checks the backpressure gauge the invalidator polls.
 func TestQueueDepthGauge(t *testing.T) {
 	s := NewStore()
+	started := make(chan struct{}, 5)
+	release := make(chan struct{})
 	n := &Notifier{
 		Store: s,
 		Refresh: func(ctx context.Context, sub *Subscription) (json.RawMessage, error) {
-			time.Sleep(30 * time.Millisecond) // keep the queue busy
+			started <- struct{}{}
+			<-release
 			return json.RawMessage(`{"data":{}}`), nil
 		},
 	}
@@ -353,20 +396,35 @@ func TestQueueDepthGauge(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := context.Background()
 
 	n.Notify(ctx, "app", []string{"t"}, 1)
 	if d := n.QueueDepth(); d != 5 {
 		t.Fatalf("queue depth during backlog = %d, want 5", d)
 	}
-	go n.Run(ctx)
-	deadline := time.Now().Add(3 * time.Second)
-	for n.QueueDepth() != 0 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
+	drained := make(chan struct{})
+	go func() {
+		n.drainPass(ctx, nil)
+		close(drained)
+	}()
+	t.Cleanup(func() {
+		close(release)
+		select {
+		case <-drained:
+		case <-time.After(3 * time.Second):
+			t.Error("drain did not finish after releasing refreshes")
+		}
+	})
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("refresh did not start")
 	}
+	// The gauge counts queued work, not active workers. The first refresh
+	// entering proves the pending batch was detached, while release keeps
+	// every refresh in flight until after this assertion.
 	if d := n.QueueDepth(); d != 0 {
-		t.Fatalf("queue depth after drain = %d, want 0", d)
+		t.Fatalf("queue depth with batch in flight = %d, want 0", d)
 	}
 }
 

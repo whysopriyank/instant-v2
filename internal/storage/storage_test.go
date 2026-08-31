@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
@@ -15,33 +14,16 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/instant-v2/instant-v2/internal/platform"
+	"github.com/instant-v2/instant-v2/internal/testkit"
 	"github.com/instant-v2/instant-v2/internal/triple"
 )
 
-// testDB resets the schema and applies migrations. Set DATABASE_URL to enable;
-// CI provides it via testcontainers (docs/05-conformance.md). Locally:
-//
-//	DATABASE_URL='postgres://instant@localhost:54329/instant_v2_test?sslmode=disable' \
-//	  go test ./internal/storage -count=1
+// testDB applies migrations to an isolated, test-owned database.
 func testDB(t *testing.T) *DB {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set; skipping live-PG storage tests")
-	}
+	fixture := testkit.NewPostgres(t, testkit.PostgresOptions{})
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("pgxpool: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	if err := pool.Ping(ctx); err != nil {
-		t.Fatalf("ping: %v", err)
-	}
-	if _, err := pool.Exec(ctx, `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`); err != nil {
-		t.Fatalf("reset schema: %v", err)
-	}
-	sqlDB, err := sql.Open("pgx", dsn)
+	sqlDB, err := sql.Open("pgx", fixture.DSN)
 	if err != nil {
 		t.Fatalf("sql.Open: %v", err)
 	}
@@ -49,7 +31,7 @@ func testDB(t *testing.T) *DB {
 	if err := platform.Migrate(ctx, sqlDB); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	return New(pool)
+	return New(fixture.Pool)
 }
 
 func seedCatalog(t *testing.T, db *DB) ([16]byte, *platform.AttrCatalog, attrIDs) {
@@ -378,12 +360,9 @@ func TestApplyStatementLimits(t *testing.T) {
 // connection reports the configured statement_timeout and pg_sleep beyond it
 // is cancelled by the server.
 func TestStatementTimeoutEnforcedLive(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set; skipping live statement-timeout probe")
-	}
+	fixture := testkit.NewPostgres(t, testkit.PostgresOptions{})
 	ctx := context.Background()
-	cfg, err := pgxpool.ParseConfig(dsn)
+	cfg, err := pgxpool.ParseConfig(fixture.DSN)
 	if err != nil {
 		t.Fatal(err)
 	}

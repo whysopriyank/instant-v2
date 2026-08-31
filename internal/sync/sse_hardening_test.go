@@ -12,7 +12,15 @@ import (
 
 // Audit H5: a per-IP connection cap bounds slot squatting by one host.
 func TestSSEPerIPCap(t *testing.T) {
-	srv, appID := sseSrv(t, func(h *syncpkg.SSEHandler) { h.MaxConnsPerIP = 2 })
+	srv, appID, closed := sseSrv(t, func(h *syncpkg.SSEHandler) { h.MaxConnsPerIP = 2 })
+	waitClosed := func() {
+		t.Helper()
+		select {
+		case <-closed:
+		case <-time.After(5 * time.Second):
+			t.Fatal("SSE handler did not complete teardown")
+		}
+	}
 
 	bodies := []*http.Response{}
 	defer func() {
@@ -41,9 +49,10 @@ func TestSSEPerIPCap(t *testing.T) {
 	}
 
 	// Releasing a slot admits the next caller.
+	waitClosed() // the rejected third request has returned
 	_ = bodies[0].Body.Close()
 	bodies = bodies[1:]
-	time.Sleep(150 * time.Millisecond)
+	waitClosed() // the first stream's per-IP slot has been released
 	fourth, err := http.Get(srv.URL + "/runtime/sse?app_id=" + appID)
 	if err != nil {
 		t.Fatalf("post-release stream: %v", err)
@@ -56,7 +65,7 @@ func TestSSEPerIPCap(t *testing.T) {
 
 // Audit H5: heartbeat comments keep proxies warm and bound dead-reader slots.
 func TestSSEHeartbeat(t *testing.T) {
-	srv, appID := sseSrv(t, func(h *syncpkg.SSEHandler) { h.HeartbeatEvery = 50 * time.Millisecond })
+	srv, appID, _ := sseSrv(t, func(h *syncpkg.SSEHandler) { h.HeartbeatEvery = 50 * time.Millisecond })
 	resp, err := http.Get(srv.URL + "/runtime/sse?app_id=" + appID)
 	if err != nil {
 		t.Fatalf("get: %v", err)

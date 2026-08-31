@@ -226,29 +226,6 @@ func keyValueDSNParts(raw string) (host, name string) {
 	}
 	return host, name
 }
-func validateHost(host string) error {
-	host = strings.ToLower(host)
-	if host == "localhost" {
-		ips, err := net.LookupIP(host)
-		if err != nil {
-			return fmt.Errorf("resolve database host: %w", err)
-		}
-		if len(ips) == 0 {
-			return fmt.Errorf("database host %q has no resolved addresses", host)
-		}
-		for _, ip := range ips {
-			if !ip.IsLoopback() {
-				return fmt.Errorf("database host resolves outside loopback: %s", ip)
-			}
-		}
-		return nil
-	}
-	ip := net.ParseIP(host)
-	if ip == nil || !ip.IsLoopback() {
-		return fmt.Errorf("database host %q is not loopback", host)
-	}
-	return nil
-}
 
 // ResetGuard requires both the disposable-name rule and a marker already
 // stored in the target before destructive reset. Marker equality is checked by

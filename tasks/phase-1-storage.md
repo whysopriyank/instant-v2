@@ -1,7 +1,7 @@
 # Phase 1 — Storage engine
 
-**Read first**: `docs/02-architecture.md` §3 (storage layout), `docs/03-protocol.md` §7 (attr shape),
-`docs/05-conformance.md` row "Storage parity".
+**Read first**: `docs/reference/02-architecture.md` §3 (storage layout), `docs/reference/03-protocol.md` §7 (attr shape),
+`docs/guides/05-conformance.md` row "Storage parity".
 
 This phase may run two agents in parallel — `data` and `platform` — behind the Phase 0 schema.
 

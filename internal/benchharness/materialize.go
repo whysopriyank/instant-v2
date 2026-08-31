@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"sort"
@@ -89,11 +90,13 @@ func canonicalValue(v any) (any, error) {
 		}
 		return out, nil
 	case json.RawMessage:
-		var decoded any
-		if err := json.Unmarshal(x, &decoded); err != nil {
+		decoded, err := rawValue(x)
+		if err != nil {
 			return nil, err
 		}
 		return canonicalValue(decoded)
+	case json.Number:
+		return normalizeNumber(x), nil
 	case nil, string, bool, float64, float32, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
 		return x, nil
 	default:
@@ -103,8 +106,8 @@ func canonicalValue(v any) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		var decoded any
-		if err := json.Unmarshal(b, &decoded); err != nil {
+		decoded, err := rawValue(b)
+		if err != nil {
 			return nil, err
 		}
 		return canonicalValue(decoded)
@@ -188,13 +191,13 @@ func ApplyDelta(previous Materialized, delta Delta) (Materialized, error) {
 	}
 	for _, e := range delta.Adds {
 		if e.ID == "" {
-			return Materialized{}, errorsFor("delta add has empty entity id")
+			return Materialized{}, errors.New("delta add has empty entity id")
 		}
 		out.Entities[e.ID] = cloneEntity(e)
 	}
 	for _, e := range delta.Updates {
 		if e.ID == "" {
-			return Materialized{}, errorsFor("delta update has empty entity id")
+			return Materialized{}, errors.New("delta update has empty entity id")
 		}
 		out.Entities[e.ID] = cloneEntity(e)
 	}
@@ -257,11 +260,6 @@ func cloneJSONReflect(value reflect.Value) reflect.Value {
 		return value
 	}
 }
-
-type stringError string
-
-func (e stringError) Error() string { return string(e) }
-func errorsFor(s string) error      { return stringError(s) }
 
 // Materialize computes the expected query state from a fixture and a mutation
 // prefix. Prefix zero is the seeded state; negative or overrun prefixes fail.

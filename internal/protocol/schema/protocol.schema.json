@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://instant-v2.dev/schema/protocol",
   "title": "Instant v2 wire protocol",
-  "description": "Frozen surface from docs/03-protocol.md — v1 parity contract. Generated artifacts: internal/protocol/*.go + internal/protocol/protocol.d.ts.",
+  "description": "Frozen surface from docs/reference/03-protocol.md — v1 parity contract. Generated artifacts: internal/protocol/*.go + internal/protocol/protocol.d.ts.",
   "type": "object",
   "definitions": {
     "wsOp": {

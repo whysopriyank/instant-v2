@@ -8,7 +8,7 @@ import (
 	"github.com/instant-v2/instant-v2/internal/reactive"
 )
 
-// T2.1 (docs/09-tier2-architecture.md): the transact gate sheds publishers
+// T2.1 (docs/reference/09-tier2-architecture.md): the transact gate sheds publishers
 // with a 429-shaped error frame before any Postgres work happens.
 func TestTransactGateSheds(t *testing.T) {
 	env := newWSEnv(t)

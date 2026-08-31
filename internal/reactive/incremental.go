@@ -1,7 +1,7 @@
 package reactive
 
 // Incremental result maintenance behind the Refresh seam
-// (docs/09-tier2-architecture.md §T2.5).
+// (docs/reference/09-tier2-architecture.md §T2.5).
 //
 // Subscriptions whose queries are flat top-level forms (no nested forms, no
 // pagination cursors, no aggregates, no order ops, no field projections)

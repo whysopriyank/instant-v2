@@ -1,6 +1,6 @@
 package sync_test
 
-// WS-level single-flight test (docs/08-tier1-hotpath.md §T1.1): N sessions
+// WS-level single-flight test (docs/archive/08-tier1-hotpath.md §T1.1): N sessions
 // racing add-query for the same cold group produce exactly ONE refresh; each
 // session still receives its own enriched add-query-ok ack.
 
@@ -15,6 +15,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/instant-v2/instant-v2/internal/perms"
 	"github.com/instant-v2/instant-v2/internal/reactive"
 )
 
@@ -30,6 +31,11 @@ func TestAddQuerySingleFlightAcrossSessions(t *testing.T) {
 		frames chan map[string]any
 	}
 	const n = 3
+	arrived := make(chan struct{}, n)
+	env.Mgr.Deps.Rules = func(context.Context, string) (*perms.RuleDoc, error) {
+		arrived <- struct{}{}
+		return nil, nil
+	}
 	clients := make([]client, n)
 	for i := range clients {
 		conn, frames := dialInit(t, ctx, env, "0.22.0")
@@ -41,7 +47,7 @@ func TestAddQuerySingleFlightAcrossSessions(t *testing.T) {
 	hold := make(chan struct{})
 	env.WS.Refresh = func(ctx context.Context, sub *reactive.Subscription) (json.RawMessage, error) {
 		calls.Add(1)
-		<-hold // keep the leader in-flight until every racer has arrived
+		<-hold // keep the leader in-flight until every query reaches admission
 		return orig(ctx, sub)
 	}
 	var releaseOnce sync.Once
@@ -71,7 +77,13 @@ func TestAddQuerySingleFlightAcrossSessions(t *testing.T) {
 		}(i)
 	}
 	close(fire)
-	time.Sleep(100 * time.Millisecond) // let racers pile onto the flight
+	for range n {
+		select {
+		case <-arrived:
+		case <-ctx.Done():
+			t.Fatal("not every concurrent query reached admission")
+		}
+	}
 	release()
 
 	acks := make([]map[string]any, n)

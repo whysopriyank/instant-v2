@@ -5,11 +5,12 @@ tmp/
 *.out
 *.test
 corpus/.tmp
-tools/corpusctl/corpusctl
-tools/schemagen/schemagen
+cmd/corpusctl/corpusctl
+cmd/schemagen/schemagen
 # Anchored: unqualified names also shadowed source dirs like cmd/instantd/.
 /instantd
+/corpusctl
 /chaos
-/tools/chaos/chaos
+/cmd/chaos/chaos
 .om/
 .omo/

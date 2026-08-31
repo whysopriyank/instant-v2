@@ -164,16 +164,6 @@ func hexVal(c byte) (int, bool) {
 	return 0, false
 }
 
-// hasOp reports whether any step carries the given op.
-func hasOp(steps []Step, op string) bool {
-	for _, st := range steps {
-		if st.Op == op {
-			return true
-		}
-	}
-	return false
-}
-
 // wireAttr is the client-supplied add-attr payload (frozen shape, docs/03 §4):
 //
 //	{"id": uuid, "forward-identity": [identId, etype, label],
@@ -374,42 +364,4 @@ func parseRequiredAttrUpdate(raw json.RawMessage) (requiredAttrUpdate, error) {
 		return requiredAttrUpdate{}, fmt.Errorf("update-attr: required? is required by the supported v2 patch")
 	}
 	return out, nil
-}
-
-// rewriteAttrRefs replaces client-minted attr ids in triple steps with the
-// server-side ids adopted during add-attr processing. Only Args[1] of
-// triple-shaped ops participates — the position parseTripleArgs reads.
-func rewriteAttrRefs(steps []Step, alias map[[16]byte][16]byte) {
-	if len(alias) == 0 {
-		return
-	}
-	remap := func(raw json.RawMessage) (json.RawMessage, bool) {
-		var s string
-		if err := json.Unmarshal(raw, &s); err != nil {
-			return raw, false
-		}
-		var id [16]byte
-		if parseUUID(s, &id) != nil {
-			return raw, false
-		}
-		serverID, ok := alias[id]
-		if !ok {
-			return raw, false
-		}
-		out, err := json.Marshal(uuidToStr(serverID))
-		if err != nil {
-			return raw, false
-		}
-		return out, true
-	}
-	for i := range steps {
-		switch steps[i].Op {
-		case "add-triple", "deep-merge-triple", "retract-triple":
-			if len(steps[i].Args) >= 3 {
-				if repl, ok := remap(steps[i].Args[1]); ok {
-					steps[i].Args[1] = repl
-				}
-			}
-		}
-	}
 }

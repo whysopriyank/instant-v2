@@ -14,7 +14,7 @@ type Config struct {
 	HTTPAddr    string // INSTANT_V2_HTTP_ADDR, default ":8080"
 	DatabaseURL string // DATABASE_URL (required from Phase 1; optional while booting without DB)
 
-	// Read plane (docs/09-tier2-architecture.md §T2.3). Empty means reads
+	// Read plane (docs/reference/09-tier2-architecture.md §T2.3). Empty means reads
 	// share the write pool — today's behavior. Set to a replica DSN to
 	// route instaql/catalog/runtime queries off the writer.
 	ReadDatabaseURL string // INSTANT_V2_READ_URL, default ""

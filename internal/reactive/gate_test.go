@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -31,19 +32,28 @@ func newGatedStack(t *testing.T) (*Notifier, *Subscription) {
 	return n, sub
 }
 
-// TestGateFloodDenyDrainAllow covers docs/09-tier2-architecture.md §T2.1
+// TestGateFloodDenyDrainAllow covers docs/reference/09-tier2-architecture.md §T2.1
 // acceptance: flood pending until depth > max → deny; drain below the
 // low-water mark → allow again. Hysteresis holds inside the middle band.
 func TestGateFloodDenyDrainAllow(t *testing.T) {
 	n, _ := newGatedStack(t)
 	ctx := context.Background()
 
-	// Flood 10 pending notifications past maxDepth 4.
+	// Flood 10 notifications for one subscription. Coalescing leaves one
+	// pending queue slot, so use multiple subscriptions to exceed maxDepth.
+	for i := 0; i < 10; i++ {
+		if _, err := n.Store.Add(&Subscription{
+			ID: fmt.Sprintf("g-extra-%d", i), AppID: "app1",
+			Topics: map[string]bool{"t": true}, Emit: func(Frame) {},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for i := 1; i <= 10; i++ {
 		n.Notify(ctx, "app1", []string{"t"}, int64(i))
 	}
-	if got := n.QueueDepth(); got != 10 {
-		t.Fatalf("depth after flood = %d, want 10", got)
+	if got := n.QueueDepth(); got != 11 {
+		t.Fatalf("depth after flood = %d, want 11", got)
 	}
 
 	gate := n.Gate(4)
@@ -72,19 +82,25 @@ func TestGateFloodDenyDrainAllow(t *testing.T) {
 	if err := gate("app1"); err != nil {
 		t.Fatalf("gate below low-water: want nil, got %v", err)
 	}
-	// Real Notify path floods the gauge (10 notifications coalesce into one
-	// pending entry); denial holds until the queue truly drops below the
-	// low-water mark.
+	// Real Notify path floods the gauge; repeated notifications coalesce per
+	// subscription while distinct subscriptions occupy distinct slots.
 	n.gauge.Store(0)
+	n.mu.Lock()
+	n.pending = nil
+	n.pendingCh = nil
+	n.mu.Unlock()
 	for i := 11; i <= 20; i++ {
 		n.Notify(ctx, "app1", []string{"t"}, int64(i))
 	}
 	if err := gate("app1"); !errors.As(err, &shed) {
 		t.Fatalf("gate after reflood: want ShedError, got %v", err)
 	}
-	n.drainPass(ctx, slog.Default()) // coalesced: one entry drains
-	if err := n.Gate(4)("app1"); !errors.As(err, &shed) {
-		t.Fatalf("fresh gate at residual depth must consult live gauge: %v", err)
+	n.drainPass(ctx, slog.Default()) // all coalesced entries drain exactly
+	if got := n.QueueDepth(); got != 0 {
+		t.Fatalf("depth after coalesced drain = %d, want 0", got)
+	}
+	if err := n.Gate(4)("app1"); err != nil {
+		t.Fatalf("fresh gate after drain must consult live gauge: %v", err)
 	}
 	n.gauge.Store(0) // queue fully drained
 	if err := gate("app1"); err != nil {

@@ -135,8 +135,7 @@ func TestScenarioLoadFromDisk(t *testing.T) {
 		t.Fatalf("LoadCorpus: %v", err)
 	}
 	if len(scs) == 0 {
-		t.Log("corpus/ has no .ndjson fixtures yet — expected before Phase 0 exit gate; skipping diff")
-		t.SkipNow()
+		t.Fatal("corpus must contain checked-in scenarios")
 	}
 	for _, sc := range scs {
 		if len(sc.C2S()) == 0 && len(sc.ExpectedS2C()) == 0 {
@@ -147,5 +146,32 @@ func TestScenarioLoadFromDisk(t *testing.T) {
 				t.Fatalf("%s: %v ( %s )", sc.File, err, raw)
 			}
 		}
+	}
+}
+
+func TestDifferentialFailedEndpointsAreNotEqual(t *testing.T) {
+	sc := loadScenarioFromLines(t, []string{
+		`{"dir":"c2s","raw":{"op":"init"}}`,
+		`{"dir":"s2c","raw":{"op":"init-ok"}}`,
+	})
+	a, b, delta := Differential(context.Background(), sc, ":invalid", ":invalid", time.Second)
+	if a.Err == nil || b.Err == nil {
+		t.Fatal("expected dial errors")
+	}
+	if delta == "" {
+		t.Fatal("two failed replays must not be reported equal")
+	}
+}
+
+func TestReplayRejectsInvalidServerJSON(t *testing.T) {
+	sc := loadScenarioFromLines(t, []string{
+		`{"dir":"c2s","raw":{"op":"init"}}`,
+		`{"dir":"s2c","raw":{"op":"init-ok"}}`,
+	})
+	srv := echoServer(t, func(string) []byte { return []byte(`{broken`) })
+	defer srv.Close()
+	res := Replay(context.Background(), wsURL(srv), sc, time.Second)
+	if res.Err == nil {
+		t.Fatal("invalid server JSON must be a replay error")
 	}
 }

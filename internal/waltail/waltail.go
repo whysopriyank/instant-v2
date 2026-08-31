@@ -1,7 +1,7 @@
 // Package waltail tails Postgres logical replication (pgoutput) and converts
 // triple-table changes into invalidation records. Port surface of v1's
 // jdbc/wal.clj + the Java pgoutput decoders, collapsed to a single consumer
-// for single-node v2 (docs/02-architecture.md §5: one process owns the slot).
+// for single-node v2 (docs/reference/02-architecture.md §5: one process owns the slot).
 //
 // Checkpointing: the confirmed LSN is persisted in tail_state and replayed on
 // boot; standby status updates are only sent after the consumer has handled
@@ -78,7 +78,7 @@ func (t *Tailer) EnsurePublication(ctx context.Context) error {
 		return err
 	}
 	defer func() { _ = conn.Close(ctx) }()
-	_, err = pglogrepl.CreateReplicationSlot(ctx, conn, slotName, "pgoutput",
+	_, err = pglogrepl.CreateReplicationSlot(ctx, conn, t.SlotName(), "pgoutput",
 		pglogrepl.CreateReplicationSlotOptions{Temporary: false})
 	if err != nil {
 		if isDuplicateObject(err) || isAlreadyExists(err) {
