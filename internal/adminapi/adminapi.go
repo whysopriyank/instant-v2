@@ -11,8 +11,9 @@
 //     instead of rule-model/get-by-app-id + "rules-override".
 //   - transact_perms_check never commits (dry-run only); v1's
 //     "dangerously-commit-tx" flag is intentionally ignored.
-//   - /admin/rooms/presence returns {} because RoomHub lives in internal/sync
-//     which this package must not import (orchestrator wires Phase 6).
+//   - /admin/rooms/presence is explicitly unsupported until a coordinator-owned
+//     read-only presence projection is wired; it never returns a false-success
+//     empty object.
 package adminapi
 
 import (
@@ -20,9 +21,11 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/instant-v2/instant-v2/internal/authn"
 	"github.com/instant-v2/instant-v2/internal/platform"
 	"github.com/instant-v2/instant-v2/internal/reactive"
 	"github.com/instant-v2/instant-v2/internal/storage"
@@ -34,6 +37,9 @@ type Handler struct {
 	DB       *storage.DB
 	Catalogs *platform.CatalogCache
 	Logger   *slog.Logger
+	// Auth is the optional shared authn.Service. When nil, Handler lazily
+	// creates and retains one long-lived service instance.
+	Auth *authn.Service
 	// OnCommit, when set, fires after every successful /admin/transact so
 	// the reactive invalidator learns about admin-plane writes (same hook
 	// the WS and /runtime/transact paths use). attrIDs are the triple-step
@@ -44,6 +50,29 @@ type Handler struct {
 	// the incremental engine splice instead of recompute
 	// (docs/reference/09-tier2-architecture.md §T2.5).
 	OnCommitChanges func(ctx context.Context, appID [16]byte, changes []reactive.Change, txID int64, attrsChanged bool)
+
+	// faultBeforeTokenCommit is a package-private test seam. It is deliberately
+	// not exported: failure injection must never be part of the production
+	// admin/runtime API surface.
+	faultBeforeTokenCommit func() error
+
+	authMu  sync.Mutex
+	authSvc *authn.Service
+}
+
+func (h *Handler) notifyCommit(ctx context.Context, appID [16]byte, txID int64, attrIDs []string, changes []reactive.Change, attrsChanged bool) {
+	if attrsChanged {
+		h.Catalogs.Invalidate(platform.UUIDToStr(appID))
+	}
+	if len(changes) > 0 && h.OnCommitChanges != nil {
+		h.OnCommitChanges(ctx, appID, changes, txID, attrsChanged)
+	} else if h.OnCommit != nil {
+		h.OnCommit(ctx, appID, attrIDs, txID, attrsChanged)
+	} else if h.OnCommitChanges != nil {
+		// Handlers configured with only OnCommitChanges still receive an
+		// invalidation with nil changes (the existing unknown-change convention).
+		h.OnCommitChanges(ctx, appID, nil, txID, attrsChanged)
+	}
 }
 
 // authedReq carries the authenticated request context through routing.

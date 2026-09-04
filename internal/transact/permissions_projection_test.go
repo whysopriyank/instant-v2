@@ -25,36 +25,28 @@ func TestPermissionProjectionStorageErrorsFailClosed(t *testing.T) {
 	}
 
 	cases := []struct {
-		name         string
-		step         []any
-		failureCall  int
-		existingCall bool
+		name string
+		step []any
 	}{
 		{
-			name:        "create",
-			step:        []any{"add-triple", platform.UUIDToStr(eid), platform.UUIDToStr(attrID), "new"},
-			failureCall: 2, // existing probe succeeds; projection fails
+			name: "create",
+			step: []any{"add-triple", platform.UUIDToStr(eid), platform.UUIDToStr(attrID), "new"},
 		},
 		{
-			name:         "update",
-			step:         []any{"add-triple", platform.UUIDToStr(eid), platform.UUIDToStr(attrID), "new"},
-			failureCall:  2,
-			existingCall: true,
+			name: "update",
+			step: []any{"add-triple", platform.UUIDToStr(eid), platform.UUIDToStr(attrID), "new"},
 		},
 		{
-			name:        "deep-merge",
-			step:        []any{"deep-merge-triple", platform.UUIDToStr(eid), platform.UUIDToStr(attrID), map[string]any{"new": true}},
-			failureCall: 2,
+			name: "deep-merge",
+			step: []any{"deep-merge-triple", platform.UUIDToStr(eid), platform.UUIDToStr(attrID), map[string]any{"new": true}},
 		},
 		{
-			name:        "retract",
-			step:        []any{"retract-triple", platform.UUIDToStr(eid), platform.UUIDToStr(attrID), "old"},
-			failureCall: 1,
+			name: "retract",
+			step: []any{"retract-triple", platform.UUIDToStr(eid), platform.UUIDToStr(attrID), "old"},
 		},
 		{
-			name:        "delete-entity",
-			step:        []any{"delete-entity", platform.UUIDToStr(eid), "todos"},
-			failureCall: 1,
+			name: "delete-entity",
+			step: []any{"delete-entity", platform.UUIDToStr(eid), "todos"},
 		},
 	}
 
@@ -72,20 +64,14 @@ func TestPermissionProjectionStorageErrorsFailClosed(t *testing.T) {
 			calls := 0
 			fetch := func(_ context.Context, _ pgx.Tx, _ [16]byte, _ storage.FetchFilter) ([]storage.Enhanced, error) {
 				calls++
-				if calls == tc.failureCall {
-					return nil, storageErr
-				}
-				if tc.existingCall && calls == 1 {
-					return []storage.Enhanced{{}}, nil
-				}
-				return nil, nil
+				return nil, storageErr
 			}
 			err = enforcePerms(ctx, nil, appID, cat, steps, Options{}, doc, fetch)
 			if !errors.Is(err, storageErr) {
 				t.Fatalf("expected storage error, got %v", err)
 			}
-			if calls != tc.failureCall {
-				t.Fatalf("fetch calls: got %d want %d", calls, tc.failureCall)
+			if calls != 1 {
+				t.Fatalf("fetch calls: got %d want 1 (batch fetch)", calls)
 			}
 		})
 	}

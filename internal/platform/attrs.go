@@ -359,15 +359,28 @@ func GetOrCreateAttr(
 	etype, label, valueType, cardinality string,
 	isUnique, isIndexed bool,
 ) (Attr, error) {
+	attr, _, err := GetOrCreateAttrWithStatus(ctx, tx, appID, etype, label, valueType, cardinality, isUnique, isIndexed)
+	return attr, err
+}
+
+// GetOrCreateAttrWithStatus is GetOrCreateAttr plus an authoritative created
+// result from the same transaction. Callers use it when cache invalidation must
+// distinguish schema creation from merely resolving an existing attribute.
+func GetOrCreateAttrWithStatus(
+	ctx context.Context, tx pgx.Tx, appID [16]byte,
+	etype, label, valueType, cardinality string,
+	isUnique, isIndexed bool,
+) (Attr, bool, error) {
 	var existing [16]byte
 	err := tx.QueryRow(ctx,
 		`SELECT id FROM attrs WHERE app_id=$1 AND etype=$2 AND label=$3 AND deletion_marked_at IS NULL`,
 		appID, etype, label).Scan(&existing)
 	switch {
 	case err == nil:
-		return loadAttrByID(ctx, tx, existing)
+		attr, loadErr := loadAttrByID(ctx, tx, existing)
+		return attr, false, loadErr
 	case err != pgx.ErrNoRows:
-		return Attr{}, err
+		return Attr{}, false, err
 	}
 
 	attrID := newUUIDv4()
@@ -380,16 +393,17 @@ func GetOrCreateAttr(
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
 		attrID, appID, etype, label, etype, label,
 		valueType, cardinality, isUnique, isIndexed, label == "id", fwd, rev); err != nil {
-		return Attr{}, err
+		return Attr{}, false, err
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO idents (id, app_id, attr_id, etype, label)
 		VALUES ($1,$2,$3,$4,$5)
 		ON CONFLICT (app_id, etype, label) DO NOTHING`,
 		newUUIDv4(), appID, attrID, etype, label); err != nil {
-		return Attr{}, err
+		return Attr{}, false, err
 	}
-	return loadAttrByID(ctx, tx, attrID)
+	attr, err := loadAttrByID(ctx, tx, attrID)
+	return attr, true, err
 }
 
 func loadAttrByID(ctx context.Context, q Queryer, id [16]byte) (Attr, error) {

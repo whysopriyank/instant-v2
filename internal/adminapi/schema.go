@@ -57,10 +57,12 @@ func (h *Handler) handleSoftDeletedAttrs(w http.ResponseWriter, r *http.Request,
 	writeJSON(w, http.StatusOK, map[string]any{"attrs": attrs, "grace-period-days": 2})
 }
 
-// handlePresence is a stub until Phase 6 wires RoomHub (internal/sync cannot
-// be imported from this package). Returns {} for now.
+// handlePresence is explicitly unsupported until the coordinator wires a
+// read-only presence projection. Returning an error is important: an empty
+// successful response would be indistinguishable from a room with no members.
 func (h *Handler) handlePresence(w http.ResponseWriter, r *http.Request, a *authedReq) {
-	// TODO(Phase 6): return real presence sessions once the orchestrator wires
-	// sync.RoomHub into this handler.
-	writeJSON(w, http.StatusOK, map[string]any{})
+	writeJSON(w, http.StatusNotImplemented, map[string]any{
+		"type":    "unsupported",
+		"message": "admin presence is unsupported",
+	})
 }

@@ -189,7 +189,7 @@ func TestPermissionAllowsWhenTrue(t *testing.T) {
 }
 
 // TestPermsEnforcedOnUpdateDeleteDeleteEntity pins the write-path gate: with
-// deny-all rules for the todos etype, deep-merge (update), retract (delete),
+// deny-all rules for the todos etype, deep-merge (update), retract (update),
 // and delete-entity must all be refused — not just add-triple/create.
 func TestPermsEnforcedOnUpdateDeleteDeleteEntity(t *testing.T) {
 	db := testDB(t)
@@ -269,6 +269,699 @@ func TestPermsAuthScopedUpdate(t *testing.T) {
 		parseSteps(t, mustJSON(t, []any{"add-triple", uuidStr(e), uuidToStr(ids.name), "mine v2"})),
 		transact.Options{AuthUser: map[string]any{"id": ownerID}}, doc); err != nil {
 		t.Fatalf("owner update should be allowed: %v", err)
+	}
+}
+
+// TestPermissionEntityLevelBindingsUseFullImages proves that permission checks
+// are entity-level: a new entity's create check sees the full final image for
+// both data and newData, while an existing entity's update check sees the
+// original image in data and the full final image in newData.
+func TestPermissionEntityLevelBindingsUseFullImages(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	appID, _, ids := seed(t, db)
+	ownerID := uuidStr(rand16())
+
+	var ownerAttr platform.Attr
+	if err := db.WithTx(ctx, func(tx pgx.Tx) error {
+		var e error
+		ownerAttr, e = platform.GetOrCreateAttr(ctx, tx, appID, "todos", "ownerId", "blob", "one", false, true)
+		return e
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cat, err := reloadCatalog(t, db, appID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create requires both fields in both bindings. A per-attribute projection
+	// would fail the first permission check because it would omit one field.
+	doc, err := perms.ParseRuleDoc([]byte(`{"todos":{"allow":{
+		"create":"data.id == newData.id && data.name == 'created' && data.ownerId == auth.id && newData.name == 'created' && newData.ownerId == auth.id",
+		"update":"data.id == newData.id && data.name == 'initial' && !has(data.ownerId) && newData.name == 'updated' && newData.ownerId == auth.id"
+	}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	createEID := rand16()
+	createSteps := parseSteps(t,
+		mustJSON(t, []any{"add-triple", uuidStr(createEID), uuidStr(ids.name), "created"}),
+		mustJSON(t, []any{"add-triple", uuidStr(createEID), uuidStr(ownerAttr.ID), ownerID}),
+	)
+	if _, err := transact.Transact(ctx, db, cat, appID, createSteps,
+		transact.Options{AuthUser: map[string]any{"id": ownerID}}, doc); err != nil {
+		t.Fatalf("create must see the full final entity image: %v", err)
+	}
+
+	updateEID := rand16()
+	if _, err := transact.Transact(ctx, db, cat, appID, parseSteps(t,
+		mustJSON(t, []any{"add-triple", uuidStr(updateEID), uuidToStr(ids.name), "initial"}),
+	), transact.Options{Admin: true}, nil); err != nil {
+		t.Fatalf("seed update entity: %v", err)
+	}
+	updateSteps := parseSteps(t,
+		mustJSON(t, []any{"add-triple", uuidStr(updateEID), uuidToStr(ownerAttr.ID), ownerID}),
+		mustJSON(t, []any{"add-triple", uuidStr(updateEID), uuidStr(ids.name), "updated"}),
+	)
+	if _, err := transact.Transact(ctx, db, cat, appID, updateSteps,
+		transact.Options{AuthUser: map[string]any{"id": ownerID}}, doc); err != nil {
+		t.Fatalf("update must see original data and full final newData: %v", err)
+	}
+}
+
+// TestPermissionProjectionBindsExactDataNewDataAndAction checks create/update
+// bindings against the actual Transact path and verifies retract follows the
+// update fallback. The rules reject operations with the wrong images/action.
+func TestPermissionProjectionBindsExactDataNewDataAndAction(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	appID, cat, ids := seed(t, db)
+	doc, err := perms.ParseRuleDoc([]byte(`{
+		"todos":{"allow":{
+			"create":"has(data.name) && data.name == 'created' && newData.name == 'created'",
+			"update":"(has(data.name) && data.name == 'old' && newData.name == 'updated') || (has(data.name) && data.name == 'updated' && !has(newData.name))"
+		}}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	createEID := rand16()
+	if _, err := transact.Transact(ctx, db, cat, appID, parseSteps(t,
+		mustJSON(t, []any{"add-triple", uuidStr(createEID), uuidStr(ids.name), "created"}),
+	), transact.Options{}, doc); err != nil {
+		t.Fatalf("create binding: %v", err)
+	}
+
+	updateEID := rand16()
+	if _, err := transact.Transact(ctx, db, cat, appID, parseSteps(t,
+		mustJSON(t, []any{"add-triple", uuidStr(updateEID), uuidStr(ids.name), "old"}),
+	), transact.Options{Admin: true}, nil); err != nil {
+		t.Fatalf("seed update binding: %v", err)
+	}
+	if _, err := transact.Transact(ctx, db, cat, appID, parseSteps(t,
+		mustJSON(t, []any{"add-triple", uuidStr(updateEID), uuidStr(ids.name), "updated"}),
+	), transact.Options{}, doc); err != nil {
+		t.Fatalf("update binding: %v", err)
+	}
+
+	if _, err := transact.Transact(ctx, db, cat, appID, parseSteps(t,
+		mustJSON(t, []any{"retract-triple", uuidStr(updateEID), uuidStr(ids.name), "updated"}),
+	), transact.Options{}, doc); err != nil {
+		t.Fatalf("retract update-fallback binding: %v", err)
+	}
+}
+
+// A JSON null has the same exact fingerprint in permission projection and in
+// storage. If the retract misses, the following add is an update and this
+// rule denies it; if it matches, the following add is a create and succeeds.
+func TestPermissionSecurityNullManyRetractMatchesStorageIdentity(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	appID, _, _ := seed(t, db)
+
+	var valuesAttr platform.Attr
+	if err := db.WithTx(ctx, func(tx pgx.Tx) error {
+		var err error
+		valuesAttr, err = platform.GetOrCreateAttr(ctx, tx, appID, "todos", "values", "blob", "many", false, false)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cat, err := reloadCatalog(t, db, appID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eid := rand16()
+	if _, err := transact.Transact(ctx, db, cat, appID, parseSteps(t,
+		mustJSON(t, []any{"add-triple", uuidStr(eid), uuidStr(valuesAttr.ID), nil}),
+	), transact.Options{Admin: true}, nil); err != nil {
+		t.Fatalf("seed null: %v", err)
+	}
+
+	doc, err := perms.ParseRuleDoc([]byte(`{"todos":{"allow":{"create":"true","update":"true","delete":"true"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transact.Transact(ctx, db, cat, appID, parseSteps(t,
+		mustJSON(t, []any{"retract-triple", uuidStr(eid), uuidStr(valuesAttr.ID), nil}),
+		mustJSON(t, []any{"add-triple", uuidStr(eid), uuidStr(valuesAttr.ID), "after-null"}),
+	), transact.Options{}, doc); err != nil {
+		t.Fatalf("null retract/add: %v", err)
+	}
+
+	rows, err := db.FetchTriples(ctx, appID, storage.FetchFilter{
+		EntityIDs: [][16]byte{eid}, AttrIDs: [][16]byte{valuesAttr.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Triple.V != "after-null" {
+		t.Fatalf("null identity mismatch: got %+v", rows)
+	}
+}
+
+func TestPermissionSecurityDeepMergeNestedNullDeletesKey(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	appID, cat, ids := seed(t, db)
+	eid := rand16()
+	if _, err := transact.Transact(ctx, db, cat, appID, parseSteps(t,
+		mustJSON(t, []any{"add-triple", uuidStr(eid), uuidStr(ids.name), map[string]any{"a": 1, "b": 2}}),
+	), transact.Options{Admin: true}, nil); err != nil {
+		t.Fatalf("seed merge value: %v", err)
+	}
+
+	doc, err := perms.ParseRuleDoc([]byte(`{"todos":{"allow":{"update":"!has(newData.name.a) && newData.name.b == 2"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transact.Transact(ctx, db, cat, appID, parseSteps(t,
+		mustJSON(t, []any{"deep-merge-triple", uuidStr(eid), uuidStr(ids.name), map[string]any{"a": nil}}),
+	), transact.Options{}, doc); err != nil {
+		t.Fatalf("nested null merge: %v", err)
+	}
+
+	rows, err := db.FetchTriples(ctx, appID, storage.FetchFilter{
+		EntityIDs: [][16]byte{eid}, AttrIDs: [][16]byte{ids.name},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || canonical(t, rows[0].Triple.V) != `{"b":2}` {
+		t.Fatalf("nested null merge mismatch: got %+v", rows)
+	}
+}
+
+// delete-entity is namespace-scoped. Supplying an etype for another
+// namespace may be a harmless no-op, but it must never delete this entity's
+// triples from the actual namespace.
+func TestDeleteEntityEtypeCannotDeleteAnotherNamespace(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	appID, _, ids := seed(t, db)
+	var userName platform.Attr
+	if err := db.WithTx(ctx, func(tx pgx.Tx) error {
+		var err error
+		userName, err = platform.GetOrCreateAttr(ctx, tx, appID, "users", "name", "blob", "one", false, true)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cat, err := reloadCatalog(t, db, appID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eid := rand16()
+	if _, err := transact.Transact(ctx, db, cat, appID, parseSteps(t,
+		mustJSON(t, []any{"add-triple", uuidStr(eid), uuidStr(ids.name), "todo"}),
+		mustJSON(t, []any{"add-triple", uuidStr(eid), uuidStr(userName.ID), "user"}),
+	), transact.Options{Admin: true}, nil); err != nil {
+		t.Fatalf("seed namespaces: %v", err)
+	}
+
+	if _, err := transact.Transact(ctx, db, cat, appID, parseSteps(t,
+		mustJSON(t, []any{"delete-entity", uuidStr(eid), "users"}),
+	), transact.Options{Admin: true}, nil); err != nil {
+		t.Fatalf("delete users namespace: %v", err)
+	}
+	rows, err := db.FetchTriples(ctx, appID, storage.FetchFilter{EntityIDs: [][16]byte{eid}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Triple.A != ids.name || rows[0].Triple.V != "todo" {
+		t.Fatalf("namespace-spoofed delete removed wrong rows: %+v", rows)
+	}
+}
+
+// Permission denial happens before operation dispatch. It must therefore
+// leave both the journal and all committed triples unchanged.
+func TestPermissionDenialLeavesJournalAndTriplesUnchanged(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	appID, cat, ids := seed(t, db)
+	eid := rand16()
+	if _, err := transact.Transact(ctx, db, cat, appID, parseSteps(t,
+		mustJSON(t, []any{"add-triple", uuidStr(eid), uuidStr(ids.name), "keep"}),
+	), transact.Options{Admin: true}, nil); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	var before int64
+	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM transactions WHERE app_id=$1`, appID).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := perms.ParseRuleDoc([]byte(`{"todos":{"allow":{"update":"false"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transact.Transact(ctx, db, cat, appID, parseSteps(t,
+		mustJSON(t, []any{"add-triple", uuidStr(eid), uuidStr(ids.name), "must-not-commit"}),
+	), transact.Options{}, doc); err == nil {
+		t.Fatal("expected permission denial")
+	}
+	var after int64
+	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM transactions WHERE app_id=$1`, appID).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Fatalf("denied transaction left journal row: before=%d after=%d", before, after)
+	}
+	rows, err := db.FetchTriples(ctx, appID, storage.FetchFilter{EntityIDs: [][16]byte{eid}, AttrIDs: [][16]byte{ids.name}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Triple.V != "keep" {
+		t.Fatalf("denied transaction changed triples: %+v", rows)
+	}
+}
+
+func TestPermissionCELFailureRollsBackJournalAndTriples(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	appID, cat, ids := seed(t, db)
+	eid := rand16()
+	if _, err := transact.Transact(ctx, db, cat, appID, parseSteps(t,
+		mustJSON(t, []any{"add-triple", uuidStr(eid), uuidStr(ids.name), "keep"}),
+	), transact.Options{Admin: true}, nil); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	var before int64
+	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM transactions WHERE app_id=$1`, appID).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := perms.ParseRuleDoc([]byte(`{"todos":{"allow":{"update":"data.!!!"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = transact.Transact(ctx, db, cat, appID, parseSteps(t,
+		mustJSON(t, []any{"add-triple", uuidStr(eid), uuidStr(ids.name), "must-not-commit"}),
+	), transact.Options{}, doc)
+	if err == nil || !strings.Contains(err.Error(), "CEL compile") {
+		t.Fatalf("expected fail-closed CEL compilation error, got: %v", err)
+	}
+	var after int64
+	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM transactions WHERE app_id=$1`, appID).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Fatalf("CEL failure left journal row: before=%d after=%d", before, after)
+	}
+	rows, err := db.FetchTriples(ctx, appID, storage.FetchFilter{EntityIDs: [][16]byte{eid}, AttrIDs: [][16]byte{ids.name}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Triple.V != "keep" {
+		t.Fatalf("CEL failure changed triples: %+v", rows)
+	}
+}
+
+// 1. Stored v1; rules allow delete/create but deny update; batch retract(v2) -> add(v3) must be denied and leave v1 unchanged.
+func TestPermissionSecurityCardinalityOneNonmatchingRetractLeavesUpdateDenied(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	appID, cat, ids := seed(t, db)
+	e := rand16()
+
+	// Seed eid with v1
+	seedSteps := parseSteps(t, mustJSON(t, []any{"add-triple", uuidStr(e), uuidToStr(ids.name), "v1"}))
+	if _, err := transact.Transact(ctx, db, cat, appID, seedSteps, transact.Options{Admin: true}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	doc, err := perms.ParseRuleDoc([]byte(`{"todos":{"allow":{"delete":"true","create":"true","update":"false"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Batch: retract(v2) -> add(v3)
+	// Because retract(v2) does not match v1, it is a storage no-op and v1 remains present.
+	// Therefore add(v3) is an update, which is denied by the rule!
+	batch := parseSteps(t,
+		mustJSON(t, []any{"retract-triple", uuidStr(e), uuidToStr(ids.name), "v2"}),
+		mustJSON(t, []any{"add-triple", uuidStr(e), uuidToStr(ids.name), "v3"}),
+	)
+	_, err = transact.Transact(ctx, db, cat, appID, batch, transact.Options{}, doc)
+	if err == nil || !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("expected permission denied (update todos), got: %v", err)
+	}
+
+	rows, err := db.FetchTriples(ctx, appID, storage.FetchFilter{EntityIDs: [][16]byte{e}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Triple.V != "v1" {
+		t.Fatalf("expected v1 to remain unchanged, got: %+v", rows)
+	}
+}
+
+// 2. A many attribute containing one value; rules allow delete/update but deny create; exact retract followed by add must deny the add.
+func TestPermissionSecurityCardinalityManyRetractAllDeniesSubsequentCreate(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	appID, _, _ := seed(t, db)
+
+	var tagsAttr platform.Attr
+	if err := db.WithTx(ctx, func(tx pgx.Tx) error {
+		var e error
+		tagsAttr, e = platform.GetOrCreateAttr(ctx, tx, appID, "todos", "tags", "blob", "many", false, false)
+		return e
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cat, err := reloadCatalog(t, db, appID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	e := rand16()
+	// Seed with one tag "tech"
+	seedSteps := parseSteps(t, mustJSON(t, []any{"add-triple", uuidStr(e), uuidToStr(tagsAttr.ID), "tech"}))
+	if _, err := transact.Transact(ctx, db, cat, appID, seedSteps, transact.Options{Admin: true}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// Rule: delete and update are allowed, create is denied
+	doc, err := perms.ParseRuleDoc([]byte(`{"todos":{"allow":{"delete":"true","update":"true","create":"false"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Batch: exact retract of "tech" followed by add of "science"
+	// Exact retract removes the final value and clears attrExists.
+	// The subsequent add is classified as create, which is denied!
+	batch := parseSteps(t,
+		mustJSON(t, []any{"retract-triple", uuidStr(e), uuidToStr(tagsAttr.ID), "tech"}),
+		mustJSON(t, []any{"add-triple", uuidStr(e), uuidToStr(tagsAttr.ID), "science"}),
+	)
+	_, err = transact.Transact(ctx, db, cat, appID, batch, transact.Options{}, doc)
+	if err == nil || !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("expected permission denied (create todos), got: %v", err)
+	}
+
+	rows, err := db.FetchTriples(ctx, appID, storage.FetchFilter{EntityIDs: [][16]byte{e}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Triple.V != "tech" {
+		t.Fatalf("expected tech to remain in storage, got: %+v", rows)
+	}
+}
+
+// 3. Duplicate many-value add followed by a rule based on collection size.
+func TestPermissionSecurityDuplicateManyAddCollectionSize(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	appID, _, _ := seed(t, db)
+
+	var tagsAttr platform.Attr
+	if err := db.WithTx(ctx, func(tx pgx.Tx) error {
+		var e error
+		tagsAttr, e = platform.GetOrCreateAttr(ctx, tx, appID, "todos", "tags", "blob", "many", false, false)
+		return e
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cat, err := reloadCatalog(t, db, appID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	e := rand16()
+	seedSteps := parseSteps(t, mustJSON(t, []any{"add-triple", uuidStr(e), uuidToStr(tagsAttr.ID), "existing"}))
+	if _, err := transact.Transact(ctx, db, cat, appID, seedSteps, transact.Options{Admin: true}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// Rule allows updates only if tags size <= 2
+	doc, err := perms.ParseRuleDoc([]byte(`{"todos":{"allow":{"create":"true","update":"newData.tags.size() <= 2"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Batch: add "dup" three times. Because storage uses ON CONFLICT DO NOTHING,
+	// the tags collection size should remain 2 (existing + dup).
+	batch := parseSteps(t,
+		mustJSON(t, []any{"add-triple", uuidStr(e), uuidToStr(tagsAttr.ID), "dup"}),
+		mustJSON(t, []any{"add-triple", uuidStr(e), uuidToStr(tagsAttr.ID), "dup"}),
+		mustJSON(t, []any{"add-triple", uuidStr(e), uuidToStr(tagsAttr.ID), "dup"}),
+	)
+	if _, err := transact.Transact(ctx, db, cat, appID, batch, transact.Options{}, doc); err != nil {
+		t.Fatalf("expected duplicate adds to not inflate collection size: %v", err)
+	}
+
+	// Now try adding a third distinct tag "third" -> size would be 3 -> denied!
+	batchExceed := parseSteps(t,
+		mustJSON(t, []any{"add-triple", uuidStr(e), uuidToStr(tagsAttr.ID), "third"}),
+	)
+	_, err = transact.Transact(ctx, db, cat, appID, batchExceed, transact.Options{}, doc)
+	if err == nil || !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("expected size > 2 to be denied, got: %v", err)
+	}
+}
+
+// 4. Many-value deep merge followed by a rule based on collection membership/shape.
+func TestPermissionSecurityManyDeepMergeCollectionMembershipAndShape(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	appID, _, _ := seed(t, db)
+
+	var metaAttr platform.Attr
+	if err := db.WithTx(ctx, func(tx pgx.Tx) error {
+		var e error
+		metaAttr, e = platform.GetOrCreateAttr(ctx, tx, appID, "todos", "meta", "blob", "many", false, false)
+		return e
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cat, err := reloadCatalog(t, db, appID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	e := rand16()
+	seedSteps := parseSteps(t, mustJSON(t, []any{"add-triple", uuidStr(e), uuidToStr(metaAttr.ID), map[string]any{"tag": "v1", "count": 1}}))
+	if _, err := transact.Transact(ctx, db, cat, appID, seedSteps, transact.Options{Admin: true}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// Rule: verifies that newData.meta is a list with 2 elements and the merged second item has count 2 and tag "v1"
+	doc, err := perms.ParseRuleDoc([]byte(`{"todos":{"allow":{"create":"true","update":"newData.meta.size() == 2 && newData.meta[1].count == 2 && newData.meta[1].tag == 'v1'"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	batch := parseSteps(t,
+		mustJSON(t, []any{"deep-merge-triple", uuidStr(e), uuidToStr(metaAttr.ID), map[string]any{"count": 2}}),
+	)
+	if _, err := transact.Transact(ctx, db, cat, appID, batch, transact.Options{}, doc); err != nil {
+		t.Fatalf("expected many deep-merge to produce consistent collection shape: %v", err)
+	}
+}
+
+// 5. Numeric many value 1; retract 1; a later rule must not observe the removed value.
+func TestPermissionSecurityNumericManyRetractUnobservesValue(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	appID, _, _ := seed(t, db)
+
+	var numAttr platform.Attr
+	if err := db.WithTx(ctx, func(tx pgx.Tx) error {
+		var e error
+		numAttr, e = platform.GetOrCreateAttr(ctx, tx, appID, "todos", "numbers", "blob", "many", false, false)
+		return e
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cat, err := reloadCatalog(t, db, appID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	e := rand16()
+	seedSteps := parseSteps(t, mustJSON(t, []any{"add-triple", uuidStr(e), uuidToStr(numAttr.ID), 1}))
+	if _, err := transact.Transact(ctx, db, cat, appID, seedSteps, transact.Options{Admin: true}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// Permission checks use the update fallback for retract; the final storage
+	// assertion below verifies that the numeric value was actually removed.
+	doc, err := perms.ParseRuleDoc([]byte(`{"todos":{"allow":{"delete":"true","create":"true","update":"true"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Batch: retract 1 (as integer 1) then add 2
+	batch := parseSteps(t,
+		mustJSON(t, []any{"retract-triple", uuidStr(e), uuidToStr(numAttr.ID), 1}),
+		mustJSON(t, []any{"add-triple", uuidStr(e), uuidToStr(numAttr.ID), 2}),
+	)
+	if _, err := transact.Transact(ctx, db, cat, appID, batch, transact.Options{}, doc); err != nil {
+		t.Fatalf("expected numeric retract 1 to unobserve value in later rule: %v", err)
+	}
+
+	rows, err := db.FetchTriples(ctx, appID, storage.FetchFilter{EntityIDs: [][16]byte{e}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || fmt.Sprint(rows[0].Triple.V) != "2" {
+		t.Fatalf("expected only 2 to remain, got: %+v", rows)
+	}
+}
+
+// Restored JSONB rows can retain numeric scale in value_md5 even though JSONB
+// equality treats 1 and 1.0 as equal. Permission projection must use the same
+// exact identity as DeleteTx or it can authorize a later create while the
+// stored value remains present.
+func TestPermissionSecurityRestoredNumericScaleRetractRemainsUpdate(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	appID, _, _ := seed(t, db)
+
+	var numAttr platform.Attr
+	if err := db.WithTx(ctx, func(tx pgx.Tx) error {
+		var err error
+		numAttr, err = platform.GetOrCreateAttr(ctx, tx, appID, "todos", "numbers", "blob", "many", false, false)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cat, err := reloadCatalog(t, db, appID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	e := rand16()
+	if _, err := db.Pool.Exec(ctx, `
+		INSERT INTO triples (app_id, entity_id, attr_id, value, value_md5,
+		                     ea, eav, av, ave, vae, checked_data_type)
+		VALUES ($1, $2, $3, '1.0'::jsonb, md5(('1.0'::jsonb)::text),
+		        false, false, false, false, false, NULL)`, appID, e, numAttr.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	doc, err := perms.ParseRuleDoc([]byte(`{"todos":{"allow":{"delete":"true","create":"true","update":"false"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch := parseSteps(t,
+		mustJSON(t, []any{"retract-triple", uuidStr(e), uuidToStr(numAttr.ID), 1}),
+		mustJSON(t, []any{"add-triple", uuidStr(e), uuidToStr(numAttr.ID), 2}),
+	)
+	_, err = transact.Transact(ctx, db, cat, appID, batch, transact.Options{}, doc)
+	if err == nil || !strings.Contains(err.Error(), "permission denied (update todos)") {
+		t.Fatalf("expected exact-md5 no-op retract to use update authorization, got: %v", err)
+	}
+
+	rows, err := db.FetchTriples(ctx, appID, storage.FetchFilter{EntityIDs: [][16]byte{e}, AttrIDs: [][16]byte{numAttr.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].MD5 != "e4c2e8edac362acab7123654b9e73432" {
+		t.Fatalf("expected restored 1.0 row to remain unchanged, got: %+v", rows)
+	}
+}
+
+func TestPermissionSecurityExponentRetractUsesPostgresFingerprint(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	appID, _, _ := seed(t, db)
+
+	var numAttr platform.Attr
+	if err := db.WithTx(ctx, func(tx pgx.Tx) error {
+		var err error
+		numAttr, err = platform.GetOrCreateAttr(ctx, tx, appID, "todos", "numbers", "blob", "many", false, false)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cat, err := reloadCatalog(t, db, appID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	e := rand16()
+	if _, err := db.Pool.Exec(ctx, `
+		INSERT INTO triples (app_id, entity_id, attr_id, value, value_md5,
+		                     ea, eav, av, ave, vae, checked_data_type)
+		VALUES ($1, $2, $3, '1e21'::jsonb, md5(('1e21'::jsonb)::text),
+		        false, false, false, false, false, NULL)`, appID, e, numAttr.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	doc, err := perms.ParseRuleDoc([]byte(`{"todos":{"allow":{"delete":"true","create":"false","update":"true"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch := parseSteps(t,
+		mustJSON(t, []any{"retract-triple", uuidStr(e), uuidToStr(numAttr.ID), float64(1e21)}),
+		mustJSON(t, []any{"add-triple", uuidStr(e), uuidToStr(numAttr.ID), 2}),
+	)
+	_, err = transact.Transact(ctx, db, cat, appID, batch, transact.Options{}, doc)
+	if err == nil || !strings.Contains(err.Error(), "permission denied (create todos)") {
+		t.Fatalf("expected PostgreSQL-normalized retract to make the add a denied create, got: %v", err)
+	}
+
+	rows, err := db.FetchTriples(ctx, appID, storage.FetchFilter{EntityIDs: [][16]byte{e}, AttrIDs: [][16]byte{numAttr.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || fmt.Sprint(rows[0].Triple.V) != "1000000000000000000000" {
+		t.Fatalf("expected transaction rollback to preserve the exponent value, got: %+v", rows)
+	}
+}
+
+func TestPermissionSecurityManyDeepMergeUsesDeterministicValueMD5Base(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	appID, _, _ := seed(t, db)
+
+	var metaAttr platform.Attr
+	if err := db.WithTx(ctx, func(tx pgx.Tx) error {
+		var err error
+		metaAttr, err = platform.GetOrCreateAttr(ctx, tx, appID, "todos", "meta", "blob", "many", false, false)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cat, err := reloadCatalog(t, db, appID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	e := rand16()
+	seedSteps := parseSteps(t,
+		mustJSON(t, []any{"add-triple", uuidStr(e), uuidToStr(metaAttr.ID), map[string]any{"base": "z"}}),
+		mustJSON(t, []any{"add-triple", uuidStr(e), uuidToStr(metaAttr.ID), map[string]any{"base": "a"}}),
+	)
+	if _, err := transact.Transact(ctx, db, cat, appID, seedSteps, transact.Options{Admin: true}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	doc, err := perms.ParseRuleDoc([]byte(`{"todos":{"allow":{"update":"newData.meta.exists(v, v.base == 'a' && v.merged == true)"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	merge := parseSteps(t, mustJSON(t, []any{
+		"deep-merge-triple", uuidStr(e), uuidToStr(metaAttr.ID), map[string]any{"merged": true},
+	}))
+	if _, err := transact.Transact(ctx, db, cat, appID, merge, transact.Options{}, doc); err != nil {
+		t.Fatalf("expected permission and storage to select the same canonical base: %v", err)
+	}
+
+	rows, err := db.FetchTriples(ctx, appID, storage.FetchFilter{EntityIDs: [][16]byte{e}, AttrIDs: [][16]byte{metaAttr.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, row := range rows {
+		if m, ok := row.Triple.V.(map[string]any); ok && m["base"] == "a" && m["merged"] == true {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected merged value to use base a, got: %+v", rows)
 	}
 }
 

@@ -275,11 +275,22 @@ func (m *Manager) Handle(ctx context.Context, sess *Session, f Frame) ([]Frame, 
 	case "server-broadcast", "start-sync", "remove-sync",
 		"refresh-sync-table", "resync-table", "start-stream", "append-stream",
 		"subscribe-stream", "unsubscribe-stream":
-		// Delta-sync/stream surface arrives in Phase 6; ack so clients don't stall.
-		return []Frame{{"op": mustRaw(fmt.Sprintf("%q", op+"-ok"))}}, nil
+		// Delta-sync/stream surface is not implemented in this checkpoint. Never
+		// acknowledge a placeholder: a successful <op>-ok would make clients
+		// believe state was created or changed when nothing happened.
+		return []Frame{unsupportedOperationFrame(f, op)}, nil
 	default:
 		// Unknown ops are logged-and-ignored — the forward-compat lever.
 		m.logger().Info("sync: unknown op ignored", "op", op)
 		return nil, nil
 	}
+}
+
+func unsupportedOperationFrame(f Frame, op string) Frame {
+	fr := ErrFrame(501, "unsupported", "sync operation is unsupported")
+	fr["operation"] = json.RawMessage(mustJSON(op))
+	if eid, _ := f.String("client-event-id"); eid != "" {
+		fr["client-event-id"] = json.RawMessage(mustJSON(eid))
+	}
+	return fr
 }

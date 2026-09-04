@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestPaginateWrapOrdersDeterministically pins SQL-side paging semantics:
@@ -36,6 +37,10 @@ func TestPaginateWrapOrdersDeterministically(t *testing.T) {
 func TestPageEntitiesCombinedBoundaries(t *testing.T) {
 	rows := []entity{{ID: "a"}, {ID: "b"}, {ID: "c"}, {ID: "d"}, {ID: "e"}}
 	cur := func(id string) []any { return []any{id, "", nil} }
+	idOrder := func(o Options) Options {
+		o.Order = &Order{K: "id"}
+		return o
+	}
 	one := 1
 	for _, tc := range []struct {
 		name       string
@@ -43,14 +48,14 @@ func TestPageEntitiesCombinedBoundaries(t *testing.T) {
 		want       []string
 		next, prev bool
 	}{
-		{"intersection", Options{After: cur("b"), Before: cur("e")}, []string{"c", "d"}, false, true},
-		{"inclusive", Options{After: cur("b"), Before: cur("d"), AfterInclusive: true, BeforeInclusive: true}, []string{"b", "c", "d"}, false, true},
-		{"crossed", Options{After: cur("e"), Before: cur("a")}, []string{}, false, true},
-		{"before-last", Options{Before: cur("e"), Last: &one}, []string{"d"}, true, true},
-		{"offset-first", Options{After: cur("a"), Before: cur("e"), Offset: &one, First: &one}, []string{"c"}, true, true},
+		{"intersection", idOrder(Options{After: cur("b"), Before: cur("e")}), []string{"c", "d"}, false, true},
+		{"inclusive", idOrder(Options{After: cur("b"), Before: cur("d"), AfterInclusive: true, BeforeInclusive: true}), []string{"b", "c", "d"}, false, true},
+		{"crossed", idOrder(Options{After: cur("e"), Before: cur("a")}), []string{}, false, true},
+		{"before-last", idOrder(Options{Before: cur("e"), Last: &one}), []string{"d"}, true, true},
+		{"offset-first", idOrder(Options{After: cur("a"), Before: cur("e"), Offset: &one, First: &one}), []string{"c"}, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, next, prev, err := pageEntities(rows, &tc.opts, "posts", false)
+			got, next, prev, err := pageEntities(rows, &tc.opts, "posts", false, "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -82,6 +87,133 @@ func TestOrderValueDomain(t *testing.T) {
 	if rows[0].ID != "c" || rows[1].ID != "a" || rows[2].ID != "b" {
 		t.Fatalf("numeric/null order = %v", rows)
 	}
+}
+
+func TestServerCreatedAtOrderUsesIDTripleTimeAndDirectionalTieBreak(t *testing.T) {
+	timestamp := func(ms int64) time.Time { return time.UnixMilli(ms) }
+	rows := []entity{
+		{ID: "00000000-0000-0000-0000-000000000003", ServerCreatedAt: timestamp(1000), HasServerCreatedAt: true},
+		{ID: "00000000-0000-0000-0000-000000000001", ServerCreatedAt: timestamp(2000), HasServerCreatedAt: true},
+		{ID: "00000000-0000-0000-0000-000000000002", ServerCreatedAt: timestamp(3000), HasServerCreatedAt: true},
+		{ID: "00000000-0000-0000-0000-000000000004", ServerCreatedAt: timestamp(3000), HasServerCreatedAt: true},
+	}
+	if err := applyOrder(rows, &Options{Order: &Order{K: "serverCreatedAt"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := entityIDs(rows), []string{
+		"00000000-0000-0000-0000-000000000003",
+		"00000000-0000-0000-0000-000000000001",
+		"00000000-0000-0000-0000-000000000002",
+		"00000000-0000-0000-0000-000000000004",
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("serverCreatedAt asc = %v, want %v", got, want)
+	}
+	if err := applyOrder(rows, &Options{Order: &Order{K: "serverCreatedAt", Desc: true}}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := entityIDs(rows), []string{
+		"00000000-0000-0000-0000-000000000004",
+		"00000000-0000-0000-0000-000000000002",
+		"00000000-0000-0000-0000-000000000001",
+		"00000000-0000-0000-0000-000000000003",
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("serverCreatedAt desc = %v, want %v", got, want)
+	}
+}
+
+func TestServerCreatedAtRemovedCursorUsesTimestamp(t *testing.T) {
+	rows := []entity{
+		{ID: "00000000-0000-0000-0000-000000000001", ServerCreatedAt: time.UnixMilli(1000), HasServerCreatedAt: true},
+		{ID: "00000000-0000-0000-0000-000000000003", ServerCreatedAt: time.UnixMilli(3000), HasServerCreatedAt: true},
+		{ID: "00000000-0000-0000-0000-000000000004", ServerCreatedAt: time.UnixMilli(3000), HasServerCreatedAt: true},
+	}
+	cursor := []any{"00000000-0000-0000-0000-000000000002", "id", "00000000-0000-0000-0000-000000000002", float64(2000)}
+	limit := 10
+	got, _, _, err := pageEntities(rows, &Options{
+		Order: &Order{K: "serverCreatedAt"}, After: cursor, Limit: &limit,
+	}, "posts", false, "id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ids := entityIDs(got); !reflect.DeepEqual(ids, []string{
+		"00000000-0000-0000-0000-000000000003",
+		"00000000-0000-0000-0000-000000000004",
+	}) {
+		t.Fatalf("after removed serverCreatedAt cursor = %v", ids)
+	}
+}
+
+func TestPaginatedNoOrderDefaultsToServerCreatedAt(t *testing.T) {
+	rows := []entity{
+		{ID: "c", ServerCreatedAt: time.UnixMilli(1000), HasServerCreatedAt: true},
+		{ID: "a", ServerCreatedAt: time.UnixMilli(2000), HasServerCreatedAt: true},
+		{ID: "b", ServerCreatedAt: time.UnixMilli(3000), HasServerCreatedAt: true},
+	}
+	limit := 2
+	opts := &Options{Limit: &limit}
+	if canUseIDFastPath(opts, nil) {
+		t.Fatal("paginated no-order form must bypass the ID fast path")
+	}
+	if err := applyOrder(rows, opts); err != nil {
+		t.Fatal(err)
+	}
+	got, hasNext, _, err := pageEntities(rows, opts, "posts", false, "id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ids := entityIDs(got); !reflect.DeepEqual(ids, []string{"c", "a"}) || !hasNext {
+		t.Fatalf("default paginated order = %v, hasNext=%v; want [c a], true", ids, hasNext)
+	}
+}
+
+func TestServerCreatedAtCursorRequiresExactTuple(t *testing.T) {
+	rows := []entity{{ID: "a", ServerCreatedAt: time.UnixMilli(1000), HasServerCreatedAt: true}}
+	limit := 1
+	bad := [][]any{
+		{"a", "id", "a"},                         // missing timestamp
+		{"a", "id", "a", float64(1000), "extra"}, // extra tuple member
+		{"a", "other-id", "a", float64(1000)},    // cursor from another order
+		{"a", "id", "other", float64(1000)},      // malformed id triple value
+		{"a", "id", "a", "1000"},                 // timestamp must be integral JSON number
+	}
+	for i, cursor := range bad {
+		opts := &Options{Order: &Order{K: "serverCreatedAt"}, After: cursor, Limit: &limit}
+		if _, _, _, err := pageEntities(rows, opts, "posts", false, "id"); err == nil {
+			t.Errorf("malformed serverCreatedAt cursor %d was accepted", i)
+		}
+	}
+}
+
+func TestServerCreatedAtCursorUsesEncodedBoundaryAfterOverwrite(t *testing.T) {
+	rows := []entity{
+		{ID: "a", ServerCreatedAt: time.UnixMilli(1000), HasServerCreatedAt: true},
+		{ID: "b", ServerCreatedAt: time.UnixMilli(2000), HasServerCreatedAt: true},
+		{ID: "c", ServerCreatedAt: time.UnixMilli(3000), HasServerCreatedAt: true},
+	}
+	cursor := []any{"b", "id", "b", float64(2000)}
+	// Simulate OverwriteT moving the cursor entity after c. The issued cursor
+	// still denotes b@2000, so c and then b remain after its encoded boundary.
+	rows[1].ServerCreatedAt = time.UnixMilli(4000)
+	limit := 10
+	opts := &Options{Order: &Order{K: "serverCreatedAt"}, After: cursor, Limit: &limit}
+	if err := applyOrder(rows, opts); err != nil {
+		t.Fatal(err)
+	}
+	got, _, _, err := pageEntities(rows, opts, "posts", false, "id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ids := entityIDs(got); !reflect.DeepEqual(ids, []string{"c", "b"}) {
+		t.Fatalf("overwrite-stable cursor page = %v, want [c b]", ids)
+	}
+}
+
+func entityIDs(rows []entity) []string {
+	ids := make([]string, 0, len(rows))
+	for _, row := range rows {
+		ids = append(ids, row.ID)
+	}
+	return ids
 }
 
 func TestPaginateWrapFetchesSentinel(t *testing.T) {
@@ -135,7 +267,10 @@ func TestPageEntitiesCursorInclusivity(t *testing.T) {
 	entities := []entity{{ID: "a"}, {ID: "b"}, {ID: "c"}}
 	cur := []any{"b", "", nil}
 	count := func(o *Options) []entity {
-		got, _, _, err := pageEntities(entities, o, "posts", false)
+		if o.Order == nil {
+			o.Order = &Order{K: "id"}
+		}
+		got, _, _, err := pageEntities(entities, o, "posts", false, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -153,7 +288,7 @@ func TestPageEntitiesCursorInclusivity(t *testing.T) {
 	if got := count(&Options{Before: cur, BeforeInclusive: true}); len(got) != 2 || got[1].ID != "b" {
 		t.Fatalf("inclusive before = %v, want [a b]", got)
 	}
-	_, _, _, err := pageEntities(entities, &Options{Order: &Order{K: "title"}, After: []any{"missing", "", nil}}, "posts", false)
+	_, _, _, err := pageEntities(entities, &Options{Order: &Order{K: "title"}, After: []any{"missing", "", nil}}, "posts", false, "")
 	var missing *ErrCursorNotFound
 	if !errors.As(err, &missing) {
 		t.Fatalf("missing explicit-order cursor error = %v, want ErrCursorNotFound", err)

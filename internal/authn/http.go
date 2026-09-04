@@ -2,6 +2,7 @@ package authn
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -95,6 +96,10 @@ func (h *Handler) sendMagicCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.Service.SendMagicCode(r.Context(), appID, email); err != nil {
+		if errors.Is(err, ErrMagicCodeDeliveryUnavailable) {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"message": "magic code delivery unavailable"})
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"message": platform.ClientMessage(err)})
 		return
 	}

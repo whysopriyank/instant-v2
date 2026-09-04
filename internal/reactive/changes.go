@@ -73,13 +73,27 @@ func (n *Notifier) enqueue(appID string, subs []*Subscription, txID int64, ch []
 	}
 	added := 0
 	for _, sub := range subs {
-		if sub.AppID != appID || txID <= sub.TxID.Load() {
+		if sub.AppID != appID || sub.isCancelled() || txID <= sub.TxID.Load() {
 			continue
 		}
 		id := sub.ID
+		if retry, ok := n.retries[id]; ok {
+			if txID > retry.txID {
+				retry.txID = txID
+			}
+			// Unknown change knowledge is sticky across the entire retry
+			// window. Known changes can be merged without creating a second
+			// timer, regardless of notification order.
+			retry.changes = mergeRetryChanges(retry.changes, ch)
+			continue
+		}
 		pendingTx, alreadyPending := n.pending[id]
 		if !alreadyPending {
 			n.pending[id] = txID
+			if n.pendingAttempt == nil {
+				n.pendingAttempt = map[string]int{}
+			}
+			n.pendingAttempt[id] = 0
 			added++
 		} else if txID > pendingTx {
 			// Never move a coalesced entry backwards when an older
@@ -108,11 +122,18 @@ func (n *Notifier) enqueue(appID string, subs []*Subscription, txID int64, ch []
 		n.gauge.Add(int64(added))
 	}
 	n.mu.Unlock()
-	n.once.Do(func() { n.wake = make(chan struct{}, 1) })
-	select {
-	case n.wake <- struct{}{}:
-	default:
+	n.signalWake()
+}
+
+func mergeRetryChanges(a, b []Change) []Change {
+	if a == nil || b == nil {
+		return nil
 	}
+	merged := mergeChanges(a, b)
+	if len(merged) > maxTrackedChanges {
+		return nil
+	}
+	return merged
 }
 
 // dedupeChanges collapses repeated touches of the same entity; order is not

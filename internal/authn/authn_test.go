@@ -84,18 +84,40 @@ func post(t *testing.T, h *authn.Handler, path string, body map[string]any) (int
 // TestMagicCodeFlow proves send → verify → refresh-token verify → sign-out
 // end-to-end over the HTTP wire shapes.
 func TestMagicCodeFlow(t *testing.T) {
-	_, h, appID, cleanup := env(t)
+	svc, h, appID, cleanup := env(t)
 	defer cleanup()
 	appStr := platform.UUIDToStr(appID)
 
 	code, resp := post(t, h, "/runtime/auth/send_magic_code", map[string]any{"email": "u@test", "app-id": appStr})
-	if code != 200 || resp["sent"] != true {
+	if code != http.StatusServiceUnavailable || resp["message"] != "magic code delivery unavailable" {
 		t.Fatalf("send: %d %v", code, resp)
 	}
-	// The dev no-mailer path logs the code; for the test we bypass by using
-	// the service directly to mint a known code.
-	// Instead of parsing logs, exercise verify with an injected mailer capture:
-	// (see TestMagicCodeWithMailer below)
+	if _, ok := resp["sent"]; ok {
+		t.Fatal("unavailable delivery must not report sent=true")
+	}
+	if resp["message"] == "000000" || resp["message"] == "123456" {
+		t.Fatal("unavailable delivery must not leak a magic code")
+	}
+	code2, resp2 := post(t, h, "/runtime/auth/send_magic_code", map[string]any{"email": "other@test", "app-id": appStr})
+	if code2 != code || resp2["message"] != resp["message"] {
+		t.Fatalf("unavailable delivery must not enumerate by email: first=%d/%v second=%d/%v", code, resp, code2, resp2)
+	}
+
+	// The unavailable path must not create a code entity. The system attrs
+	// created while the service is initialized are unrelated to this check.
+	var magicCodeAttr [16]byte
+	if err := svc.Pool.QueryRow(context.Background(),
+		`SELECT id FROM attrs WHERE app_id=$1 AND etype='$magicCodes' AND label='codeHash'`, appID).Scan(&magicCodeAttr); err != nil {
+		t.Fatalf("find magic-code attr: %v", err)
+	}
+	var codeCount int
+	if err := svc.Pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM triples WHERE app_id=$1 AND attr_id=$2`, appID, magicCodeAttr).Scan(&codeCount); err != nil {
+		t.Fatalf("count magic-code triples: %v", err)
+	}
+	if codeCount != 0 {
+		t.Fatalf("unavailable delivery persisted %d magic-code triples", codeCount)
+	}
 
 	// Wrong code rejected.
 	code, resp = post(t, h, "/runtime/auth/verify_magic_code",

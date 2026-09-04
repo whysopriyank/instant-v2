@@ -2,6 +2,7 @@ package transact
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -76,6 +77,10 @@ func Transact(
 		if err := resolveValues(ctx, tx, appID, steps, txCat); err != nil {
 			return err
 		}
+		steps, err = expandUntypedDeleteEntities(ctx, tx, appID, steps)
+		if err != nil {
+			return err
+		}
 
 		// Permission gate: every mutating step is checked against the app's
 		// RuleDoc with real data/newData/auth bindings BEFORE execution.
@@ -107,4 +112,84 @@ func Transact(
 		return nil
 	})
 	return res, err
+}
+
+// expandUntypedDeleteEntities resolves the optional delete-entity etype using
+// the entity's stored namespaces. v1 checks and deletes each concrete
+// (entity, etype) pair; keeping the omitted form as "$default" would silently
+// leave ordinary user namespaces untouched.
+func expandUntypedDeleteEntities(ctx context.Context, tx pgx.Tx, appID [16]byte, steps []Step) ([]Step, error) {
+	ids := make([][16]byte, 0)
+	seen := make(map[[16]byte]struct{})
+	for _, st := range steps {
+		if st.Op != "delete-entity" || len(st.Args) != 1 {
+			continue
+		}
+		var eidStr string
+		if err := json.Unmarshal(st.Args[0], &eidStr); err != nil {
+			continue
+		}
+		var eid [16]byte
+		if err := parseUUID(eidStr, &eid); err != nil {
+			continue
+		}
+		if _, ok := seen[eid]; !ok {
+			seen[eid] = struct{}{}
+			ids = append(ids, eid)
+		}
+	}
+	if len(ids) == 0 {
+		return steps, nil
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT DISTINCT t.entity_id, a.etype
+		  FROM triples t
+		  JOIN attrs a ON a.id = t.attr_id
+		 WHERE t.app_id = $1
+		   AND t.entity_id = ANY($2::uuid[])
+		   AND a.app_id = $1
+		   AND a.deletion_marked_at IS NULL
+		   AND a.etype IS NOT NULL
+		 ORDER BY t.entity_id, a.etype`, appID, ids)
+	if err != nil {
+		return nil, fmt.Errorf("delete-entity resolve etypes: %w", err)
+	}
+	defer rows.Close()
+	etypes := make(map[[16]byte][]string)
+	for rows.Next() {
+		var eid [16]byte
+		var etype string
+		if err := rows.Scan(&eid, &etype); err != nil {
+			return nil, fmt.Errorf("delete-entity resolve etypes: %w", err)
+		}
+		etypes[eid] = append(etypes[eid], etype)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("delete-entity resolve etypes: %w", err)
+	}
+
+	out := make([]Step, 0, len(steps))
+	for _, st := range steps {
+		if st.Op != "delete-entity" || len(st.Args) != 1 {
+			out = append(out, st)
+			continue
+		}
+		var eidStr string
+		if err := json.Unmarshal(st.Args[0], &eidStr); err != nil {
+			out = append(out, st)
+			continue
+		}
+		var eid [16]byte
+		if err := parseUUID(eidStr, &eid); err != nil || len(etypes[eid]) == 0 {
+			out = append(out, st)
+			continue
+		}
+		for _, etype := range etypes[eid] {
+			args := append([]json.RawMessage(nil), st.Args...)
+			args = append(args, mustMarshalJSON(etype))
+			st.Args = args
+			out = append(out, st)
+		}
+	}
+	return out, nil
 }

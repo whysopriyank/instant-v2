@@ -11,10 +11,18 @@ import (
 
 // ---- Auth routes -----------------------------------------------------------
 
-// service builds the authn facade from explicit deps (no globals; cmd wiring
-// stays with the orchestrator).
+// service returns the configured long-lived authn facade or lazily initializes
+// and retains one instance on Handler.
 func (h *Handler) service() *authn.Service {
-	return &authn.Service{DB: h.DB, Pool: h.Pool, Catalogs: h.Catalogs, Logger: h.Logger}
+	if h.Auth != nil {
+		return h.Auth
+	}
+	h.authMu.Lock()
+	defer h.authMu.Unlock()
+	if h.authSvc == nil {
+		h.authSvc = &authn.Service{DB: h.DB, Pool: h.Pool, Catalogs: h.Catalogs, Logger: h.Logger}
+	}
+	return h.authSvc
 }
 
 // captureMailer recovers the generated code so the admin envelope can include
@@ -40,8 +48,7 @@ func (h *Handler) handleMagicCode(w http.ResponseWriter, r *http.Request, a *aut
 	}
 	code := ""
 	svc := h.service()
-	svc.Mailer = captureMailer{&code}
-	if err := svc.SendMagicCode(r.Context(), a.appID, email); err != nil {
+	if err := svc.SendMagicCodeWithMailer(r.Context(), a.appID, email, captureMailer{&code}); err != nil {
 		h.logger().Error("adminapi: send magic code", "err", err)
 		writeErr(w, http.StatusInternalServerError, "could not create magic code")
 		return
@@ -187,22 +194,14 @@ func (h *Handler) handleRefreshTokens(w http.ResponseWriter, r *http.Request, a 
 		userID = providedID
 	}
 
-	token := ""
-	if created {
-		if err := h.createUser(ctx, a, userID, email, extra); err != nil {
-			h.logger().Error("adminapi: create user", "err", err)
-			writeErr(w, http.StatusInternalServerError, "could not create user")
-			return
-		}
-	}
-	token, err := h.mintRefreshToken(ctx, a, userID)
+	resolvedID, token, created, err := h.createOrFindUserAndMintToken(ctx, a, userID, email, extra, created)
 	if err != nil {
 		h.logger().Error("adminapi: mint token", "err", err)
 		writeErr(w, http.StatusInternalServerError, "could not create refresh token")
 		return
 	}
 
-	user := map[string]any{"id": platform.UUIDToStr(userID)}
+	user := map[string]any{"id": platform.UUIDToStr(resolvedID)}
 	if email != "" || created {
 		user["type"] = "user"
 	}

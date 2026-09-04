@@ -271,6 +271,15 @@ func encodeCursor(eid, attrID string, value any) string {
 	return string(b)
 }
 
+// encodeServerCreatedAtCursor preserves the frozen v1 cursor tuple for the
+// built-in order: [entity-id, id-attr-id, entity-id, epoch-millis]. The
+// fourth component is required to continue after the cursor entity has been
+// deleted; the first three retain the ordinary cursor identity shape.
+func encodeServerCreatedAtCursor(eid, idAttrID string, createdAtMillis int64) string {
+	b, _ := json.Marshal([]any{eid, idAttrID, eid, createdAtMillis})
+	return string(b)
+}
+
 func decodeCursor(v any) ([]any, error) {
 	switch c := v.(type) {
 	case []any:

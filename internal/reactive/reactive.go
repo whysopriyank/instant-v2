@@ -9,6 +9,8 @@ package reactive
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -56,6 +58,13 @@ type Subscription struct {
 	Cancelled bool
 
 	mu sync.Mutex
+	// cancelCh is closed by Store.Remove. Retry timers select it so an
+	// unsubscribed subscription cannot wake a refresh after its removal.
+	cancelCh        chan struct{}
+	cancelled       atomic.Bool
+	cancelMu        sync.Mutex
+	cancelHook      func()
+	cancelHookState *retryState
 	// mat is the optional incremental-engine state (docs/reference/09-tier2-architecture.md
 	// §T2.5): materialized member lists per top-level form, seeded only by full
 	// refresh results. Guarded by mu alongside last. Zero value = disabled.
@@ -121,6 +130,15 @@ func (s *Store) Add(sub *Subscription) (string, error) {
 	if s.MaxSubsPerApp > 0 && s.appSubs[sub.AppID] >= s.MaxSubsPerApp {
 		return "", &SubLimitError{AppID: sub.AppID, Max: s.MaxSubsPerApp}
 	}
+	if sub.cancelCh == nil || sub.cancelled.Load() {
+		sub.cancelCh = make(chan struct{})
+		sub.cancelled.Store(false)
+		sub.Cancelled = false
+		sub.cancelMu.Lock()
+		sub.cancelHook = nil
+		sub.cancelHookState = nil
+		sub.cancelMu.Unlock()
+	}
 	s.nextID++
 	if sub.ID == "" {
 		sub.ID = fmt.Sprintf("sub-%d", s.nextID)
@@ -141,9 +159,9 @@ func (s *Store) Add(sub *Subscription) (string, error) {
 // Remove tears down a subscription.
 func (s *Store) Remove(id string) bool {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	sub, ok := s.byID[id]
 	if !ok {
+		s.mu.Unlock()
 		return false
 	}
 	delete(s.byID, id)
@@ -159,6 +177,21 @@ func (s *Store) Remove(id string) bool {
 		s.appSubs[sub.AppID]--
 	}
 	sub.Cancelled = true
+	sub.cancelled.Store(true)
+	if sub.cancelCh != nil {
+		close(sub.cancelCh)
+	}
+	sub.cancelMu.Lock()
+	cancelHook := sub.cancelHook
+	sub.cancelHook = nil
+	sub.cancelHookState = nil
+	sub.cancelMu.Unlock()
+	s.mu.Unlock()
+	// Invoke outside Store's lock: the retry callback takes the notifier lock
+	// and must never make removal contend with registry snapshots.
+	if cancelHook != nil {
+		cancelHook()
+	}
 	return true
 }
 
@@ -196,13 +229,91 @@ type Notifier struct {
 	// detached together by drainPass. Absent entry means unknown changes and
 	// full recompute. Guarded by mu; changes.go owns accumulation.
 	pendingCh map[string][]Change
+	// pendingAttempt records how many failed attempts preceded a due retry.
+	// Zero means the first refresh attempt; a retry timer transfers its
+	// failure count here when it makes work due.
+	pendingAttempt map[string]int
+	// retries owns at most one timer per subscription. A timer callback moves
+	// its latest state back to pending; it never creates a second timer.
+	retries map[string]*retryState
 
-	mu   sync.Mutex
-	wake chan struct{}
-	once sync.Once
+	mu    sync.Mutex
+	wake  chan struct{}
+	once  sync.Once
+	clock retryClock
+	// retryJitter is package-private so tests can inject zero jitter. Production
+	// uses stableRetryJitter, derived only from the non-secret subscription ID.
+	retryJitter func(string, time.Duration) time.Duration
 
 	gauge atomic.Int64 // pending refreshes; lock-free backpressure signal
 }
+
+// retryTimer and retryClock are the smallest scheduler seam needed to test
+// retry deadlines without wall-clock sleeps. The production implementation
+// delegates to time.AfterFunc; tests provide a manually advanced clock.
+type retryTimer interface {
+	Stop() bool
+}
+
+type retryClock interface {
+	AfterFunc(time.Duration, func()) retryTimer
+}
+
+type systemRetryClock struct{}
+
+func (systemRetryClock) AfterFunc(d time.Duration, f func()) retryTimer {
+	return time.AfterFunc(d, f)
+}
+
+type retryState struct {
+	txID     int64
+	changes  []Change
+	failures int
+	sub      *Subscription
+	timer    retryTimer
+	ctx      context.Context
+	done     chan struct{}
+}
+
+var retryDelays = [...]time.Duration{
+	100 * time.Millisecond,
+	200 * time.Millisecond,
+	400 * time.Millisecond,
+	800 * time.Millisecond,
+	1600 * time.Millisecond,
+	3200 * time.Millisecond,
+	5 * time.Second,
+}
+
+func retryDelay(failures int) time.Duration {
+	if failures < 1 {
+		failures = 1
+	}
+	i := failures - 1
+	if i >= len(retryDelays) {
+		i = len(retryDelays) - 1
+	}
+	return retryDelays[i]
+}
+
+// stableRetryJitter intentionally uses only the subscription identity, not
+// query data or credentials. The resulting factor is stable for that
+// subscription and lies in [0.8, 1.2], with the final policy capped at 5s.
+func stableRetryJitter(id string, base time.Duration) time.Duration {
+	sum := sha256.Sum256([]byte(id))
+	v := binary.BigEndian.Uint64(sum[:8])
+	factor := 0.8 + 0.4*(float64(v)/float64(^uint64(0)))
+	d := time.Duration(float64(base) * factor)
+	if d > retryDelays[len(retryDelays)-1] {
+		return retryDelays[len(retryDelays)-1]
+	}
+	if d < time.Nanosecond {
+		return time.Nanosecond
+	}
+	return d
+}
+
+func (s *Subscription) isCancelled() bool { return s.cancelled.Load() }
 
 // QueueDepth reports how many subscriptions currently await a refresh. The
 // WAL invalidator can poll this as a backpressure gauge (e.g. log or shed
@@ -280,6 +391,7 @@ func (n *Notifier) Run(ctx context.Context) {
 	if log == nil {
 		log = slog.Default()
 	}
+	defer n.cancelAllRetries()
 	n.once.Do(func() { n.wake = make(chan struct{}, 1) })
 	for {
 		select {
@@ -290,6 +402,184 @@ func (n *Notifier) Run(ctx context.Context) {
 		for n.drainPass(ctx, log) {
 		}
 	}
+}
+
+func (n *Notifier) signalWake() {
+	n.once.Do(func() { n.wake = make(chan struct{}, 1) })
+	select {
+	case n.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (n *Notifier) retryClock() retryClock {
+	if n.clock != nil {
+		return n.clock
+	}
+	return systemRetryClock{}
+}
+
+func (n *Notifier) scheduleRetry(ctx context.Context, sub *Subscription, txID int64, changes []Change, failures int) {
+	if ctx.Err() != nil || sub.isCancelled() {
+		return
+	}
+	if len(changes) > maxTrackedChanges {
+		changes = nil
+	}
+
+	n.mu.Lock()
+	if n.retries == nil {
+		n.retries = map[string]*retryState{}
+	}
+	// A notification can arrive while Refresh is running. Fold that newer
+	// epoch into the one retry state, so the timer retries the latest tx once.
+	if pendingTx, ok := n.pending[sub.ID]; ok {
+		if pendingTx > txID {
+			txID = pendingTx
+		}
+		if n.pendingCh == nil {
+			changes = nil
+		} else if pendingChanges, known := n.pendingCh[sub.ID]; !known {
+			changes = nil
+		} else {
+			changes = mergeRetryChanges(changes, pendingChanges)
+		}
+		delete(n.pending, sub.ID)
+		delete(n.pendingCh, sub.ID)
+		if n.pendingAttempt != nil {
+			delete(n.pendingAttempt, sub.ID)
+		}
+		n.gauge.Add(-1)
+	}
+	if existing, ok := n.retries[sub.ID]; ok {
+		if txID > existing.txID {
+			existing.txID = txID
+		}
+		existing.changes = mergeRetryChanges(existing.changes, changes)
+		n.mu.Unlock()
+		return
+	}
+
+	state := &retryState{
+		txID:     txID,
+		changes:  changes,
+		failures: failures,
+		sub:      sub,
+		ctx:      ctx,
+		done:     make(chan struct{}),
+	}
+	delay := retryDelay(failures)
+	jitter := n.retryJitter
+	if jitter == nil {
+		jitter = stableRetryJitter
+	}
+	delay = jitter(sub.ID, delay)
+	if delay > retryDelays[len(retryDelays)-1] {
+		delay = retryDelays[len(retryDelays)-1]
+	}
+	if delay < time.Nanosecond {
+		delay = time.Nanosecond
+	}
+	state.timer = n.retryClock().AfterFunc(delay, func() {
+		n.retryDue(sub.ID, state)
+	})
+	n.retries[sub.ID] = state
+	sub.cancelMu.Lock()
+	if sub.cancelled.Load() {
+		delete(n.retries, sub.ID)
+		sub.cancelMu.Unlock()
+		state.timer.Stop()
+		n.mu.Unlock()
+		return
+	}
+	sub.cancelHookState = state
+	sub.cancelHook = func() { n.cancelRetry(sub.ID, state) }
+	sub.cancelMu.Unlock()
+	n.mu.Unlock()
+
+	go n.watchRetryCancellation(state)
+}
+
+func (n *Notifier) watchRetryCancellation(state *retryState) {
+	select {
+	case <-state.ctx.Done():
+		n.cancelRetry(state.sub.ID, state)
+	case <-state.sub.cancelCh:
+		n.cancelRetry(state.sub.ID, state)
+	case <-state.done:
+	}
+}
+
+func (n *Notifier) retryDue(id string, state *retryState) {
+	n.mu.Lock()
+	if current, ok := n.retries[id]; !ok || current != state {
+		n.mu.Unlock()
+		return
+	}
+	delete(n.retries, id)
+	n.clearCancelHook(state)
+	close(state.done)
+	if state.ctx.Err() != nil || state.sub.isCancelled() {
+		n.mu.Unlock()
+		return
+	}
+	if n.pending == nil {
+		n.pending = map[string]int64{}
+	}
+	if n.pendingAttempt == nil {
+		n.pendingAttempt = map[string]int{}
+	}
+	n.pending[id] = state.txID
+	n.pendingAttempt[id] = state.failures
+	if state.changes == nil {
+		delete(n.pendingCh, id)
+	} else {
+		if n.pendingCh == nil {
+			n.pendingCh = map[string][]Change{}
+		}
+		n.pendingCh[id] = state.changes
+	}
+	n.gauge.Add(1)
+	n.mu.Unlock()
+	n.signalWake()
+}
+
+func (n *Notifier) cancelRetry(id string, state *retryState) {
+	n.mu.Lock()
+	current, ok := n.retries[id]
+	if !ok || current != state {
+		n.mu.Unlock()
+		return
+	}
+	delete(n.retries, id)
+	if state.timer != nil {
+		state.timer.Stop()
+	}
+	n.clearCancelHook(state)
+	close(state.done)
+	n.mu.Unlock()
+}
+
+func (n *Notifier) cancelAllRetries() {
+	n.mu.Lock()
+	for id, state := range n.retries {
+		delete(n.retries, id)
+		if state.timer != nil {
+			state.timer.Stop()
+		}
+		n.clearCancelHook(state)
+		close(state.done)
+	}
+	n.mu.Unlock()
+}
+
+func (n *Notifier) clearCancelHook(state *retryState) {
+	state.sub.cancelMu.Lock()
+	if state.sub.cancelHookState == state {
+		state.sub.cancelHook = nil
+		state.sub.cancelHookState = nil
+	}
+	state.sub.cancelMu.Unlock()
 }
 
 // drainPass processes one snapshot of the pending set through a bounded
@@ -305,8 +595,10 @@ func (n *Notifier) drainPass(ctx context.Context, log *slog.Logger) bool {
 	}
 	batch := n.pending
 	batchChanges := n.pendingCh
+	batchAttempts := n.pendingAttempt
 	n.pending = map[string]int64{}
 	n.pendingCh = nil
+	n.pendingAttempt = nil
 	n.gauge.Add(-int64(len(batch)))
 	n.mu.Unlock()
 
@@ -328,7 +620,7 @@ func (n *Notifier) drainPass(ctx context.Context, log *slog.Logger) bool {
 		}
 		go func(id string, txID int64) {
 			defer func() { <-sem; wg.Done() }()
-			n.refreshOne(ctx, log, id, txID, batchChanges[id])
+			n.refreshOneAttempt(ctx, log, id, txID, batchChanges[id], batchAttempts[id])
 		}(id, txID)
 	}
 	wg.Wait()
@@ -336,25 +628,28 @@ func (n *Notifier) drainPass(ctx context.Context, log *slog.Logger) bool {
 }
 
 func (n *Notifier) refreshOne(ctx context.Context, log *slog.Logger, id string, txID int64, changes []Change) {
+	n.refreshOneAttempt(ctx, log, id, txID, changes, 0)
+}
+
+func (n *Notifier) refreshOneAttempt(ctx context.Context, log *slog.Logger, id string, txID int64, changes []Change, failures int) {
 	// Covers requery/splice + the synchronous Emit → group fanout, so one
 	// waterfall span shows query cost and per-member dispatch together.
 	ctx, span := tracing.Tracer.Start(ctx, "notifier.refresh")
 	defer span.End()
 	sub, ok := n.Store.Get(id)
-	if !ok || sub.Cancelled || txID <= sub.TxID.Load() {
+	if ctx.Err() != nil || !ok || sub.isCancelled() || txID <= sub.TxID.Load() {
 		return
 	}
 	result, err := n.refreshResult(ctx, sub, changes)
 	if err != nil {
 		log.Error("reactive: refresh failed", "sub", id, "err", err)
-		// Re-arm the invalidation: this batch already left `pending`, so
-		// without re-enqueue a transient read-pool/query error would leave
-		// every subscriber of this sub stale until an unrelated commit
-		// happened to re-dirty it. Re-enqueue with the SAME txID — watermark
-		// dedupe makes it a no-op if a newer commit already won. Run takes
-		// the re-enqueued work on its next drain pass. Change knowledge
-		// degrades to unknown (nil), forcing a full refresh for the retry.
-		n.enqueue(sub.AppID, []*Subscription{sub}, txID, nil)
+		// A failed refresh is re-armed by one bounded timer. Any newer
+		// invalidation that arrived while this refresh was running is folded
+		// into the same timer-owned state by scheduleRetry.
+		n.scheduleRetry(ctx, sub, txID, changes, failures+1)
+		return
+	}
+	if ctx.Err() != nil || sub.isCancelled() {
 		return
 	}
 

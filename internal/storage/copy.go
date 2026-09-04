@@ -42,31 +42,33 @@ func (d *DB) CopyTriples(ctx context.Context, appID [16]byte, cat *platform.Attr
 	}
 
 	rows := make([][]any, 0, len(ts))
-	for _, t := range ts {
-		enc, err := triple.EncodeValue(vOrNull(t.V))
+	for i, t := range ts {
+		// Preserve nil as the JSON null literal. Converting it to the string
+		// "null" would encode a JSON string and change value_md5 semantics.
+		enc, err := triple.EncodeValue(t.V)
 		if err != nil {
 			return 0, err
 		}
-		rows = append(rows, []any{uuidString(t.E), uuidString(t.A), string(enc)})
+		rows = append(rows, []any{uuidString(t.E), uuidString(t.A), string(enc), int64(i)})
 	}
 
 	var n int64
 	err := d.WithTx(ctx, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `
 			CREATE TEMP TABLE staging_triples(
-				entity_id uuid, attr_id uuid, value jsonb
+				entity_id uuid, attr_id uuid, value jsonb, input_ord bigint NOT NULL
 			) ON COMMIT DROP`); err != nil {
 			return err
 		}
 		if _, err := tx.CopyFrom(ctx,
 			pgx.Identifier{"staging_triples"},
-			[]string{"entity_id", "attr_id", "value"},
+			[]string{"entity_id", "attr_id", "value", "input_ord"},
 			&copySource{rows: rows}); err != nil {
 			return fmt.Errorf("copy: %w", err)
 		}
 		tag, err := tx.Exec(ctx, `
 			WITH enhanced AS (
-				SELECT s.entity_id, s.attr_id, s.value,
+				SELECT s.entity_id, s.attr_id, s.value, s.input_ord,
 				       md5(s.value::text)   AS value_md5,
 				       (a.cardinality='one') AS ea,
 				       (a.value_type ='ref') AS eav,
@@ -83,7 +85,7 @@ func (d *DB) CopyTriples(ctx context.Context, appID [16]byte, cat *platform.Attr
 				SELECT $1::uuid AS app_id, * FROM (
 					SELECT DISTINCT ON (entity_id, attr_id) *
 					  FROM enhanced WHERE ea
-					 ORDER BY entity_id, attr_id
+					 ORDER BY entity_id, attr_id, input_ord DESC
 				) ea_rows
 			) upserts
 			ON CONFLICT (app_id, entity_id, attr_id) WHERE ea DO UPDATE
@@ -120,13 +122,6 @@ func (d *DB) CopyTriples(ctx context.Context, appID [16]byte, cat *platform.Attr
 		return 0, err
 	}
 	return n, nil
-}
-
-func vOrNull(v any) any {
-	if v == nil {
-		return "null" // jsonb null literal text
-	}
-	return v
 }
 
 // uuidString renders the canonical hyphenated lowercase form COPY expects.

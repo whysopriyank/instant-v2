@@ -45,6 +45,9 @@ var (
 	ErrExpiredCode  = errors.New("authn: expired magic code")
 	ErrBadToken     = errors.New("authn: unknown refresh token")
 	ErrSignupDenied = errors.New("authn: signup denied by permissions")
+	// ErrMagicCodeDeliveryUnavailable means no delivery adapter is configured.
+	// It is returned before any code is generated or persisted.
+	ErrMagicCodeDeliveryUnavailable = errors.New("authn: magic code delivery unavailable")
 	// ErrLocked is returned while an (app,email) pair is cooling down after
 	// repeated failed magic-code verifications. Callers surface it as 429.
 	ErrLocked = errors.New("authn: too many failed attempts; try later")
@@ -96,7 +99,7 @@ type Service struct {
 	DB       *storage.DB
 	Pool     *pgxpool.Pool
 	Catalogs *platform.CatalogCache
-	Mailer   Mailer // nil → NO delivery and no code logging; only a no-mailer notice fires (dev/self-host default)
+	Mailer   Mailer // nil → delivery unavailable; codes are neither generated nor persisted
 	Logger   *slog.Logger
 
 	// CodeTTL overrides DefaultMagicCodeTTL (tests); per-app override pending
@@ -104,8 +107,9 @@ type Service struct {
 	CodeTTL    time.Duration
 	RulesForFn func(ctx context.Context, appID [16]byte) (*perms.RuleDoc, error)
 
-	mu       sync.Mutex
-	attrByID map[[16]byte]systemAttrs // keyed by appID
+	mu          sync.Mutex
+	attrByID    map[[16]byte]systemAttrs // keyed by appID
+	attrVersion map[[16]byte]uint64      // invalidation generation keyed by appID
 
 	// Providers overrides the builtin oauth registry (tests; custom OIDC
 	// clients land with apps.rules persistence in Phase 5).
@@ -120,7 +124,8 @@ type Service struct {
 	jwks jwksCache
 }
 
-// Mailer delivers magic codes; self-hosted installs may no-op.
+// Mailer delivers magic codes. A nil Mailer is an unavailable delivery
+// configuration, not a successful no-op.
 type Mailer interface {
 	SendMagicCode(ctx context.Context, email, code string) error
 }
@@ -137,20 +142,74 @@ type systemAttrs struct {
 	labels           map[[16]byte]string
 }
 
-func (s *Service) attrs(ctx context.Context, appID [16]byte) (systemAttrs, error) {
-	s.mu.Lock()
-	if a, ok := s.attrByID[appID]; ok {
-		s.mu.Unlock()
-		return a, nil
+// InvalidateAttrs drops the cached systemAttrs and label metadata for appID,
+// forcing the next auth operation to reload the latest catalog and label map.
+func (s *Service) InvalidateAttrs(appID [16]byte) {
+	if s == nil {
+		return
 	}
-	s.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.attrVersion == nil {
+		s.attrVersion = map[[16]byte]uint64{}
+	}
+	s.attrVersion[appID]++
+	if s.attrByID != nil {
+		delete(s.attrByID, appID)
+	}
+}
 
+func (s *Service) attrs(ctx context.Context, appID [16]byte) (systemAttrs, error) {
+	return s.attrsWithLoader(ctx, appID, s.loadAttrs)
+}
+
+// attrsWithLoader contains the generation-aware cache loop. The loader
+// argument keeps the ordering contract directly testable without adding a
+// production callback or replacing the real storage path; attrs always uses
+// loadAttrs above.
+func (s *Service) attrsWithLoader(
+	ctx context.Context,
+	appID [16]byte,
+	load func(context.Context, [16]byte) (systemAttrs, error),
+) (systemAttrs, error) {
+	for {
+		s.mu.Lock()
+		if a, ok := s.attrByID[appID]; ok {
+			s.mu.Unlock()
+			return a, nil
+		}
+		version := s.attrVersion[appID]
+		s.mu.Unlock()
+
+		out, err := load(ctx, appID)
+		if err != nil {
+			return systemAttrs{}, err
+		}
+		if err := validateSystemAttrs(out); err != nil {
+			return systemAttrs{}, err
+		}
+		if s.cacheAttrsIfCurrent(appID, version, out) {
+			return out, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return systemAttrs{}, err
+		}
+	}
+}
+
+func (s *Service) loadAttrs(ctx context.Context, appID [16]byte) (systemAttrs, error) {
 	var out systemAttrs
 	err := s.DB.WithTx(ctx, func(tx pgx.Tx) error {
 		get := func(etype, label string, unique, indexed bool) ([16]byte, error) {
 			at, err := platform.GetOrCreateAttr(ctx, tx, appID,
 				etype, label, "blob", "one", unique, indexed)
 			if err != nil {
+				return [16]byte{}, err
+			}
+			if err := validateSystemAttr(appID, at, systemAttrSpec{
+				etype: etype, label: label, valueType: "blob", cardinality: "one",
+				unique: unique, indexed: indexed,
+			}); err != nil {
 				return [16]byte{}, err
 			}
 			return at.ID, nil
@@ -162,6 +221,11 @@ func (s *Service) attrs(ctx context.Context, appID [16]byte) (systemAttrs, error
 		refAt, e := platform.GetOrCreateAttr(ctx, tx, appID,
 			"$userRefreshTokens", "$user", "ref", "one", false, false)
 		if e != nil {
+			return e
+		}
+		if e = validateSystemAttr(appID, refAt, systemAttrSpec{
+			etype: "$userRefreshTokens", label: "$user", valueType: "ref", cardinality: "one",
+		}); e != nil {
 			return e
 		}
 		out.tokenUser = refAt.ID
@@ -198,13 +262,77 @@ func (s *Service) attrs(ctx context.Context, appID [16]byte) (systemAttrs, error
 			out.labels[at.ID] = *at.Label
 		}
 	}
+	return out, nil
+}
+
+type systemAttrSpec struct {
+	etype, label    string
+	valueType       string
+	cardinality     string
+	unique, indexed bool
+}
+
+// validateSystemAttr prevents a pre-existing attr with the right identity but
+// incompatible storage metadata from being adopted by an auth flow. Such an
+// attr would otherwise make lookups and writes silently use the wrong
+// cardinality, value type, or uniqueness/index semantics.
+func validateSystemAttr(appID [16]byte, at platform.Attr, spec systemAttrSpec) error {
+	if at.ID == ([16]byte{}) || at.AppID != appID || at.Etype == nil || at.Label == nil ||
+		*at.Etype != spec.etype || *at.Label != spec.label || at.ValueType != spec.valueType ||
+		at.Cardinality != spec.cardinality || at.IsUnique != spec.unique || at.IsIndexed != spec.indexed {
+		return fmt.Errorf("authn: system attribute %s/%s has incompatible schema", spec.etype, spec.label)
+	}
+	return nil
+}
+
+// validateSystemAttrs is the cache admission gate. A loader must return every
+// required auth id and its corresponding label map entry before the snapshot
+// can be published. This keeps nil-error partial results from poisoning the
+// app cache and rejects duplicate ids that would alias two system fields.
+func validateSystemAttrs(a systemAttrs) error {
+	ids := []struct {
+		name  string
+		id    [16]byte
+		label string
+	}{
+		{"$userRefreshTokens.hashedToken", a.tokenHashedToken, "hashedToken"},
+		{"$userRefreshTokens.$user", a.tokenUser, "$user"},
+		{"$magicCodes.codeHash", a.magicCodeHash, "codeHash"},
+		{"$magicCodes.email", a.magicCodeEmail, "email"},
+		{"$users.email", a.userEmail, "email"},
+		{"$users.type", a.userType, "type"},
+		{"$users.id", a.userID, "id"},
+	}
+	if a.labels == nil {
+		return errors.New("authn: system attribute labels are missing")
+	}
+	seen := make(map[[16]byte]string, len(ids))
+	for _, item := range ids {
+		if item.id == ([16]byte{}) {
+			return fmt.Errorf("authn: system attribute %s is missing", item.name)
+		}
+		if previous, ok := seen[item.id]; ok {
+			return fmt.Errorf("authn: system attributes %s and %s alias id", previous, item.name)
+		}
+		seen[item.id] = item.name
+		if label, ok := a.labels[item.id]; !ok || label != item.label {
+			return fmt.Errorf("authn: system attribute %s has missing or mismatched label", item.name)
+		}
+	}
+	return nil
+}
+
+func (s *Service) cacheAttrsIfCurrent(appID [16]byte, version uint64, out systemAttrs) bool {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.attrVersion[appID] != version {
+		return false
+	}
 	if s.attrByID == nil {
 		s.attrByID = map[[16]byte]systemAttrs{}
 	}
 	s.attrByID[appID] = out
-	s.mu.Unlock()
-	return out, nil
+	return true
 }
 
 func (s *Service) catalog(ctx context.Context, appID [16]byte) (*platform.AttrCatalog, error) {
@@ -344,9 +472,21 @@ func be32(b []byte) uint32 {
 }
 func be16(b []byte) uint16 { return uint16(b[0])<<8 | uint16(b[1]) }
 
-// SendMagicCode creates a one-time code for email and hands it to the Mailer.
+// SendMagicCode creates a one-time code for email and hands it to the configured Mailer.
 // HTTP contract: POST /runtime/auth/send_magic_code → {sent: true}.
 func (s *Service) SendMagicCode(ctx context.Context, appID [16]byte, email string) error {
+	return s.SendMagicCodeWithMailer(ctx, appID, email, s.Mailer)
+}
+
+// SendMagicCodeWithMailer creates a one-time code for email and hands it to the supplied
+// mailer override without mutating the receiver's configured Mailer.
+func (s *Service) SendMagicCodeWithMailer(ctx context.Context, appID [16]byte, email string, mailer Mailer) error {
+	// A nil mailer cannot deliver the code. Fail before touching throttle state,
+	// generating a code, or persisting a one-time credential. This prevents a
+	// successful-looking response from leaving an unverifiable code behind.
+	if mailer == nil {
+		return ErrMagicCodeDeliveryUnavailable
+	}
 	// Resend throttle: silently honor requests inside the cooldown window
 	// (the previously issued code remains valid) so clients see the same
 	// contract while mail-bombing stays impossible. No enumeration signal.
@@ -376,12 +516,7 @@ func (s *Service) SendMagicCode(ctx context.Context, appID [16]byte, email strin
 	if err != nil {
 		return err
 	}
-	if s.Mailer != nil {
-		return s.Mailer.SendMagicCode(ctx, email, code)
-	}
-	s.logger().Info("authn: magic code generated (no mailer configured)",
-		"app-id", platform.UUIDToStr(appID), "email", email)
-	return nil
+	return mailer.SendMagicCode(ctx, email, code)
 }
 
 // VerifyRefreshToken ports app-user-model/get-by-refresh-token: hash the raw

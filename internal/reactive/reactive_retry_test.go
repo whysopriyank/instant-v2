@@ -9,17 +9,19 @@ import (
 	"testing"
 )
 
-// TestRefreshFailureReenqueues pins the re-arm discipline in refreshOne:
-// a transient Refresh failure must NOT drop the invalidation. The batch has
-// already left `pending` when the failure surfaces, so without re-enqueue the
-// subscriber stays stale until an unrelated commit happens to re-dirty it.
-func TestRefreshFailureReenqueues(t *testing.T) {
+// TestRefreshFailureDoesNotHotLoop pins the first half of P-004's retry
+// contract: a failed refresh remains recoverable, but is not immediately
+// re-enqueued into the same scheduler pass.
+func TestRefreshFailureDoesNotHotLoop(t *testing.T) {
 	ctx := context.Background()
 	store := NewStore()
+	clock := &fakeRetryClock{}
 
 	var calls atomic.Int32
 	n := &Notifier{
-		Store: store,
+		Store:       store,
+		clock:       clock,
+		retryJitter: zeroRetryJitter,
 		Refresh: func(ctx context.Context, sub *Subscription) (json.RawMessage, error) {
 			if calls.Add(1) == 1 {
 				return nil, errors.New("pg: pool exhausted")
@@ -38,6 +40,7 @@ func TestRefreshFailureReenqueues(t *testing.T) {
 	if _, err := store.Add(sub); err != nil {
 		t.Fatalf("store.Add: %v", err)
 	}
+	t.Cleanup(func() { store.Remove(sub.ID) })
 
 	n.Notify(ctx, "a", []string{"t1"}, 5)
 	if !n.drainPass(ctx, slog.Default()) {
@@ -50,27 +53,11 @@ func TestRefreshFailureReenqueues(t *testing.T) {
 		t.Fatalf("failed refresh advanced watermark to %d", sub.TxID.Load())
 	}
 
-	// The failure must leave the sub re-armed for a retry.
-	n.mu.Lock()
-	_, armed := n.pending["s1"]
-	n.mu.Unlock()
-	if !armed {
-		t.Fatal("failed refresh was dropped: subscriber left stale until an unrelated commit")
-	}
-
-	// Next drain retries; success advances the watermark.
-	if !n.drainPass(ctx, slog.Default()) {
-		t.Fatal("re-enqueued entry lost on second drain")
-	}
-	if got := calls.Load(); got != 2 {
-		t.Fatalf("retry did not re-run Refresh (calls=%d)", got)
-	}
-	if got := sub.TxID.Load(); got != 5 {
-		t.Fatalf("after successful retry TxID = %d, want 5", got)
-	}
-
-	// And a third drain is idle: no hot spin left behind.
+	// A second immediate pass must not retry. The retry is timer-owned.
 	if n.drainPass(ctx, slog.Default()) {
-		t.Fatal("pending not drained clean after successful retry")
+		t.Fatal("failed refresh hot-looped in the next scheduler pass")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("refresh calls after immediate second pass = %d, want 1", got)
 	}
 }

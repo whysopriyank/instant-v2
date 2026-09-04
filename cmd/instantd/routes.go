@@ -15,6 +15,7 @@ import (
 	"github.com/instant-v2/instant-v2/internal/backup"
 	"github.com/instant-v2/instant-v2/internal/config"
 	"github.com/instant-v2/instant-v2/internal/instaql"
+	"github.com/instant-v2/instant-v2/internal/perms"
 	"github.com/instant-v2/instant-v2/internal/platform"
 	"github.com/instant-v2/instant-v2/internal/ratelimit"
 	"github.com/instant-v2/instant-v2/internal/reactive"
@@ -29,6 +30,12 @@ func (a *appRuntime) mountRoutes(ctx context.Context, db *sql.DB, mux *http.Serv
 		Pool:     a.pool,
 		Catalogs: a.cats,
 		Logger:   a.logger,
+		// Signup authorization must resolve the persisted per-app rules. Keep
+		// this on the same catalog cache used by queries/transacts so an
+		// invalidation cannot leave auth with a stale $users.create decision.
+		RulesForFn: func(ctx context.Context, appID [16]byte) (*perms.RuleDoc, error) {
+			return a.cats.RuleDocFor(ctx, platform.UUIDToStr(appID))
+		},
 	}
 	startAuthMaintenance(ctx, authSvc, a.logger)
 	// Shared per-app traffic budgets (docs/03 §9): HTTP middleware and the
@@ -110,6 +117,15 @@ func (a *appRuntime) mountRoutes(ctx context.Context, db *sql.DB, mux *http.Serv
 	mux.Handle("POST /runtime/framework/query", runtimeH)
 	mux.Handle("GET /runtime/openid-configuration", runtimeH)
 	mux.Handle("GET /runtime/{app_id}/.well-known/openid-configuration", runtimeH)
+	// OAuth has its own exact paths and methods. Registering these before the
+	// auth prefix makes the complete start -> callback -> token lifecycle
+	// reachable through the production mux while preserving method-specific
+	// 405 handling from net/http.ServeMux.
+	authH := &authn.Handler{Service: authSvc}
+	mux.Handle("GET /runtime/oauth/start", authH)
+	mux.Handle("GET /runtime/oauth/callback", authH)
+	mux.Handle("POST /runtime/oauth/token", authH)
+	mux.Handle("POST /runtime/oauth/id_token", authH)
 	mux.Handle("POST /runtime/auth/", &authn.Handler{Service: authSvc})
 
 	mux.Handle("/admin/", &adminapi.Handler{
@@ -117,6 +133,7 @@ func (a *appRuntime) mountRoutes(ctx context.Context, db *sql.DB, mux *http.Serv
 		DB:       a.st,
 		Catalogs: a.cats,
 		Logger:   a.logger,
+		Auth:     authSvc,
 		OnCommit: func(ctx context.Context, appID [16]byte, attrIDs []string, txID int64, attrsChanged bool) {
 			// Admin-plane writes must invalidate live subscribers on
 			// every node. Detach: the request context dies when

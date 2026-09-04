@@ -200,6 +200,42 @@ func FetchTx(ctx context.Context, tx pgx.Tx, appID [16]byte, f FetchFilter) ([]E
 	return fetch(ctx, tx, appID, f)
 }
 
+// ValueMD5sTx returns the exact fingerprints PostgreSQL will assign to values
+// inserted through the triple write path. Computing them in one statement
+// preserves jsonb numeric normalization (for example 1e21) and numeric scale.
+func ValueMD5sTx(ctx context.Context, tx pgx.Tx, values []any) ([]string, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	encoded, err := triple.EncodeValues(values)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT md5(input.value::text)
+		  FROM unnest($1::jsonb[]) WITH ORDINALITY AS input(value, ord)
+		 ORDER BY input.ord`, encoded)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]string, 0, len(values))
+	for rows.Next() {
+		var md5 string
+		if err := rows.Scan(&md5); err != nil {
+			return nil, err
+		}
+		out = append(out, md5)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(out) != len(values) {
+		return nil, fmt.Errorf("storage: fingerprint count %d, want %d", len(out), len(values))
+	}
+	return out, nil
+}
+
 // EAPair is one exact (entity, attr) probe for pair-scoped reads.
 type EAPair struct {
 	E [16]byte

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -77,8 +78,10 @@ type Aggregate struct {
 
 // entity is an in-memory label→value map plus its id.
 type entity struct {
-	ID     string
-	Fields map[string]any
+	ID                 string
+	Fields             map[string]any
+	ServerCreatedAt    time.Time
+	HasServerCreatedAt bool
 }
 
 // Run executes the query and shapes the envelope. All levels' entities land in
@@ -110,6 +113,15 @@ func uuidToStr(u [16]byte) string {
 	return string(out)
 }
 
+func encodeEntityCursor(e entity, o *Options, idAttr *platform.Attr) string {
+	order := effectiveOrder(o)
+	if order != nil && order.K == "serverCreatedAt" &&
+		idAttr != nil && e.HasServerCreatedAt {
+		return encodeServerCreatedAtCursor(e.ID, idAttr.UUID(), e.ServerCreatedAt.UnixMilli())
+	}
+	return encodeCursor(e.ID, "", nil)
+}
+
 func (x *Executor) runForm(ctx context.Context, f *Form, cat *platform.AttrCatalog, appID string, parentRef *refLink, res *Result, rootEtypes map[string]bool, isRoot bool) error {
 	// View gate (every level — nested etypes carry their own rules). Denied
 	// etypes surface as empty results; dynamic rules refuse non-admin
@@ -131,6 +143,7 @@ func (x *Executor) runForm(ctx context.Context, f *Form, cat *platform.AttrCatal
 	if err != nil {
 		return err
 	}
+	idAttr := cat.FindByEtypeLabel(f.Etype, "id")
 	// Aggregate counts the full matching set, pre-pagination.
 	var aggCount int64
 	if f.Options != nil && f.Options.Aggregate == "count" && (parentRef == nil || parentRef.Mode != "reverse") {
@@ -190,14 +203,18 @@ func (x *Executor) runForm(ctx context.Context, f *Form, cat *platform.AttrCatal
 	// an exact-size final page is distinguishable from a page with more rows.
 	// The sentinel is trimmed before projection and never reaches the wire.
 	pageInfo := &PageInfo{}
-	slice, hasNextPage, hasPreviousPage, err := pageEntities(entities, f.Options, f.Etype, sqlPaged)
+	orderAttrID := ""
+	if idAttr != nil {
+		orderAttrID = idAttr.UUID()
+	}
+	slice, hasNextPage, hasPreviousPage, err := pageEntities(entities, f.Options, f.Etype, sqlPaged, orderAttrID)
 	if err != nil {
 		return err
 	}
 	if needsPageInfo(f.Options) {
 		if len(slice) > 0 {
-			sc := encodeCursor(slice[0].ID, "", nil)
-			ec := encodeCursor(slice[len(slice)-1].ID, "", nil)
+			sc := encodeEntityCursor(slice[0], f.Options, idAttr)
+			ec := encodeEntityCursor(slice[len(slice)-1], f.Options, idAttr)
 			pageInfo.StartCursor = &sc
 			pageInfo.EndCursor = &ec
 		}
@@ -553,7 +570,7 @@ func encodeValueJSON(v any) (string, error) {
 func (x *Executor) loadEntities(ctx context.Context, appID string, ids []string, attrs map[string]platform.Attr) (map[string]*entity, error) {
 	out := make(map[string]*entity, len(ids))
 	rows, err := x.DB.Query(ctx, `
-		SELECT t.entity_id, t.attr_id, t.value, a.cardinality
+		SELECT t.entity_id, t.attr_id, t.value, a.cardinality, t.created_at
 		  FROM triples t JOIN attrs a ON a.id = t.attr_id
 		 WHERE t.app_id = $1::uuid
 		   AND t.entity_id = ANY($2::uuid[])`, appID, ids)
@@ -573,7 +590,8 @@ func (x *Executor) loadEntities(ctx context.Context, appID string, ids []string,
 		var eid, attrID string
 		var raw []byte
 		var cardinality string
-		if err := rows.Scan(&eid, &attrID, &raw, &cardinality); err != nil {
+		var createdAt time.Time
+		if err := rows.Scan(&eid, &attrID, &raw, &cardinality, &createdAt); err != nil {
 			return out, err
 		}
 		a, ok := attrs[attrID]
@@ -598,6 +616,10 @@ func (x *Executor) loadEntities(ctx context.Context, appID string, ids []string,
 			label = *a.Label
 		}
 		e := get(eid)
+		if a.Label != nil && *a.Label == "id" {
+			e.ServerCreatedAt = createdAt
+			e.HasServerCreatedAt = true
+		}
 		if cardinality == "many" {
 			arr, _ := e.Fields[label].([]any)
 			e.Fields[label] = append(arr, v)

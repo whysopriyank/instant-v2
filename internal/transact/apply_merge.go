@@ -130,7 +130,7 @@ func applyDeepMerge(ctx context.Context, tx pgx.Tx, db *storage.DB, appID [16]by
 
 // applyDeepMergeSequential is the compatibility path for many-cardinality
 // attrs. It intentionally mirrors the pre-batching implementation one step at
-// a time, including its first-row selection and insert semantics.
+// a time, including deterministic value_md5 base selection and insert semantics.
 func applyDeepMergeSequential(ctx context.Context, tx pgx.Tx, db *storage.DB, appID [16]byte, cat *platform.AttrCatalog, batch []Step, opts Options) error {
 	for _, st := range batch {
 		ta, err := parseTripleArgs(st, cat)
@@ -156,7 +156,13 @@ func applyDeepMergeSequential(ctx context.Context, tx pgx.Tx, db *storage.DB, ap
 		if len(rows) == 0 {
 			merged = incoming
 		} else {
-			merged = deepMergeJSON(convertNumbers(rows[0].Triple.V), incoming)
+			first := rows[0]
+			for _, row := range rows[1:] {
+				if row.MD5 < first.MD5 {
+					first = row
+				}
+			}
+			merged = deepMergeJSON(normalizedProjectionValue(first.Triple.V), incoming)
 		}
 		if err := db.SetTx(ctx, tx, appID, cat, []triple.Triple{{E: eid, A: ta.AttrID, V: merged}}, opts.OverwriteT); err != nil {
 			return err
@@ -176,6 +182,10 @@ func deepMergeJSON(dst, src any) any {
 		out[k] = v
 	}
 	for k, v := range sm {
+		if v == nil {
+			delete(out, k)
+			continue
+		}
 		if ov, ok := out[k]; ok {
 			out[k] = deepMergeJSON(ov, v)
 		} else {

@@ -4,12 +4,13 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
-	"fmt"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/instant-v2/instant-v2/internal/authn"
 	"github.com/instant-v2/instant-v2/internal/platform"
+	"github.com/instant-v2/instant-v2/internal/storage"
 	"github.com/instant-v2/instant-v2/internal/triple"
 )
 
@@ -29,33 +30,70 @@ func (h *Handler) userByEmail(ctx context.Context, a *authedReq, email string) (
 	return eid, err
 }
 
-// deleteUserTokens deletes every token entity whose $user link points at uid.
+// deleteUserTokens deletes every token entity whose $user link points at uid
+// in a single transaction journaled via RecordTransaction and notifies OnCommit.
+// Mutation topics are derived directly from DELETE ... RETURNING attr_id.
 func (h *Handler) deleteUserTokens(ctx context.Context, a *authedReq, userID [16]byte) error {
 	link := a.cat.FindByEtypeLabel("$userRefreshTokens", "$user")
 	if link == nil {
 		return nil
 	}
-	rows, err := h.Pool.Query(ctx,
-		`SELECT entity_id FROM triples WHERE app_id=$1 AND attr_id=$2 AND value=to_jsonb($3::text)`,
-		a.appID, link.ID, platform.UUIDToStr(userID))
+	var txID int64
+	mutatedAttrs := make(map[[16]byte]bool)
+	err := h.DB.WithTx(ctx, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx,
+			`SELECT entity_id FROM triples WHERE app_id=$1 AND attr_id=$2 AND value=to_jsonb($3::text)`,
+			a.appID, link.ID, platform.UUIDToStr(userID))
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		var ids [][16]byte
+		for rows.Next() {
+			var id [16]byte
+			if err := rows.Scan(&id); err != nil {
+				return err
+			}
+			ids = append(ids, id)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if len(ids) == 0 {
+			return nil
+		}
+		txID, err = storage.RecordTransaction(ctx, tx, a.appID)
+		if err != nil {
+			return err
+		}
+		delRows, err := tx.Query(ctx,
+			`DELETE FROM triples WHERE app_id=$1 AND entity_id = ANY($2::uuid[]) RETURNING attr_id`,
+			a.appID, ids)
+		if err != nil {
+			return err
+		}
+		for delRows.Next() {
+			var aID [16]byte
+			if err := delRows.Scan(&aID); err != nil {
+				delRows.Close()
+				return err
+			}
+			mutatedAttrs[aID] = true
+		}
+		delRows.Close()
+		return delRows.Err()
+	})
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
-	var ids [][16]byte
-	for rows.Next() {
-		var id [16]byte
-		if err := rows.Scan(&id); err != nil {
-			return err
+	if txID > 0 {
+		attrIDs := make([]string, 0, len(mutatedAttrs))
+		for aID := range mutatedAttrs {
+			attrIDs = append(attrIDs, platform.UUIDToStr(aID))
 		}
-		ids = append(ids, id)
+		h.notifyCommit(ctx, a.appID, txID, attrIDs, nil, false)
 	}
-	if err := rows.Err(); err != nil || len(ids) == 0 {
-		return err
-	}
-	_, err = h.Pool.Exec(ctx,
-		`DELETE FROM triples WHERE app_id=$1 AND entity_id = ANY($2::uuid[])`, a.appID, ids)
-	return err
+	return nil
 }
 
 func (h *Handler) userExists(ctx context.Context, a *authedReq, uid [16]byte) bool {
@@ -66,59 +104,191 @@ func (h *Handler) userExists(ctx context.Context, a *authedReq, uid [16]byte) bo
 	return err == nil
 }
 
-// createUser writes $users triples for a fresh admin-created user. Attr ids
-// resolve through GetOrCreateAttr — the same deterministic ids authn uses.
-func (h *Handler) createUser(ctx context.Context, a *authedReq, userID [16]byte, email string, extra map[string]any) error {
+// createOrFindUserAndMintToken atomically provisions required attrs, journals
+// user creation (when created=true) and token creation in ONE transaction via
+// RecordTransaction, and fires post-commit invalidation hooks. If token creation
+// fails, the entire transaction rolls back cleanly without leaving an orphaned user.
+// Concurrent same-email races resolve deterministically by falling back to the
+// winner's user.
+func (h *Handler) createOrFindUserAndMintToken(ctx context.Context, a *authedReq, userID [16]byte, email string, extra map[string]any, created bool) ([16]byte, string, bool, error) {
+	for attempt := 0; attempt < 3; attempt++ {
+		token, err := h.execUserAndTokenMutation(ctx, a, userID, email, extra, created)
+		if err == nil {
+			return userID, token, created, nil
+		}
+		if !isUniqueViolation(err) {
+			return userID, "", created, err
+		}
+		// On concurrent races (attribute insertion contention or email uniqueness),
+		// invalidate local catalog, re-resolve userByEmail, and retry as find.
+		h.Catalogs.Invalidate(a.appStr)
+		if cat, catErr := h.Catalogs.For(ctx, a.appStr); catErr == nil {
+			a.cat = cat
+		}
+		if email != "" {
+			eid, lookupErr := h.userByEmail(ctx, a, email)
+			if lookupErr == nil && eid != "" {
+				var resolvedID [16]byte
+				if platform.ScanUUID(eid, &resolvedID) == nil {
+					userID = resolvedID
+					created = false
+					continue
+				}
+			}
+		}
+		return userID, "", created, err
+	}
+	return userID, "", created, errors.New("concurrent user creation retries exhausted")
+}
+
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	if pgErr.Code == "P0001" && pgErr.Message == "trigger violation trg_attrs_unique_names" {
+		return true
+	}
+	if pgErr.Code != "23505" {
+		return false
+	}
+	// Only these conflicts are expected while racing another create-or-find
+	// request. A random UUID/PK or an unrelated unique index must surface as a
+	// real failure instead of being retried and eventually reported as an
+	// opaque "retries exhausted" error.
+	switch pgErr.ConstraintName {
+	case "av_ignore_nulls_index", "attrs_etype_label_unique", "attrs_reverse_etype_label_unique":
+		return true
+	default:
+		return false
+	}
+}
+
+func (h *Handler) execUserAndTokenMutation(ctx context.Context, a *authedReq, userID [16]byte, email string, extra map[string]any, created bool) (string, error) {
+	var txID int64
+	var tokenStr string
+	var attrsChanged bool
+	var attrIDs []string
+
 	err := h.DB.WithTx(ctx, func(tx pgx.Tx) error {
-		if _, _, err := h.userAttrsTx(ctx, tx, a); err != nil {
+		txCat := a.cat.Clone()
+		getAttr := func(etype, label, valueType, cardinality string, unique, indexed bool) (platform.Attr, error) {
+			attr, attrCreated, err := platform.GetOrCreateAttrWithStatus(
+				ctx, tx, a.appID, etype, label, valueType, cardinality, unique, indexed,
+			)
+			if err != nil {
+				return platform.Attr{}, err
+			}
+			attrsChanged = attrsChanged || attrCreated
+			txCat.Add(attr)
+			return attr, nil
+		}
+
+		hashedAttr, err := getAttr("$userRefreshTokens", "hashedToken", "blob", "one", true, true)
+		if err != nil {
 			return err
 		}
-		for k := range extra {
-			if isReservedUserLabel(k) {
-				continue
-			}
-			if _, err := platform.GetOrCreateAttr(ctx, tx, a.appID, "$users", k, "blob", "one", false, false); err != nil {
+
+		linkAttr, err := getAttr("$userRefreshTokens", "$user", "ref", "one", false, false)
+		if err != nil {
+			return err
+		}
+
+		var typeAttr, emailAttr platform.Attr
+		var extraAttrs []platform.Attr
+		if created {
+			typeAttr, err = getAttr("$users", "type", "blob", "one", false, false)
+			if err != nil {
 				return err
 			}
+
+			if email != "" {
+				emailAttr, err = getAttr("$users", "email", "blob", "one", true, true)
+				if err != nil {
+					return err
+				}
+			}
+
+			for k := range extra {
+				if isReservedUserLabel(k) {
+					continue
+				}
+				at, err := getAttr("$users", k, "blob", "one", false, false)
+				if err != nil {
+					return err
+				}
+				extraAttrs = append(extraAttrs, at)
+			}
 		}
+
+		txID, err = storage.RecordTransaction(ctx, tx, a.appID)
+		if err != nil {
+			return err
+		}
+
+		raw := newUUID()
+		tokenStr = platform.UUIDToStr(raw)
+		tokenEntityID := newUUID()
+
+		var ts []triple.Triple
+		if created {
+			ts = append(ts, triple.Triple{E: userID, A: typeAttr.ID, V: "user"})
+			if email != "" {
+				ts = append(ts, triple.Triple{E: userID, A: emailAttr.ID, V: email})
+			}
+			for _, at := range extraAttrs {
+				if label := at.Label; label != nil {
+					if v, ok := extra[*label]; ok {
+						ts = append(ts, triple.Triple{E: userID, A: at.ID, V: v})
+					}
+				}
+			}
+		}
+		ts = append(ts,
+			triple.Triple{E: tokenEntityID, A: hashedAttr.ID, V: authn.HashToken(tokenStr)},
+			triple.Triple{E: tokenEntityID, A: linkAttr.ID, V: platform.UUIDToStr(userID)},
+		)
+
+		if h.faultBeforeTokenCommit != nil {
+			if ferr := h.faultBeforeTokenCommit(); ferr != nil {
+				return ferr
+			}
+		}
+
+		if err := h.DB.SetTx(ctx, tx, a.appID, txCat, ts, false); err != nil {
+			return err
+		}
+
+		mutatedAttrs := map[[16]byte]bool{
+			hashedAttr.ID: true,
+			linkAttr.ID:   true,
+		}
+		if created {
+			mutatedAttrs[typeAttr.ID] = true
+			if email != "" {
+				mutatedAttrs[emailAttr.ID] = true
+			}
+			for _, at := range extraAttrs {
+				mutatedAttrs[at.ID] = true
+			}
+		}
+		attrIDs = make([]string, 0, len(mutatedAttrs))
+		for aID := range mutatedAttrs {
+			attrIDs = append(attrIDs, platform.UUIDToStr(aID))
+		}
+
 		return nil
 	})
 	if err != nil {
-		return err
-	}
-	h.Catalogs.Invalidate(a.appStr)
-	cat, err := h.Catalogs.For(ctx, a.appStr)
-	if err != nil {
-		return err
+		return "", err
 	}
 
-	var ts []triple.Triple
-	add := func(etype, label string, v any) error {
-		at := cat.FindByEtypeLabel(etype, label)
-		if at == nil {
-			return fmt.Errorf("missing attr %s.%s", etype, label)
-		}
-		ts = append(ts, triple.Triple{E: userID, A: at.ID, V: v})
-		return nil
+	if attrsChanged {
+		h.Catalogs.Invalidate(a.appStr)
+		h.service().InvalidateAttrs(a.appID)
 	}
-	if err := add("$users", "type", "user"); err != nil {
-		return err
-	}
-	if email != "" {
-		if err := add("$users", "email", email); err != nil {
-			return err
-		}
-	}
-	for k, v := range extra {
-		if isReservedUserLabel(k) {
-			continue
-		}
-		if err := add("$users", k, v); err != nil {
-			return err
-		}
-	}
-	_, err = h.DB.InsertTriples(ctx, a.appID, cat, ts, false)
-	return err
+	h.notifyCommit(ctx, a.appID, txID, attrIDs, nil, attrsChanged)
+	return tokenStr, nil
 }
 
 func isReservedUserLabel(label string) bool {
@@ -129,57 +299,6 @@ func isReservedUserLabel(label string) bool {
 	return false
 }
 
-// mintRefreshToken creates a $userRefreshTokens entity and returns the raw
-// uuid bearer token (storage keeps only sha256(uuid-text), like authn).
-func (h *Handler) mintRefreshToken(ctx context.Context, a *authedReq, userID [16]byte) (string, error) {
-	var hashedAttr, linkAttr [16]byte
-	err := h.DB.WithTx(ctx, func(tx pgx.Tx) error {
-		ha, err := platform.GetOrCreateAttr(ctx, tx, a.appID, "$userRefreshTokens", "hashedToken", "blob", "one", true, true)
-		if err != nil {
-			return err
-		}
-		la, err := platform.GetOrCreateAttr(ctx, tx, a.appID, "$userRefreshTokens", "$user", "ref", "one", false, false)
-		if err != nil {
-			return err
-		}
-		hashedAttr, linkAttr = ha.ID, la.ID
-		return nil
-	})
-	if err != nil {
-		return "", err
-	}
-	h.Catalogs.Invalidate(a.appStr)
-	cat, err := h.Catalogs.For(ctx, a.appStr)
-	if err != nil {
-		return "", err
-	}
-
-	raw := newUUID()
-	ts := []triple.Triple{
-		{E: raw, A: hashedAttr, V: authn.HashToken(platform.UUIDToStr(raw))},
-		{E: raw, A: linkAttr, V: platform.UUIDToStr(userID)},
-	}
-	if _, err := h.DB.InsertTriples(ctx, a.appID, cat, ts, false); err != nil {
-		return "", err
-	}
-	return platform.UUIDToStr(raw), nil
-}
-
-// userAttrsTx ensures the $users email/type attrs exist inside tx.
-func (h *Handler) userAttrsTx(ctx context.Context, tx pgx.Tx, a *authedReq) ([16]byte, [16]byte, error) {
-	ea, err := platform.GetOrCreateAttr(ctx, tx, a.appID, "$users", "email", "blob", "one", true, true)
-	if err != nil {
-		return [16]byte{}, [16]byte{}, err
-	}
-	ta, err := platform.GetOrCreateAttr(ctx, tx, a.appID, "$users", "type", "blob", "one", false, false)
-	if err != nil {
-		return [16]byte{}, [16]byte{}, err
-	}
-	return ea.ID, ta.ID, nil
-}
-
-// ---- small helpers ---------------------------------------------------------
-
 func orUUID(preferred, fallback [16]byte) [16]byte {
 	if preferred != ([16]byte{}) {
 		return preferred
@@ -187,29 +306,103 @@ func orUUID(preferred, fallback [16]byte) [16]byte {
 	return fallback
 }
 
-// deleteUsers removes users and reverse refs atomically. The count remains
-// the number of removed triples, including reverse refs, not user entities.
+// deleteUsers removes users and reverse refs atomically inside a transaction
+// journaled via RecordTransaction, and notifies post-commit invalidation hooks.
+// The count remains the number of removed triples, including reverse refs, not user entities.
+// Mutation topics are derived directly from DELETE ... RETURNING attr_id to match actual effects.
 func (h *Handler) deleteUsers(ctx context.Context, a *authedReq, ids [][16]byte) (int64, error) {
 	var deleted int64
+	var txID int64
+	mutatedAttrs := make(map[[16]byte]bool)
+	link := a.cat.FindByEtypeLabel("$userRefreshTokens", "$user")
 	err := h.DB.WithTx(ctx, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx,
-			`DELETE FROM triples WHERE app_id=$1 AND entity_id = ANY($2::uuid[])`, a.appID, ids)
+		var err error
+		txID, err = storage.RecordTransaction(ctx, tx, a.appID)
 		if err != nil {
 			return err
 		}
-		deleted += tag.RowsAffected()
+		// Refresh-token entities carry the user link on one entity and the
+		// hashed token on another attr of that same entity. Collect those
+		// entity ids before deleting refs so deleting a user cannot leave
+		// orphaned bearer-token hashes behind.
+		var tokenIDs [][16]byte
+		if link != nil {
+			for _, userID := range ids {
+				rows, err := tx.Query(ctx,
+					`SELECT entity_id FROM triples WHERE app_id=$1 AND attr_id=$2 AND value=to_jsonb($3::text)`,
+					a.appID, link.ID, platform.UUIDToStr(userID))
+				if err != nil {
+					return err
+				}
+				for rows.Next() {
+					var id [16]byte
+					if err := rows.Scan(&id); err != nil {
+						rows.Close()
+						return err
+					}
+					tokenIDs = append(tokenIDs, id)
+				}
+				if err := rows.Err(); err != nil {
+					rows.Close()
+					return err
+				}
+				rows.Close()
+			}
+		}
+		entityIDs := make([][16]byte, 0, len(ids)+len(tokenIDs))
+		entityIDs = append(entityIDs, ids...)
+		entityIDs = append(entityIDs, tokenIDs...)
+		rows, err := tx.Query(ctx,
+			`DELETE FROM triples WHERE app_id=$1 AND entity_id = ANY($2::uuid[]) RETURNING attr_id`,
+			a.appID, entityIDs)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var aID [16]byte
+			if err := rows.Scan(&aID); err != nil {
+				rows.Close()
+				return err
+			}
+			deleted++
+			mutatedAttrs[aID] = true
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
 		for _, id := range ids {
-			tag, err := tx.Exec(ctx,
-				`DELETE FROM triples WHERE app_id=$1 AND vae AND value = to_jsonb($2::text)`,
+			delRows, err := tx.Query(ctx,
+				`DELETE FROM triples WHERE app_id=$1 AND vae AND value = to_jsonb($2::text) RETURNING attr_id`,
 				a.appID, platform.UUIDToStr(id))
 			if err != nil {
 				return err
 			}
-			deleted += tag.RowsAffected()
+			for delRows.Next() {
+				var aID [16]byte
+				if err := delRows.Scan(&aID); err != nil {
+					delRows.Close()
+					return err
+				}
+				deleted++
+				mutatedAttrs[aID] = true
+			}
+			delRows.Close()
+			if err := delRows.Err(); err != nil {
+				return err
+			}
 		}
 		return nil
 	})
-	return deleted, err
+	if err != nil {
+		return 0, err
+	}
+	attrIDs := make([]string, 0, len(mutatedAttrs))
+	for aID := range mutatedAttrs {
+		attrIDs = append(attrIDs, platform.UUIDToStr(aID))
+	}
+	h.notifyCommit(ctx, a.appID, txID, attrIDs, nil, false)
+	return deleted, nil
 }
 
 func newUUID() [16]byte {
