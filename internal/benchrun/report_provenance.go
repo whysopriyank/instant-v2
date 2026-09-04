@@ -3,12 +3,14 @@ package benchrun
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 func validateProcessProvenance(dir string, run Run, target Target) error {
@@ -73,6 +75,182 @@ func validateProcessProvenance(dir string, run Run, target Target) error {
 
 func isLiveTarget(m Manifest, target Target) bool {
 	return target.Endpoint != "" || m.TargetProvenance[target.ID] != ""
+}
+
+const collectorClockSkew = time.Minute
+
+// validateCollectorEvidence is intentionally shared by the pair and triad
+// loaders. A passing live run is a claim only when every collector's raw
+// evidence and provenance can be replayed offline.
+func validateCollectorEvidence(dir string, run Run, target Target) error {
+	states, err := validateCollectorProvenance(run)
+	if err != nil {
+		return err
+	}
+	if err := validateRuntimeEvidence(dir, run, states["runtime"]); err != nil {
+		return err
+	}
+	return validateDatabaseEvidence(dir, run, target, states["database"])
+}
+
+func validateCollectorProvenance(run Run) (map[string]string, error) {
+	states := make(map[string]string, 4)
+	for _, name := range []string{"process", "runtime", "database", "network"} {
+		value := strings.TrimSpace(run.CollectorProvenance[name])
+		if value == "" {
+			return nil, fmt.Errorf("%s collector provenance is required", name)
+		}
+		state, detail, ok := strings.Cut(value, ":")
+		state, detail = strings.TrimSpace(state), strings.TrimSpace(detail)
+		if !ok || detail == "" || (state != "supported" && state != "unsupported" && state != "failed") {
+			return nil, fmt.Errorf("%s collector provenance has invalid state", name)
+		}
+		if run.PrimaryClass == Pass && state == "failed" {
+			return nil, fmt.Errorf("%s collector provenance failed for passing run", name)
+		}
+		if name == "network" && state == "supported" {
+			fields := strings.Fields(detail)
+			if len(fields) != 2 || !strings.HasPrefix(fields[0], "target=") || !strings.HasPrefix(fields[1], "initial=") {
+				return nil, errors.New("network collector provenance has invalid namespace identities")
+			}
+			networkID, initialID := strings.TrimPrefix(fields[0], "target="), strings.TrimPrefix(fields[1], "initial=")
+			if !validNetworkNamespaceEvidenceID(networkID) || !validNetworkNamespaceEvidenceID(initialID) {
+				return nil, errors.New("network collector provenance has invalid namespace identities")
+			}
+			if networkID == initialID {
+				return nil, errors.New("network collector provenance identities must differ")
+			}
+		}
+		states[name] = state
+	}
+	return states, nil
+}
+
+func validNetworkNamespaceEvidenceID(value string) bool {
+	if !strings.HasPrefix(value, "net:[") || !strings.HasSuffix(value, "]") {
+		return false
+	}
+	digits := strings.TrimSuffix(strings.TrimPrefix(value, "net:["), "]")
+	if digits == "" {
+		return false
+	}
+	for _, r := range digits {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func collectorAtWithinRun(at time.Time, run Run) bool {
+	if at.IsZero() || run.StartedAt.IsZero() || run.EndedAt.IsZero() || !run.EndedAt.After(run.StartedAt) {
+		return false
+	}
+	start, end := run.StartedAt, run.EndedAt
+	if !run.MeasuredStartedAt.IsZero() && run.MeasuredStartedAt.Before(start) {
+		start = run.MeasuredStartedAt
+	}
+	if !run.MeasuredFinishedAt.IsZero() && run.MeasuredFinishedAt.After(end) {
+		end = run.MeasuredFinishedAt
+	}
+	return !at.Before(start.Add(-collectorClockSkew)) && !at.After(end.Add(collectorClockSkew))
+}
+
+func validateRuntimeEvidence(dir string, run Run, state string) error {
+	f, err := os.Open(filepath.Join(dir, "runtime-metrics.jsonl"))
+	if err != nil {
+		return fmt.Errorf("run %s runtime metrics evidence unavailable: %w", run.ID, err)
+	}
+	defer f.Close()
+	scan := bufio.NewScanner(f)
+	scan.Buffer(make([]byte, 64<<10), MaxJSONLineBytes)
+	samples := 0
+	allUnsupported := true
+	for scan.Scan() {
+		samples++
+		var sample RuntimeSample
+		if err := json.Unmarshal(scan.Bytes(), &sample); err != nil {
+			return fmt.Errorf("run %s malformed runtime metrics evidence: %w", run.ID, err)
+		}
+		if !collectorAtWithinRun(sample.At, run) {
+			return fmt.Errorf("run %s runtime metrics sample is outside run window", run.ID)
+		}
+		for _, metric := range []Measurement{sample.AllocBytes, sample.LiveHeap, sample.HeapGoal, sample.GCCycles, sample.GCPause, sample.Goroutines} {
+			if err := ValidateMeasurement(metric); err != nil {
+				return fmt.Errorf("run %s invalid runtime metrics measurement: %w", run.ID, err)
+			}
+			if metric.Status == StatusFailed && run.PrimaryClass == Pass {
+				return fmt.Errorf("run %s runtime metrics contains failed sample", run.ID)
+			}
+			if metric.Status != StatusUnsupported {
+				allUnsupported = false
+			}
+		}
+	}
+	if err := scan.Err(); err != nil {
+		return fmt.Errorf("run %s runtime metrics evidence: %w", run.ID, err)
+	}
+	if samples == 0 {
+		return fmt.Errorf("run %s runtime metrics evidence is empty", run.ID)
+	}
+	if state == "unsupported" && !allUnsupported {
+		return fmt.Errorf("run %s runtime metrics contradict unsupported collector provenance", run.ID)
+	}
+	if state == "supported" && allUnsupported {
+		return fmt.Errorf("run %s runtime metrics contradict supported collector provenance", run.ID)
+	}
+	return nil
+}
+
+func validateDatabaseEvidence(dir string, run Run, target Target, state string) error {
+	readSnapshot := func(name string) (DBSnapshot, error) {
+		b, err := readBounded(filepath.Join(dir, name+".json"), SmallArtifactBytes)
+		if err != nil {
+			return DBSnapshot{}, fmt.Errorf("run %s %s evidence unavailable: %w", run.ID, name, err)
+		}
+		var snapshot DBSnapshot
+		if err := json.Unmarshal(b, &snapshot); err != nil {
+			return DBSnapshot{}, fmt.Errorf("run %s malformed %s evidence: %w", run.ID, name, err)
+		}
+		if !collectorAtWithinRun(snapshot.At, run) {
+			return DBSnapshot{}, fmt.Errorf("run %s %s snapshot is outside run window", run.ID, name)
+		}
+		if state == "supported" && target.PostgresVersion != "" && snapshot.Version != target.PostgresVersion {
+			return DBSnapshot{}, fmt.Errorf("run %s %s version does not match target", run.ID, name)
+		}
+		measurements := []Measurement{snapshot.Connections, snapshot.BlockHits, snapshot.BlockReads, snapshot.TempBytes, snapshot.TempFiles, snapshot.Commits, snapshot.Rollbacks, snapshot.TupleReads, snapshot.TupleWrites, snapshot.WALBytes, snapshot.SlotLag, snapshot.PoolActive, snapshot.PoolIdle}
+		allUnsupported := true
+		for _, metric := range measurements {
+			if err := ValidateMeasurement(metric); err != nil {
+				return DBSnapshot{}, fmt.Errorf("run %s invalid %s measurement: %w", run.ID, name, err)
+			}
+			if metric.Status == StatusFailed && run.PrimaryClass == Pass {
+				return DBSnapshot{}, fmt.Errorf("run %s %s contains failed measurement", run.ID, name)
+			}
+			if metric.Status != StatusUnsupported {
+				allUnsupported = false
+			}
+		}
+		if state == "unsupported" && !allUnsupported {
+			return DBSnapshot{}, fmt.Errorf("run %s %s contradicts unsupported collector provenance", run.ID, name)
+		}
+		if state == "supported" && allUnsupported {
+			return DBSnapshot{}, fmt.Errorf("run %s %s contradicts supported collector provenance", run.ID, name)
+		}
+		return snapshot, nil
+	}
+	before, err := readSnapshot("db-before")
+	if err != nil {
+		return err
+	}
+	after, err := readSnapshot("db-after")
+	if err != nil {
+		return err
+	}
+	if after.At.Before(before.At) {
+		return fmt.Errorf("run %s database snapshots are out of order", run.ID)
+	}
+	return nil
 }
 
 func validateLiveResourceEvidence(dir string, run Run, target Target) error {

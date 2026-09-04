@@ -41,7 +41,7 @@ func UnsupportedLiveCollectors(reason string) *LiveCollectors {
 		Runtime:    UnsupportedRuntimeCollector{Reason: reason},
 		Database:   UnsupportedDatabaseCollector{Reason: reason},
 		Interval:   time.Second,
-		Provenance: map[string]string{"process": "unsupported: " + reason, "runtime": "unsupported: " + reason, "database": "unsupported: " + reason},
+		Provenance: map[string]string{"process": "unsupported: " + reason, "runtime": "unsupported: " + reason, "database": "unsupported: " + reason, "network": "unsupported: " + reason},
 	}
 }
 

@@ -672,6 +672,11 @@ func buildLiveCollectors(spec LiveTargetConfig) *LiveCollectors {
 		set.Interval = time.Second
 	}
 	namespace := NetworkNamespaceProvenance{NamespaceID: spec.NetworkNamespaceID, InitialNamespaceID: spec.InitialNamespaceID}
+	if spec.NetworkNamespaceID != "" && spec.InitialNamespaceID != "" {
+		set.Provenance["network"] = "supported: target=" + spec.NetworkNamespaceID + " initial=" + spec.InitialNamespaceID
+	} else {
+		set.Provenance["network"] = "unsupported: isolated network namespace not configured"
+	}
 	if spec.ProcessPIDFile != "" {
 		set.Process = ProcProcessCollector{
 			PIDFile:          spec.ProcessPIDFile,

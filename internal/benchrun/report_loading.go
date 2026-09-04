@@ -258,6 +258,9 @@ func validatePairProcessEvidence(root string, m Manifest, cells map[string]*repo
 						if err := validateLiveResourceEvidence(filepath.Join(root, "runs", run.ID), run, target); err != nil {
 							return err
 						}
+						if err := validateCollectorEvidence(filepath.Join(root, "runs", run.ID), run, target); err != nil {
+							return err
+						}
 					}
 				}
 			}

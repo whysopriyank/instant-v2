@@ -60,7 +60,12 @@ func (w *ArtifactWriter) Finalize() error {
 		}
 		idx.Files = append(idx.Files, IndexedFile{Path: rel, Bytes: info.Size(), SHA256: hex.EncodeToString(sum[:]), Encoding: enc})
 	}
-	if err := w.writeUnlocked("raw-index.json", mustJSON(idx)); err != nil {
+	indexBytes, err := marshalRedactedJSON(idx)
+	if err != nil {
+		return err
+	}
+	indexBytes = append(indexBytes, '\n')
+	if err := w.writeUnlocked("raw-index.json", indexBytes); err != nil {
 		return err
 	}
 	if err := buildChecksumsWithLimits(w.Root, w.MaxBytes, w.MaxFileBytes); err != nil {
@@ -244,7 +249,12 @@ func RebuildBundleIndexes(root string) error {
 		}
 		idx.Files = append(idx.Files, IndexedFile{Path: path, Bytes: size, SHA256: hex.EncodeToString(sum[:]), Encoding: encoding})
 	}
-	if err := os.WriteFile(filepath.Join(root, "raw-index.json"), mustJSON(idx), 0o640); err != nil {
+	indexBytes, err := marshalRedactedJSON(idx)
+	if err != nil {
+		return err
+	}
+	indexBytes = append(indexBytes, '\n')
+	if err := os.WriteFile(filepath.Join(root, "raw-index.json"), indexBytes, 0o640); err != nil {
 		return err
 	}
 	return BuildChecksums(root)

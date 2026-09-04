@@ -1,6 +1,9 @@
 package benchrun
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 type CollectorState string
 
@@ -51,7 +54,7 @@ func (u UnsupportedProcessCollector) Close() error { return nil }
 type UnsupportedRuntimeCollector struct{ Reason string }
 
 func (u UnsupportedRuntimeCollector) Sample(context.Context) (RuntimeSample, error) {
-	return RuntimeSample{AllocBytes: Unsupported("bytes", u.Reason), LiveHeap: Unsupported("bytes", u.Reason), HeapGoal: Unsupported("bytes", u.Reason), GCCycles: Unsupported("cycles", u.Reason), GCPause: Unsupported("seconds", u.Reason), Goroutines: Unsupported("count", u.Reason)}, nil
+	return RuntimeSample{At: time.Now().UTC(), AllocBytes: Unsupported("bytes", u.Reason), LiveHeap: Unsupported("bytes", u.Reason), HeapGoal: Unsupported("bytes", u.Reason), GCCycles: Unsupported("cycles", u.Reason), GCPause: Unsupported("seconds", u.Reason), Goroutines: Unsupported("count", u.Reason)}, nil
 }
 func (u UnsupportedRuntimeCollector) Close() error { return nil }
 
@@ -65,7 +68,7 @@ func (u UnsupportedDatabaseCollector) After(context.Context) (DBSnapshot, error)
 }
 func (u UnsupportedDatabaseCollector) Close() error { return nil }
 func unsupportedDB(reason string) DBSnapshot {
-	return DBSnapshot{Connections: Unsupported("count", reason), BlockHits: Unsupported("count", reason), BlockReads: Unsupported("count", reason), TempBytes: Unsupported("bytes", reason), TempFiles: Unsupported("count", reason), Commits: Unsupported("count", reason), Rollbacks: Unsupported("count", reason), TupleReads: Unsupported("count", reason), TupleWrites: Unsupported("count", reason), WALBytes: Unsupported("bytes", reason), SlotLag: Unsupported("bytes", reason), PoolActive: Unsupported("count", reason), PoolIdle: Unsupported("count", reason)}
+	return DBSnapshot{At: time.Now().UTC(), Connections: Unsupported("count", reason), BlockHits: Unsupported("count", reason), BlockReads: Unsupported("count", reason), TempBytes: Unsupported("bytes", reason), TempFiles: Unsupported("count", reason), Commits: Unsupported("count", reason), Rollbacks: Unsupported("count", reason), TupleReads: Unsupported("count", reason), TupleWrites: Unsupported("count", reason), WALBytes: Unsupported("bytes", reason), SlotLag: Unsupported("bytes", reason), PoolActive: Unsupported("count", reason), PoolIdle: Unsupported("count", reason)}
 }
 
 func CollectorMeasurement(state CollectorState, value float64, unit, reason string) Measurement {

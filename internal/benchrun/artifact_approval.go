@@ -61,7 +61,11 @@ func computeContentRootWithLimits(root string, m Manifest, totalLimit, fileLimit
 		var sum [32]byte
 		if path == "manifest.json" {
 			m.ApprovalPublicKey, m.ApprovalSignature, m.ContentRoot = "", "", ""
-			sum = sha256.Sum256(mustJSON(m))
+			manifestBytes, marshalErr := marshalRedactedJSON(m)
+			if marshalErr != nil {
+				return "", fmt.Errorf("serialize manifest for content root: %w", marshalErr)
+			}
+			sum = sha256.Sum256(append(manifestBytes, '\n'))
 		} else {
 			sum, err = hashFileBounded(filepath.Join(root, path), fileLimit)
 			if err != nil {
@@ -124,7 +128,11 @@ func ApproveBundle(root string) error {
 		return err
 	}
 	m.ApprovalSignature = hex.EncodeToString(ed25519.Sign(private, tuple))
-	data := mustJSON(m)
+	data, err := marshalRedactedJSON(m)
+	if err != nil {
+		return fmt.Errorf("serialize approved manifest: %w", err)
+	}
+	data = append(data, '\n')
 	tmp, err := os.CreateTemp(root, ".manifest-approval-*")
 	if err != nil {
 		return err

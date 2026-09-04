@@ -120,6 +120,9 @@ func loadThreeTargetReport(root string, m Manifest) (validatedReport, error) {
 	if err != nil {
 		return validatedReport{}, err
 	}
+	if err := validatePairProcessEvidence(root, m, cells, targets); err != nil {
+		return validatedReport{}, err
+	}
 	input.cells, input.qualificationFailed, input.qualificationFailure = cells, failed, failure
 	return input, nil
 }

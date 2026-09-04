@@ -73,11 +73,7 @@ func (w *ArtifactWriter) resolve(name string) (string, error) {
 }
 
 func (w *ArtifactWriter) WriteJSON(name string, v any) error {
-	b, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
-		return err
-	}
-	b, err = redactJSONBytes(b, true)
+	b, err := marshalRedactedJSON(v)
 	if err != nil {
 		return err
 	}
@@ -200,9 +196,23 @@ func (w *ArtifactWriter) Write(name string, data []byte) error {
 }
 
 func mustJSON(v any) []byte {
-	b, _ := json.MarshalIndent(v, "", "  ")
-	b, _ = redactJSONBytes(b, true)
+	b, err := marshalRedactedJSON(v)
+	if err != nil {
+		panic(err)
+	}
 	return append(b, '\n')
+}
+
+// marshalRedactedJSON is the single fallible JSON serialization boundary for
+// artifact JSON. Callers that publish or hash an artifact must propagate its
+// error; a failed marshal/redaction must never be represented by an empty or
+// malformed successful artifact.
+func marshalRedactedJSON(v any) ([]byte, error) {
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return redactJSONBytes(b, true)
 }
 
 func (w *ArtifactWriter) writeUnlocked(name string, data []byte) error {
@@ -251,7 +261,11 @@ func (w *ArtifactWriter) RewriteJSON(name string, v any) error {
 	if err != nil {
 		return err
 	}
-	data := mustJSON(v)
+	data, err := marshalRedactedJSON(v)
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
 	if int64(len(data)) > w.MaxFileBytes || w.total-int64(len(old))+int64(len(data)) > w.MaxBytes {
 		return fmt.Errorf("artifact size limit exceeded")
 	}
