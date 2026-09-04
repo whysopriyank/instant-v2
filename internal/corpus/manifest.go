@@ -19,6 +19,7 @@ type Manifest struct {
 	V1Ref     string          `json:"v1Ref"`
 	Fixtures  []FixtureEntry  `json:"fixtures"`
 	Surfaces  []Surface       `json:"surfaces"`
+	Coverage  []CoverageEntry `json:"coverage,omitempty"`
 	Scenarios []ScenarioEntry `json:"scenarios"`
 }
 
@@ -41,6 +42,26 @@ type Surface struct {
 	ID     string `json:"id"`
 	Status string `json:"status"` // covered | gap | unsupported
 	Note   string `json:"note"`
+}
+
+// CoverageEntry is the claim ledger for one behavior case. Unlike a surface,
+// which is a coarse inventory label, an entry records the case shape, actual
+// transport, fixture owner, expected state, and evidence/oracle status.
+type CoverageEntry struct {
+	ID                 string   `json:"id"`
+	Family             string   `json:"family"`
+	Case               string   `json:"case"`
+	Surface            string   `json:"surface"`
+	Transport          string   `json:"transport"`
+	Scenario           string   `json:"scenario,omitempty"`
+	Fixture            string   `json:"fixture,omitempty"`
+	Owner              string   `json:"owner"`
+	ExpectedState      string   `json:"expectedState"`
+	Status             string   `json:"status"` // covered | gap | unsupported
+	Oracle             Oracle   `json:"oracle"`
+	Evidence           []string `json:"evidence,omitempty"`
+	AcceptedDifference string   `json:"acceptedDifference,omitempty"`
+	Note               string   `json:"note"`
 }
 
 type ScenarioEntry struct {
@@ -153,8 +174,133 @@ func ValidateCorpus(dir string) (string, error) {
 		}
 		lines = append(lines, fmt.Sprintf("surface %s: %s (%d scenarios); %s", id, surface.Status, coverage[id], surface.Note))
 	}
+	if len(m.Coverage) != 0 {
+		if err := validateCoverage(dir, m, surfaces); err != nil {
+			return "", err
+		}
+		lines = append(lines, fmt.Sprintf("coverage matrix: %d entries", len(m.Coverage)))
+	}
 	sort.Strings(lines)
-	return fmt.Sprintf("validated %d scenarios; spec=%d regression=%d v1-capture=%d\n%s\n", len(scenarios), oracles["spec"], oracles["regression"], oracles["v1-capture"], strings.Join(lines, "\n")), nil
+	return fmt.Sprintf("validated %d scenarios; coverage=%d; spec=%d regression=%d v1-capture=%d\n%s\n", len(scenarios), len(m.Coverage), oracles["spec"], oracles["regression"], oracles["v1-capture"], strings.Join(lines, "\n")), nil
+}
+
+var coverageFamilies = map[string]bool{
+	"auth": true, "permissions": true, "query": true, "refresh": true,
+	"rooms": true, "transactions": true,
+}
+
+var coverageCases = map[string]bool{
+	"positive": true, "denied-error": true, "boundary": true,
+	"lifecycle": true, "concurrency": true,
+}
+
+var coverageTransports = map[string]bool{"http": true, "sse": true, "ws": true}
+
+func validateCoverage(dir string, m *Manifest, surfaces map[string]Surface) error {
+	ids := make(map[string]bool, len(m.Coverage))
+	fixtures := make(map[string]bool, len(m.Fixtures))
+	scenarios := make(map[string]ScenarioEntry, len(m.Scenarios))
+	for _, fixture := range m.Fixtures {
+		fixtures[fixture.ID] = true
+	}
+	for _, scenario := range m.Scenarios {
+		scenarios[scenario.ID] = scenario
+	}
+	for _, entry := range m.Coverage {
+		if entry.ID == "" || ids[entry.ID] {
+			return fmt.Errorf("coverage: empty or duplicate id %q", entry.ID)
+		}
+		ids[entry.ID] = true
+		if !coverageFamilies[entry.Family] || !coverageCases[entry.Case] || !coverageTransports[entry.Transport] {
+			return fmt.Errorf("coverage %s: invalid family/case/transport", entry.ID)
+		}
+		surface, ok := surfaces[entry.Surface]
+		if !ok {
+			return fmt.Errorf("coverage %s: unknown surface %q", entry.ID, entry.Surface)
+		}
+		if entry.Owner == "" || entry.ExpectedState == "" || entry.Note == "" {
+			return fmt.Errorf("coverage %s: owner, expectedState and note are required", entry.ID)
+		}
+		if entry.Status != "covered" && entry.Status != "gap" && entry.Status != "unsupported" {
+			return fmt.Errorf("coverage %s: invalid status %q", entry.ID, entry.Status)
+		}
+		if entry.Fixture != "" && !fixtures[entry.Fixture] {
+			return fmt.Errorf("coverage %s: unknown fixture %q", entry.ID, entry.Fixture)
+		}
+		if entry.Scenario != "" {
+			if _, ok := scenarios[entry.Scenario]; !ok {
+				return fmt.Errorf("coverage %s: unknown scenario %q", entry.ID, entry.Scenario)
+			}
+		}
+		if entry.Status == "covered" && len(entry.Evidence) == 0 {
+			return fmt.Errorf("coverage %s: covered entry requires evidence", entry.ID)
+		}
+		if len(entry.Evidence) != 0 && entry.Scenario == "" {
+			return fmt.Errorf("coverage %s: evidence requires a declared scenario", entry.ID)
+		}
+		if entry.Status == "unsupported" && surface.Status != "unsupported" {
+			return fmt.Errorf("coverage %s: unsupported entry must use unsupported surface", entry.ID)
+		}
+		if entry.Oracle.Kind != "spec" && entry.Oracle.Kind != "regression" && entry.Oracle.Kind != "v1-capture" {
+			return fmt.Errorf("coverage %s: invalid oracle kind %q", entry.ID, entry.Oracle.Kind)
+		}
+		if entry.Oracle.Source == "" {
+			return fmt.Errorf("coverage %s: oracle source is required", entry.ID)
+		}
+		for _, evidence := range entry.Evidence {
+			path, err := containedPath(dir, evidence)
+			if err != nil {
+				return fmt.Errorf("coverage %s evidence: %w", entry.ID, err)
+			}
+			if err := validateCoverageEvidence(path, evidence, entry, scenarios[entry.Scenario]); err != nil {
+				return fmt.Errorf("coverage %s evidence %s: %w", entry.ID, evidence, err)
+			}
+		}
+	}
+	return nil
+}
+
+// validateCoverageEvidence binds an evidence file to the coverage row that
+// claims it. Legacy WS NDJSON evidence is bound by its declared scenario path;
+// transport evidence uses the small metadata envelope written by corpusctl.
+func validateCoverageEvidence(path, evidence string, entry CoverageEntry, scenario ScenarioEntry) error {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".ndjson":
+		if entry.Transport != "ws" {
+			return fmt.Errorf("NDJSON evidence requires ws transport")
+		}
+		if scenario.Path != evidence {
+			return fmt.Errorf("path is not the declared scenario %q", scenario.Path)
+		}
+		return nil
+	case ".json":
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		var metadata struct {
+			Scenario  string `json:"scenario"`
+			ID        string `json:"id"`
+			Transport string `json:"transport"`
+			Status    string `json:"status"`
+		}
+		if err := json.Unmarshal(b, &metadata); err != nil {
+			return fmt.Errorf("invalid metadata: %w", err)
+		}
+		declaredScenario := metadata.Scenario
+		if declaredScenario == "" {
+			declaredScenario = metadata.ID
+		}
+		if declaredScenario != entry.Scenario {
+			return fmt.Errorf("declared scenario %q does not match %q", declaredScenario, entry.Scenario)
+		}
+		if metadata.Transport != entry.Transport || metadata.Status != entry.Status {
+			return fmt.Errorf("declared transport/status %q/%q does not match %q/%q", metadata.Transport, metadata.Status, entry.Transport, entry.Status)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported evidence format %q", filepath.Ext(path))
+	}
 }
 
 func LoadManifest(dir string) (*Manifest, error) {

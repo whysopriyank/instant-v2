@@ -62,15 +62,27 @@ func postTransact(baseURL, appID, attrID, entity string) (int64, int, string, er
 		return 0, 0, "", err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+	return decodeTransactResponse(resp.StatusCode, raw, readErr)
+}
+
+func decodeTransactResponse(status int, raw []byte, readErr error) (int64, int, string, error) {
+	if readErr != nil {
+		return 0, status, strings.TrimSpace(string(raw)), fmt.Errorf("read transact response: %w", readErr)
+	}
 	var out struct {
 		TxID int64 `json:"tx-id"`
 	}
-	_ = json.Unmarshal(raw, &out)
-	if resp.StatusCode != 200 {
-		return out.TxID, resp.StatusCode, strings.TrimSpace(string(raw)), fmt.Errorf("transact status %d", resp.StatusCode)
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return 0, status, strings.TrimSpace(string(raw)), fmt.Errorf("decode transact response: %w", err)
 	}
-	return out.TxID, resp.StatusCode, strings.TrimSpace(string(raw)), nil
+	if status != 200 {
+		return out.TxID, status, strings.TrimSpace(string(raw)), fmt.Errorf("transact status %d", status)
+	}
+	if out.TxID <= 0 {
+		return 0, status, strings.TrimSpace(string(raw)), errors.New("transact response missing positive tx-id")
+	}
+	return out.TxID, status, strings.TrimSpace(string(raw)), nil
 }
 
 func diffSets(want, got map[string]bool) (extra, missing []string) {

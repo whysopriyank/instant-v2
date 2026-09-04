@@ -20,6 +20,9 @@ func TestCorpusManifest(t *testing.T) {
 	if !strings.Contains(first, "v1-capture=0") {
 		t.Fatal("authored corpus must not claim recorded v1 oracle evidence")
 	}
+	if !strings.Contains(first, "coverage=25") {
+		t.Fatalf("coverage matrix missing from validation report: %s", first)
+	}
 }
 
 func manifestFixture(t *testing.T) (string, *Manifest) {
@@ -82,5 +85,71 @@ func TestManifestCaptureMatchesActualExpectedFrames(t *testing.T) {
 	writeScenario(t, dir, "capture.json", `{"v1Ref":"`+m.V1Ref+`","raw":[{"op":"init-ok"}]}`)
 	if _, err := ValidateCorpus(dir); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCoverageMatrixRequiresEvidenceForCoveredRows(t *testing.T) {
+	dir, m := manifestFixture(t)
+	m.Coverage = []CoverageEntry{{
+		ID:            "init-positive",
+		Family:        "auth",
+		Case:          "positive",
+		Surface:       "init",
+		Transport:     "ws",
+		Scenario:      "test",
+		Fixture:       "empty",
+		Owner:         "corpus",
+		ExpectedState: "session initialized",
+		Status:        "covered",
+		Oracle:        Oracle{Kind: "regression", Source: "authored"},
+		Evidence:      []string{"test.ndjson"},
+		Note:          "test row",
+	}}
+	saveManifest(t, dir, m)
+	if _, err := ValidateCorpus(dir); err != nil {
+		t.Fatal(err)
+	}
+	m.Coverage[0].Evidence = nil
+	saveManifest(t, dir, m)
+	if _, err := ValidateCorpus(dir); err == nil || !strings.Contains(err.Error(), "requires evidence") {
+		t.Fatalf("covered row without evidence accepted: %v", err)
+	}
+}
+
+func TestCoverageEvidenceBindsScenarioTransportAndStatus(t *testing.T) {
+	dir, m := manifestFixture(t)
+	writeScenario(t, dir, "capture.json", `{"scenario":"test","transport":"http","status":"covered"}`)
+	m.Coverage = []CoverageEntry{{
+		ID:            "init-positive",
+		Family:        "auth",
+		Case:          "positive",
+		Surface:       "init",
+		Transport:     "http",
+		Scenario:      "test",
+		Fixture:       "empty",
+		Owner:         "corpus",
+		ExpectedState: "session initialized",
+		Status:        "covered",
+		Oracle:        Oracle{Kind: "regression", Source: "authored"},
+		Evidence:      []string{"capture.json"},
+		Note:          "test row",
+	}}
+	saveManifest(t, dir, m)
+	if _, err := ValidateCorpus(dir); err != nil {
+		t.Fatal(err)
+	}
+	writeScenario(t, dir, "capture.json", `{"scenario":"other","transport":"http","status":"covered"}`)
+	if _, err := ValidateCorpus(dir); err == nil || !strings.Contains(err.Error(), "declared scenario") {
+		t.Fatalf("mismatched evidence scenario accepted: %v", err)
+	}
+	writeScenario(t, dir, "capture.json", `{"scenario":"test","transport":"http","status":"gap"}`)
+	if _, err := ValidateCorpus(dir); err == nil || !strings.Contains(err.Error(), "transport/status") {
+		t.Fatalf("mismatched evidence status accepted: %v", err)
+	}
+	writeScenario(t, dir, "capture.json", `{"scenario":"test","transport":"http","status":"covered"}`)
+	m.Coverage[0].Transport = "sse"
+	saveManifest(t, dir, m)
+	if _, err := ValidateCorpus(dir); err == nil || !strings.Contains(err.Error(), "transport/status") {
+		t.Fatalf("mismatched evidence transport accepted: %v", err)
 	}
 }

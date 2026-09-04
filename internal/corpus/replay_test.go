@@ -3,6 +3,7 @@ package corpus
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +12,34 @@ import (
 
 	"github.com/coder/websocket"
 )
+
+type scriptedRead struct {
+	typ  websocket.MessageType
+	data []byte
+	err  error
+}
+
+type scriptedReplayConn struct {
+	reads  []scriptedRead
+	writes [][]byte
+}
+
+func (c *scriptedReplayConn) Write(_ context.Context, _ websocket.MessageType, data []byte) error {
+	c.writes = append(c.writes, append([]byte(nil), data...))
+	return nil
+}
+
+func (c *scriptedReplayConn) Read(ctx context.Context) (websocket.MessageType, []byte, error) {
+	if len(c.reads) > 0 {
+		next := c.reads[0]
+		c.reads = c.reads[1:]
+		return next.typ, next.data, next.err
+	}
+	<-ctx.Done()
+	return 0, nil, ctx.Err()
+}
+
+func (c *scriptedReplayConn) CloseNow() error { return nil }
 
 // echoServer is a minimal WS server used by replay tests.
 // For every text frame received, it echoes the configured reply (if any).
@@ -173,5 +202,90 @@ func TestReplayRejectsInvalidServerJSON(t *testing.T) {
 	res := Replay(context.Background(), wsURL(srv), sc, time.Second)
 	if res.Err == nil {
 		t.Fatal("invalid server JSON must be a replay error")
+	}
+}
+
+func TestReplayDetectsLateFrameAfterFinalExpected(t *testing.T) {
+	sc := loadScenarioFromLines(t, []string{
+		`{"dir":"c2s","raw":{"op":"init"}}`,
+		`{"dir":"s2c","raw":{"op":"init-ok"}}`,
+	})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.Close(websocket.StatusNormalClosure, "")
+		ctx := r.Context()
+		if _, _, err := c.Read(ctx); err != nil {
+			return
+		}
+		_ = c.Write(ctx, websocket.MessageText, []byte(`{"op":"init-ok"}`))
+		_ = c.Write(ctx, websocket.MessageText, []byte(`{"op":"late"}`))
+		<-ctx.Done()
+	}))
+	defer srv.Close()
+
+	res := Replay(context.Background(), wsURL(srv), sc, 500*time.Millisecond)
+	if res.Passed {
+		t.Fatalf("late unsolicited frame was accepted: %+v", res)
+	}
+	if !strings.Contains(res.Delta, `extra`) && !strings.Contains(res.Delta, `late`) {
+		t.Fatalf("late-frame delta lacks evidence: %q", res.Delta)
+	}
+}
+
+func TestReplayQuiescencePolicyUsesControlledTransport(t *testing.T) {
+	sc := loadScenarioFromLines(t, []string{
+		`{"dir":"c2s","raw":{"op":"init"}}`,
+		`{"dir":"s2c","raw":{"op":"init-ok"}}`,
+	})
+	tests := map[string]struct {
+		reads []scriptedRead
+		pass  bool
+	}{
+		"silent-peer": {
+			reads: []scriptedRead{{typ: websocket.MessageText, data: []byte(`{"op":"init-ok"}`)}},
+			pass:  true,
+		},
+		"normal-disconnect": {
+			reads: []scriptedRead{
+				{typ: websocket.MessageText, data: []byte(`{"op":"init-ok"}`)},
+				{err: websocket.CloseError{Code: websocket.StatusNormalClosure}},
+			},
+			pass: true,
+		},
+		"late-frame": {
+			reads: []scriptedRead{
+				{typ: websocket.MessageText, data: []byte(`{"op":"init-ok"}`)},
+				{typ: websocket.MessageText, data: []byte(`{"op":"late"}`)},
+			},
+		},
+		"error-frame": {
+			reads: []scriptedRead{
+				{typ: websocket.MessageText, data: []byte(`{"op":"init-ok"}`)},
+				{typ: websocket.MessageText, data: []byte(`{"op":"error","status":500}`)},
+			},
+		},
+		"abnormal-disconnect": {
+			reads: []scriptedRead{
+				{typ: websocket.MessageText, data: []byte(`{"op":"init-ok"}`)},
+				{err: errors.New("peer disconnected without a close frame")},
+			},
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			conn := &scriptedReplayConn{reads: tc.reads}
+			res := replayWithOptions(context.Background(), "scripted", sc, time.Second, replayOptions{
+				quiescence: 5 * time.Millisecond,
+				dial: func(context.Context, string) (replayConn, error) {
+					return conn, nil
+				},
+			})
+			if res.Passed != tc.pass {
+				t.Fatalf("passed=%v want %v: err=%v delta=%q", res.Passed, tc.pass, res.Err, res.Delta)
+			}
+		})
 	}
 }

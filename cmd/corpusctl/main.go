@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,8 +18,32 @@ import (
 )
 
 type options struct {
-	mode, corpusDir, suite, target, other, v1Path, v1Ref, outputDir string
-	timeout                                                         time.Duration
+	mode, transport, corpusDir, suite, target, other, v1Path, v1Ref, outputDir string
+	redactHeaders                                                              headerList
+	timeout                                                                    time.Duration
+}
+
+// headerList permits repeatable --redact-header flags while keeping the
+// built-in credential-bearing headers enabled by default.
+type headerList []string
+
+func (h *headerList) String() string { return strings.Join(*h, ",") }
+
+func (h *headerList) Set(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fmt.Errorf("redact-header cannot be empty")
+	}
+	*h = append(*h, value)
+	return nil
+}
+
+var defaultRedactionHeaders = []string{"Authorization", "Cookie", "Set-Cookie"}
+
+func redactionPolicy(o options) corpus.RedactionPolicy {
+	names := append([]string(nil), defaultRedactionHeaders...)
+	names = append(names, o.redactHeaders...)
+	return corpus.RedactionPolicy{HeaderNames: names}
 }
 
 func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
@@ -28,6 +53,7 @@ func run(args []string, out, diagnostic io.Writer) int {
 	flags := flag.NewFlagSet("corpusctl", flag.ContinueOnError)
 	flags.SetOutput(diagnostic)
 	flags.StringVar(&o.mode, "mode", "replay", "validate, replay, differential, or record (unavailable)")
+	flags.StringVar(&o.transport, "transport", "ws", "ws, http, or sse (replay mode)")
 	flags.StringVar(&o.corpusDir, "corpus", "corpus", "corpus directory or one .ndjson file")
 	flags.StringVar(&o.suite, "suite", "", "suite/filename substring")
 	flags.StringVar(&o.target, "target", "", "target WebSocket URL")
@@ -35,6 +61,7 @@ func run(args []string, out, diagnostic io.Writer) int {
 	flags.StringVar(&o.v1Path, "v1-path", "../instant", "local pinned v1 checkout")
 	flags.StringVar(&o.v1Ref, "v1-ref", "", "expected v1 commit (defaults to corpus manifest)")
 	flags.StringVar(&o.outputDir, "output-dir", "", "new private evidence files (required for differential)")
+	flags.Var(&o.redactHeaders, "redact-header", "additional HTTP header to redact in private evidence (repeatable)")
 	flags.DurationVar(&o.timeout, "timeout", 12*time.Second, "per-scenario timeout")
 	if err := flags.Parse(args); err != nil {
 		return 2
@@ -61,6 +88,15 @@ func run(args []string, out, diagnostic io.Writer) int {
 	case "replay", "differential":
 	default:
 		return fail(fmt.Errorf("unknown mode %q", o.mode))
+	}
+	if o.transport != "ws" && o.transport != "http" && o.transport != "sse" {
+		return fail(fmt.Errorf("unknown transport %q", o.transport))
+	}
+	if o.transport != "ws" {
+		if o.mode != "replay" {
+			return fail(fmt.Errorf("transport %s supports replay only", o.transport))
+		}
+		return runHTTPOrSSE(o, out, diagnostic)
 	}
 	if o.target == "" {
 		return fail(fmt.Errorf("--target is required"))
@@ -130,6 +166,75 @@ func run(args []string, out, diagnostic io.Writer) int {
 	if failures > 0 {
 		return 1
 	}
+	return 0
+}
+
+func runHTTPOrSSE(o options, out, diagnostic io.Writer) int {
+	if o.target == "" {
+		_, _ = fmt.Fprintln(diagnostic, "corpusctl: --target is required")
+		return 1
+	}
+	if o.other != "" || o.v1Ref != "" {
+		_, _ = fmt.Fprintln(diagnostic, "corpusctl: --other/--v1-ref are only valid for WebSocket differential replay")
+		return 1
+	}
+	if o.suite != "" && !strings.Contains(filepath.Base(o.corpusDir), o.suite) {
+		_, _ = fmt.Fprintln(diagnostic, "corpusctl: --suite for HTTP/SSE requires the scenario filename to match")
+		return 1
+	}
+	info, err := os.Stat(o.corpusDir)
+	if err != nil {
+		_, _ = fmt.Fprintln(diagnostic, "corpusctl:", err)
+		return 1
+	}
+	if info.IsDir() {
+		_, _ = fmt.Fprintln(diagnostic, "corpusctl: HTTP/SSE replay requires one scenario JSON file")
+		return 1
+	}
+	b, err := os.ReadFile(o.corpusDir)
+	if err != nil {
+		_, _ = fmt.Fprintln(diagnostic, "corpusctl:", err)
+		return 1
+	}
+	ctx := context.Background()
+	client := http.DefaultClient
+	if o.transport == "http" {
+		var expected corpus.HTTPExchange
+		if err := json.Unmarshal(b, &expected); err != nil {
+			_, _ = fmt.Fprintln(diagnostic, "corpusctl: HTTP scenario:", err)
+			return 1
+		}
+		result := corpus.ReplayHTTP(ctx, client, o.target, expected, o.timeout, nil)
+		if o.outputDir != "" {
+			if err := writeHTTPEvidence(o, expected, result); err != nil {
+				_, _ = fmt.Fprintln(diagnostic, "corpusctl:", err)
+				return 1
+			}
+		}
+		if result.Err != nil || result.Delta != "" {
+			_, _ = fmt.Fprintf(out, "FAIL %s: %v\n%s\n", filepath.Base(o.corpusDir), result.Err, result.Delta)
+			return 1
+		}
+		_, _ = fmt.Fprintf(out, "PASS %s (http replay)\n", filepath.Base(o.corpusDir))
+		return 0
+	}
+	var scenario corpus.SSEScenario
+	if err := json.Unmarshal(b, &scenario); err != nil {
+		_, _ = fmt.Fprintln(diagnostic, "corpusctl: SSE scenario:", err)
+		return 1
+	}
+	result := corpus.ReplaySSE(ctx, client, o.target, scenario, o.timeout)
+	if o.outputDir != "" {
+		if err := writeSSEEvidence(o, scenario, result); err != nil {
+			_, _ = fmt.Fprintln(diagnostic, "corpusctl:", err)
+			return 1
+		}
+	}
+	if result.Err != nil || result.Delta != "" {
+		_, _ = fmt.Fprintf(out, "FAIL %s: %v\n%s\n", filepath.Base(o.corpusDir), result.Err, result.Delta)
+		return 1
+	}
+	_, _ = fmt.Fprintf(out, "PASS %s (sse replay)\n", filepath.Base(o.corpusDir))
 	return 0
 }
 
@@ -217,4 +322,128 @@ func writeEvidence(o options, sc *corpus.Scenario, a, b corpus.ReplayResult, del
 		return writeErr
 	}
 	return closeErr
+}
+
+func writeHTTPEvidence(o options, expected corpus.HTTPExchange, result corpus.HTTPReplayResult) error {
+	policy := redactionPolicy(o)
+	v2Ref, err := revision(".")
+	if err != nil {
+		return err
+	}
+	dirty, err := exec.Command("git", "status", "--porcelain").Output()
+	if err != nil {
+		return err
+	}
+	record := struct {
+		Transport       string              `json:"transport"`
+		Scenario        string              `json:"scenario"`
+		Status          string              `json:"status"`
+		RedactedHeaders []string            `json:"redactedHeaders"`
+		V2Ref           string              `json:"v2Ref"`
+		V2Dirty         bool                `json:"v2Dirty"`
+		Expected        corpus.HTTPExchange `json:"expected"`
+		Actual          corpus.HTTPExchange `json:"actual"`
+		Normalized      struct {
+			ExpectedBody []byte      `json:"expectedBody,omitempty"`
+			ActualBody   []byte      `json:"actualBody,omitempty"`
+			ExpectedHead http.Header `json:"expectedHeaders,omitempty"`
+			ActualHead   http.Header `json:"actualHeaders,omitempty"`
+		} `json:"normalized"`
+		Delta string `json:"delta"`
+		Error string `json:"error,omitempty"`
+	}{
+		Transport:       "http",
+		Scenario:        filepath.Base(o.corpusDir),
+		Status:          replayStatus(result.Passed),
+		RedactedHeaders: append([]string(nil), policy.HeaderNames...),
+		V2Ref:           v2Ref,
+		V2Dirty:         len(dirty) > 0,
+		Expected:        corpus.RedactExchange(expected, policy),
+		Actual:          corpus.RedactExchange(result.Actual, policy),
+		Delta:           result.Delta,
+	}
+	record.Normalized.ExpectedBody = result.ExpectedBody
+	record.Normalized.ActualBody = result.ActualBody
+	record.Normalized.ExpectedHead = corpus.RedactExchange(corpus.HTTPExchange{Response: corpus.HTTPResponse{Headers: result.ExpectedHeader}}, policy).Response.Headers
+	record.Normalized.ActualHead = corpus.RedactExchange(corpus.HTTPExchange{Response: corpus.HTTPResponse{Headers: result.ActualHeader}}, policy).Response.Headers
+	if result.Err != nil {
+		record.Error = result.Err.Error()
+	}
+	path, err := corpus.EvidencePath(o.outputDir, filepath.Base(o.corpusDir), ".http.evidence.json")
+	if err != nil {
+		return err
+	}
+	return corpus.WriteEvidence(path, record)
+}
+
+func writeSSEEvidence(o options, scenario corpus.SSEScenario, result corpus.SSEReplayResult) error {
+	policy := redactionPolicy(o)
+	path, err := corpus.EvidencePath(o.outputDir, scenario.ID, ".sse.evidence.json")
+	if err != nil {
+		return err
+	}
+	v2Ref, err := revision(".")
+	if err != nil {
+		return err
+	}
+	dirty, err := exec.Command("git", "status", "--porcelain").Output()
+	if err != nil {
+		return err
+	}
+	record := struct {
+		Transport       string                `json:"transport"`
+		Scenario        string                `json:"scenario"`
+		ID              string                `json:"id"`
+		Status          string                `json:"status"`
+		Fixture         string                `json:"fixture,omitempty"`
+		RedactedHeaders []string              `json:"redactedHeaders"`
+		V2Ref           string                `json:"v2Ref"`
+		V2Dirty         bool                  `json:"v2Dirty"`
+		ExpectedConnect corpus.HTTPExchange   `json:"expectedConnect"`
+		ExpectedPosts   []corpus.HTTPExchange `json:"expectedPosts,omitempty"`
+		ActualConnect   corpus.HTTPExchange   `json:"actualConnect"`
+		ActualPosts     []corpus.HTTPExchange `json:"actualPosts,omitempty"`
+		Expected        []corpus.SSERecord    `json:"expected"`
+		Collected       []corpus.SSERecord    `json:"collected"`
+		Delta           string                `json:"delta"`
+		Error           string                `json:"error,omitempty"`
+	}{
+		Transport:       "sse",
+		Scenario:        scenario.ID,
+		ID:              scenario.ID,
+		Status:          replayStatus(result.Passed),
+		Fixture:         scenario.Fixture,
+		RedactedHeaders: append([]string(nil), policy.HeaderNames...),
+		V2Ref:           v2Ref,
+		V2Dirty:         len(dirty) > 0,
+		ExpectedConnect: corpus.RedactExchange(scenario.Connect, policy),
+		ExpectedPosts:   redactExchanges(scenario.Posts, policy),
+		ActualConnect:   corpus.RedactExchange(result.Connect, policy),
+		ActualPosts:     redactExchanges(result.Posts, policy),
+		Expected:        corpus.NormalizeSSERecords(scenario.Expected),
+		Collected:       corpus.NormalizeSSERecords(result.Collected),
+		Delta:           result.Delta,
+	}
+	if result.Err != nil {
+		record.Error = result.Err.Error()
+	}
+	return corpus.WriteEvidence(path, record)
+}
+
+func redactExchanges(exchanges []corpus.HTTPExchange, policy corpus.RedactionPolicy) []corpus.HTTPExchange {
+	if exchanges == nil {
+		return nil
+	}
+	out := make([]corpus.HTTPExchange, len(exchanges))
+	for i, exchange := range exchanges {
+		out[i] = corpus.RedactExchange(exchange, policy)
+	}
+	return out
+}
+
+func replayStatus(passed bool) string {
+	if passed {
+		return "covered"
+	}
+	return "gap"
 }

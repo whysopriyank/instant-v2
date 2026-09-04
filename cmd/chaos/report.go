@@ -1,9 +1,115 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 )
+
+type chaosRunReport struct {
+	Status    string              `json:"status"`
+	Candidate candidateProvenance `json:"candidate"`
+	Config    chaosRunConfig      `json:"config"`
+	Fixture   chaosFixture        `json:"fixture"`
+	Artifact  chaosArtifact       `json:"artifact"`
+}
+
+type chaosRunConfig struct {
+	PGData       string `json:"pg_data"`
+	PGPort       int    `json:"pg_port"`
+	Sessions     int    `json:"sessions"`
+	Writes       int    `json:"writes"`
+	SkipCorpus   bool   `json:"skip_corpus"`
+	Keep         bool   `json:"keep"`
+	WebSocketURL string `json:"websocket_url"`
+}
+
+type chaosFixture struct {
+	ChaosApp  string `json:"chaos_app"`
+	AttrID    string `json:"attr_id"`
+	CorpusApp string `json:"corpus_app"`
+}
+
+type chaosArtifact struct {
+	InstantdSHA256     string `json:"instantd_sha256"`
+	CandidateAgreement bool   `json:"candidate_agreement"`
+	ReplayBaselineOK   bool   `json:"replay_baseline_ok"`
+	ReplayAfterOK      bool   `json:"replay_after_ok"`
+	CleanupComplete    bool   `json:"cleanup_complete"`
+}
+
+func writeChaosReport(path string, report chaosRunReport) (string, error) {
+	b, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("serialize chaos report: %w", err)
+	}
+	b = append(b, '\n')
+	if strings.TrimSpace(path) == "" {
+		f, err := os.CreateTemp(chaosTempRoot(), "instant-v2-chaos-report-*.json")
+		if err != nil {
+			return "", fmt.Errorf("create chaos report: %w", err)
+		}
+		path = f.Name()
+		if err := writeAndCloseReport(f, b); err != nil {
+			return "", err
+		}
+		return path, nil
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve chaos report path: %w", err)
+	}
+	f, err := os.OpenFile(absolute, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return "", fmt.Errorf("create chaos report %q: %w", absolute, err)
+	}
+	if err := writeAndCloseReport(f, b); err != nil {
+		return "", err
+	}
+	return absolute, nil
+}
+
+func validateReportPath(path, disposablePGData string) error {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	reportPath, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	pgPath, err := filepath.Abs(disposablePGData)
+	if err != nil {
+		return err
+	}
+	prefix := filepath.Clean(pgPath) + string(os.PathSeparator)
+	if filepath.Clean(reportPath) == filepath.Clean(pgPath) || strings.HasPrefix(filepath.Clean(reportPath), prefix) {
+		return fmt.Errorf("chaos report must not be stored inside disposable pg-data")
+	}
+	return nil
+}
+
+func writeAndCloseReport(f *os.File, b []byte) error {
+	n, err := f.Write(b)
+	if err != nil {
+		_ = f.Close()
+		return fmt.Errorf("write chaos report: %w", err)
+	}
+	if n != len(b) {
+		_ = f.Close()
+		return fmt.Errorf("write chaos report: %w", io.ErrShortWrite)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("sync chaos report: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close chaos report: %w", err)
+	}
+	return nil
+}
 
 func truncate(s string, n int) string {
 	if len(s) <= n {

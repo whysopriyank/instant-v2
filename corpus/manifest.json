@@ -188,6 +188,426 @@
       "note": "Unknown attribute rejects multi-step transaction without a partial write."
     }
   ],
+  "coverage": [
+    {
+      "id": "auth-ws-init-positive",
+      "family": "auth",
+      "case": "positive",
+      "surface": "ws.init",
+      "transport": "ws",
+      "scenario": "00-smoke",
+      "fixture": "smoke",
+      "owner": "internal/corpus",
+      "expectedState": "init-ok establishes an authorized session envelope",
+      "status": "covered",
+      "oracle": {
+        "kind": "regression",
+        "source": "Authored v2 scenario 00-smoke"
+      },
+      "evidence": ["00-smoke.ndjson"],
+      "note": "Anonymous initialization is replayed through the real WS handler."
+    },
+    {
+      "id": "auth-http-refresh-lifecycle",
+      "family": "auth",
+      "case": "lifecycle",
+      "surface": "http.auth-admin-runtime-storage-backup",
+      "transport": "http",
+      "fixture": "smoke",
+      "owner": "internal/corpus",
+      "expectedState": "refresh token rotation and replay behavior are captured",
+      "status": "gap",
+      "oracle": {
+        "kind": "spec",
+        "source": "docs/reference/03-protocol.md runtime auth contract"
+      },
+      "note": "No HTTP fixture or raw evidence is checked in yet."
+    },
+    {
+      "id": "auth-http-denied-error",
+      "family": "auth",
+      "case": "denied-error",
+      "surface": "http.auth-admin-runtime-storage-backup",
+      "transport": "http",
+      "fixture": "smoke",
+      "owner": "internal/corpus",
+      "expectedState": "malformed or expired credentials return client-safe denial",
+      "status": "gap",
+      "oracle": {
+        "kind": "spec",
+        "source": "docs/reference/03-protocol.md auth semantics"
+      },
+      "note": "The selected HTTP routes require capture through assembled handlers."
+    },
+    {
+      "id": "permissions-ws-view-positive",
+      "family": "permissions",
+      "case": "positive",
+      "surface": "ws.permissions.view-deny",
+      "transport": "ws",
+      "scenario": "05-permission-deny",
+      "fixture": "deny",
+      "owner": "internal/corpus",
+      "expectedState": "authorized view returns only permitted state",
+      "status": "covered",
+      "oracle": {
+        "kind": "regression",
+        "source": "Authored v2 scenario 05-permission-deny"
+      },
+      "evidence": ["05-permission-deny.ndjson"],
+      "note": "The denied fixture also asserts the closed view and write rules."
+    },
+    {
+      "id": "permissions-ws-denied-error",
+      "family": "permissions",
+      "case": "denied-error",
+      "surface": "ws.permissions.write-deny",
+      "transport": "ws",
+      "scenario": "05-permission-deny",
+      "fixture": "deny",
+      "owner": "internal/corpus",
+      "expectedState": "denied write exposes no unauthorized persisted change",
+      "status": "covered",
+      "oracle": {
+        "kind": "regression",
+        "source": "Authored v2 scenario 05-permission-deny"
+      },
+      "evidence": ["05-permission-deny.ndjson"],
+      "note": "Write denial is exercised through the actual session dispatcher."
+    },
+    {
+      "id": "permissions-bind-boundary",
+      "family": "permissions",
+      "case": "boundary",
+      "surface": "ws.permissions.dynamic",
+      "transport": "ws",
+      "fixture": "deny",
+      "owner": "internal/corpus",
+      "expectedState": "bind fallback and denied-state non-leakage are explicit",
+      "status": "gap",
+      "oracle": {
+        "kind": "spec",
+        "source": "docs/reference/03-protocol.md permissions model"
+      },
+      "note": "Dynamic bind/fallback coverage remains package evidence only."
+    },
+    {
+      "id": "permissions-lifecycle",
+      "family": "permissions",
+      "case": "lifecycle",
+      "surface": "ws.permissions.dynamic",
+      "transport": "sse",
+      "fixture": "deny",
+      "owner": "internal/corpus",
+      "expectedState": "permission changes do not widen an existing stream",
+      "status": "gap",
+      "oracle": {
+        "kind": "spec",
+        "source": "docs/reference/03-protocol.md permissions model"
+      },
+      "note": "SSE permission lifecycle capture is not authored."
+    },
+    {
+      "id": "query-filter-positive",
+      "family": "query",
+      "case": "positive",
+      "surface": "ws.query.filter",
+      "transport": "ws",
+      "scenario": "04-query-filter",
+      "fixture": "posts",
+      "owner": "internal/corpus",
+      "expectedState": "equality predicate returns the matching entity",
+      "status": "covered",
+      "oracle": {
+        "kind": "regression",
+        "source": "Authored v2 scenario 04-query-filter"
+      },
+      "evidence": ["04-query-filter.ndjson"],
+      "note": "Query and result envelopes are canonicalized with exact numbers."
+    },
+    {
+      "id": "query-pagination-boundary",
+      "family": "query",
+      "case": "boundary",
+      "surface": "ws.query.pagination",
+      "transport": "ws",
+      "scenario": "17-after-cursor",
+      "fixture": "posts",
+      "owner": "internal/corpus",
+      "expectedState": "cursor reuse advances to the next ordered entity",
+      "status": "covered",
+      "oracle": {
+        "kind": "regression",
+        "source": "Authored v2 scenario 17-after-cursor"
+      },
+      "evidence": ["17-after-cursor.ndjson"],
+      "note": "This is a narrow cursor regression, not complete pagination parity."
+    },
+    {
+      "id": "query-conjunction-gap",
+      "family": "query",
+      "case": "boundary",
+      "surface": "ws.query.filter",
+      "transport": "http",
+      "fixture": "posts",
+      "owner": "internal/corpus",
+      "expectedState": "conjunction and ordering remain stable over the HTTP query path",
+      "status": "gap",
+      "oracle": {
+        "kind": "spec",
+        "source": "docs/reference/03-protocol.md InstaQL surface"
+      },
+      "note": "HTTP query adapter exists, but no checked-in query exchange uses it."
+    },
+    {
+      "id": "query-relations-positive",
+      "family": "query",
+      "case": "positive",
+      "surface": "ws.query.relations",
+      "transport": "ws",
+      "scenario": "18-forward-relation",
+      "fixture": "relations",
+      "owner": "internal/corpus",
+      "expectedState": "forward reference and child projection remain present",
+      "status": "covered",
+      "oracle": {
+        "kind": "regression",
+        "source": "Authored v2 scenario 18-forward-relation"
+      },
+      "evidence": ["18-forward-relation.ndjson"],
+      "note": "Only the aliased cardinality-one case is covered."
+    },
+    {
+      "id": "query-concurrency-gap",
+      "family": "query",
+      "case": "concurrency",
+      "surface": "ws.query.lifecycle",
+      "transport": "sse",
+      "fixture": "posts",
+      "owner": "internal/corpus",
+      "expectedState": "concurrent query subscribers observe one ordered snapshot",
+      "status": "gap",
+      "oracle": {
+        "kind": "spec",
+        "source": "docs/reference/03-protocol.md refresh envelope"
+      },
+      "note": "No multi-client SSE capture is checked in."
+    },
+    {
+      "id": "refresh-full-positive",
+      "family": "refresh",
+      "case": "positive",
+      "surface": "ws.reactive.full",
+      "transport": "ws",
+      "scenario": "01-transact-refresh",
+      "fixture": "smoke",
+      "owner": "internal/corpus",
+      "expectedState": "post-commit subscription receives a full refresh envelope",
+      "status": "covered",
+      "oracle": {
+        "kind": "regression",
+        "source": "Authored v2 scenario 01-transact-refresh"
+      },
+      "evidence": ["01-transact-refresh.ndjson"],
+      "note": "The live corpus replay exercises commit-to-refresh ordering."
+    },
+    {
+      "id": "refresh-delta-boundary",
+      "family": "refresh",
+      "case": "boundary",
+      "surface": "ws.reactive.delta",
+      "transport": "ws",
+      "fixture": "posts",
+      "owner": "internal/corpus",
+      "expectedState": "delta and full refreshes converge to the same canonical result",
+      "status": "gap",
+      "oracle": {
+        "kind": "spec",
+        "source": "docs/reference/03-protocol.md refresh envelope"
+      },
+      "note": "The delta path has package tests but no corpus evidence."
+    },
+    {
+      "id": "refresh-sse-lifecycle",
+      "family": "refresh",
+      "case": "lifecycle",
+      "surface": "sse",
+      "transport": "sse",
+      "fixture": "smoke",
+      "owner": "internal/corpus",
+      "expectedState": "SSE handshake, updates and reconnect completion are ordered",
+      "status": "gap",
+      "oracle": {
+        "kind": "spec",
+        "source": "docs/reference/03-protocol.md SSE fallback"
+      },
+      "note": "The adapter is available; a checked-in scenario is still pending."
+    },
+    {
+      "id": "refresh-convergence-concurrency",
+      "family": "refresh",
+      "case": "concurrency",
+      "surface": "sse",
+      "transport": "sse",
+      "fixture": "smoke",
+      "owner": "internal/corpus",
+      "expectedState": "all selected subscribers converge after one committed change",
+      "status": "gap",
+      "oracle": {
+        "kind": "spec",
+        "source": "docs/reference/03-protocol.md refresh envelope"
+      },
+      "note": "Requires an owned multi-client fixture and raw stream evidence."
+    },
+    {
+      "id": "rooms-boundary-error",
+      "family": "rooms",
+      "case": "denied-error",
+      "surface": "ws.rooms.boundaries",
+      "transport": "ws",
+      "scenario": "06-room-boundaries",
+      "fixture": "smoke",
+      "owner": "internal/corpus",
+      "expectedState": "invalid room operations return protocol errors",
+      "status": "covered",
+      "oracle": {
+        "kind": "regression",
+        "source": "Authored v2 scenario 06-room-boundaries"
+      },
+      "evidence": ["06-room-boundaries.ndjson"],
+      "note": "Boundary errors and leave are covered; peer fanout is not."
+    },
+    {
+      "id": "rooms-fanout-positive",
+      "family": "rooms",
+      "case": "positive",
+      "surface": "ws.rooms.fanout",
+      "transport": "sse",
+      "fixture": "smoke",
+      "owner": "internal/corpus",
+      "expectedState": "same-node peers receive ordered presence and broadcast events",
+      "status": "gap",
+      "oracle": {
+        "kind": "spec",
+        "source": "docs/reference/03-protocol.md room operations"
+      },
+      "note": "Multi-client stream capture is still missing."
+    },
+    {
+      "id": "rooms-presence-lifecycle",
+      "family": "rooms",
+      "case": "lifecycle",
+      "surface": "ws.rooms.fanout",
+      "transport": "http",
+      "fixture": "smoke",
+      "owner": "internal/corpus",
+      "expectedState": "admin presence view reflects join, update and leave lifecycle",
+      "status": "gap",
+      "oracle": {
+        "kind": "spec",
+        "source": "docs/reference/03-protocol.md admin surface"
+      },
+      "note": "Admin presence is a separate HTTP capture row and remains unimplemented."
+    },
+    {
+      "id": "rooms-cross-node-unsupported",
+      "family": "rooms",
+      "case": "concurrency",
+      "surface": "ws.rooms.cross-node",
+      "transport": "ws",
+      "fixture": "smoke",
+      "owner": "internal/corpus",
+      "expectedState": "cross-node ephemeral fanout is not claimed",
+      "status": "unsupported",
+      "oracle": {
+        "kind": "spec",
+        "source": "docs/reference/03-protocol.md room operations"
+      },
+      "note": "No cross-node bus is selected by the current envelope."
+    },
+    {
+      "id": "transactions-add-positive",
+      "family": "transactions",
+      "case": "positive",
+      "surface": "ws.transact.add-triple",
+      "transport": "ws",
+      "scenario": "01-transact-refresh",
+      "fixture": "smoke",
+      "owner": "internal/corpus",
+      "expectedState": "committed triple is visible to the subscribed query",
+      "status": "covered",
+      "oracle": {
+        "kind": "regression",
+        "source": "Authored v2 scenario 01-transact-refresh"
+      },
+      "evidence": ["01-transact-refresh.ndjson"],
+      "note": "The transactor and reactive path are driven through the WS session."
+    },
+    {
+      "id": "transactions-rollback-error",
+      "family": "transactions",
+      "case": "denied-error",
+      "surface": "ws.transact.rollback",
+      "transport": "http",
+      "fixture": "smoke",
+      "owner": "internal/corpus",
+      "expectedState": "failed multi-step transaction leaves no partial write",
+      "status": "gap",
+      "oracle": {
+        "kind": "spec",
+        "source": "docs/reference/03-protocol.md transaction grammar"
+      },
+      "note": "The HTTP transaction path needs an authored exchange."
+    },
+    {
+      "id": "transactions-cardinality-boundary",
+      "family": "transactions",
+      "case": "boundary",
+      "surface": "ws.transact.extended",
+      "transport": "ws",
+      "fixture": "required",
+      "owner": "internal/corpus",
+      "expectedState": "cardinality, merge, cascade and required checks preserve final state",
+      "status": "gap",
+      "oracle": {
+        "kind": "spec",
+        "source": "docs/reference/03-protocol.md transaction grammar"
+      },
+      "note": "Only required-field retraction is currently corpus-covered."
+    },
+    {
+      "id": "transactions-lookup-lifecycle",
+      "family": "transactions",
+      "case": "lifecycle",
+      "surface": "ws.transact.lookup",
+      "transport": "sse",
+      "fixture": "unique",
+      "owner": "internal/corpus",
+      "expectedState": "lookup mutation persists and is visible over the selected stream",
+      "status": "gap",
+      "oracle": {
+        "kind": "spec",
+        "source": "docs/reference/03-protocol.md transaction grammar"
+      },
+      "note": "SSE transaction evidence is not yet authored."
+    },
+    {
+      "id": "transactions-concurrency-gap",
+      "family": "transactions",
+      "case": "concurrency",
+      "surface": "ws.transact.extended",
+      "transport": "http",
+      "fixture": "smoke",
+      "owner": "internal/corpus",
+      "expectedState": "concurrent writes retain transaction ordering and final state",
+      "status": "gap",
+      "oracle": {
+        "kind": "spec",
+        "source": "docs/reference/03-protocol.md transaction grammar"
+      },
+      "note": "No HTTP concurrency capture is selected or checked in."
+    }
+  ],
   "scenarios": [
     {
       "id": "00-smoke",

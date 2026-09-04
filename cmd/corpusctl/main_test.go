@@ -108,3 +108,131 @@ func TestDifferentialCommandFailsForTwoFailedConnections(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestSSEEvidenceIncludesHTTPExchanges(t *testing.T) {
+	dir := t.TempDir()
+	scenario := corpus.SSEScenario{
+		ID: "evidence-sse",
+		Connect: corpus.HTTPExchange{
+			Request:  corpus.HTTPRequest{Method: "GET", Target: "/stream", Headers: map[string][]string{"Authorization": {"Bearer secret"}}},
+			Response: corpus.HTTPResponse{Status: 200, Headers: map[string][]string{"Set-Cookie": {"session=secret"}}},
+		},
+		Posts: []corpus.HTTPExchange{{
+			Request:  corpus.HTTPRequest{Method: "POST", Target: "/refresh", Headers: map[string][]string{"Cookie": {"session=secret"}}},
+			Response: corpus.HTTPResponse{Status: 200, Headers: map[string][]string{"X-Trace": {"secret"}}, Body: []byte(`{"ok":true}`)},
+		}},
+		Expected: []corpus.SSERecord{{Kind: "data", Data: []byte(`{"ok":true}`)}},
+	}
+	result := corpus.SSEReplayResult{
+		Connect: corpus.HTTPExchange{
+			Request:  corpus.HTTPRequest{Method: "GET", Target: "/stream", Headers: map[string][]string{"Authorization": {"Bearer actual"}}},
+			Response: corpus.HTTPResponse{Status: 200, Headers: map[string][]string{"Set-Cookie": {"session=actual"}}},
+		},
+		Posts: []corpus.HTTPExchange{{
+			Request:  corpus.HTTPRequest{Method: "POST", Target: "/refresh", Headers: map[string][]string{"Cookie": {"session=actual"}}},
+			Response: corpus.HTTPResponse{Status: 200, Headers: map[string][]string{"X-Trace": {"actual"}}, Body: []byte(`{"ok":true}`)},
+		}},
+		Collected: scenario.Expected,
+	}
+	if err := writeSSEEvidence(options{outputDir: dir, redactHeaders: headerList{"X-Trace"}}, scenario, result); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "evidence-sse.sse.evidence.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record map[string]json.RawMessage
+	if err := json.Unmarshal(b, &record); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"expectedConnect", "expectedPosts", "actualConnect", "actualPosts"} {
+		if len(record[key]) == 0 {
+			t.Errorf("SSE evidence omitted %s: %s", key, b)
+		}
+	}
+	var evidence struct {
+		ExpectedConnect corpus.HTTPExchange   `json:"expectedConnect"`
+		ExpectedPosts   []corpus.HTTPExchange `json:"expectedPosts"`
+		ActualConnect   corpus.HTTPExchange   `json:"actualConnect"`
+		ActualPosts     []corpus.HTTPExchange `json:"actualPosts"`
+		Expected        []corpus.SSERecord    `json:"expected"`
+		RedactedHeaders []string              `json:"redactedHeaders"`
+	}
+	if err := json.Unmarshal(b, &evidence); err != nil {
+		t.Fatal(err)
+	}
+	if got := evidence.ExpectedConnect.Request.Headers.Get("Authorization"); got != "<redacted>" {
+		t.Fatalf("default Authorization redaction missing: %q", got)
+	}
+	if got := evidence.ExpectedConnect.Response.Headers.Get("Set-Cookie"); got != "<redacted>" {
+		t.Fatalf("default Set-Cookie redaction missing: %q", got)
+	}
+	if got := evidence.ExpectedPosts[0].Request.Headers.Get("Cookie"); got != "<redacted>" {
+		t.Fatalf("default Cookie redaction missing: %q", got)
+	}
+	if got := evidence.ExpectedPosts[0].Response.Headers.Get("X-Trace"); got != "<redacted>" {
+		t.Fatalf("repeatable header redaction missing: %q", got)
+	}
+	if got := string(evidence.Expected[0].Normalized); got != `{"ok":true}` {
+		t.Fatalf("normalized SSE evidence missing: %q", got)
+	}
+}
+
+func TestHTTPEvidenceRedactsDefaultAndOverrideHeaders(t *testing.T) {
+	dir := t.TempDir()
+	exchange := corpus.HTTPExchange{
+		Request:  corpus.HTTPRequest{Method: "GET", Target: "/health", Headers: map[string][]string{"Authorization": {"Bearer secret"}, "X-Trace": {"trace-secret"}}},
+		Response: corpus.HTTPResponse{Status: 200, Headers: map[string][]string{"Authorization": {"Bearer response-secret"}, "Set-Cookie": {"session=secret"}, "X-Trace": {"trace-secret"}}},
+	}
+	result := corpus.HTTPReplayResult{Actual: exchange, ExpectedHeader: exchange.Response.Headers, ActualHeader: exchange.Response.Headers, Passed: true}
+	if err := writeHTTPEvidence(options{corpusDir: "health.json", outputDir: dir, redactHeaders: headerList{"X-Trace"}}, exchange, result); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "health.json.http.evidence.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var evidence struct {
+		Expected   corpus.HTTPExchange `json:"expected"`
+		Normalized struct {
+			ExpectedHeaders map[string][]string `json:"expectedHeaders"`
+		} `json:"normalized"`
+	}
+	if err := json.Unmarshal(b, &evidence); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"Authorization", "X-Trace"} {
+		if got := evidence.Expected.Request.Headers.Get(name); got != "<redacted>" {
+			t.Errorf("request %s was not redacted: %q", name, got)
+		}
+		if got := evidence.Normalized.ExpectedHeaders[name]; len(got) != 1 || got[0] != "<redacted>" {
+			t.Errorf("normalized %s was not redacted: %v", name, got)
+		}
+	}
+	if got := evidence.Expected.Response.Headers.Get("Set-Cookie"); got != "<redacted>" {
+		t.Fatalf("response Set-Cookie was not redacted: %q", got)
+	}
+}
+
+func TestRedactionHeaderConfigIsRepeatable(t *testing.T) {
+	var configured headerList
+	if err := configured.Set("X-Trace"); err != nil {
+		t.Fatal(err)
+	}
+	if err := configured.Set("X-Debug"); err != nil {
+		t.Fatal(err)
+	}
+	policy := redactionPolicy(options{redactHeaders: configured})
+	if len(policy.HeaderNames) != 5 || policy.HeaderNames[3] != "X-Trace" || policy.HeaderNames[4] != "X-Debug" {
+		t.Fatalf("repeatable redaction config was not retained: %v", policy.HeaderNames)
+	}
+}
+
+func TestSSEEvidenceRejectsUnsafeScenarioID(t *testing.T) {
+	for _, id := range []string{"../escape", ""} {
+		err := writeSSEEvidence(options{outputDir: t.TempDir()}, corpus.SSEScenario{ID: id}, corpus.SSEReplayResult{})
+		if err == nil || !strings.Contains(err.Error(), "invalid scenario id") {
+			t.Fatalf("unsafe SSE evidence path %q was accepted: %v", id, err)
+		}
+	}
+}

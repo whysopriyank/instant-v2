@@ -17,7 +17,8 @@ import (
 type CanonicalOptions struct {
 	// Differential masks fields the two servers legitimately differ on:
 	// attrs arrays (v1 always sends them; v2 skips for skip-attrs clients)
-	// and the global tx watermark sequences.
+	// and the frame-level tx watermark sequences. These masks are path-aware;
+	// application payload values with the same keys remain significant.
 	Differential bool
 }
 
@@ -38,7 +39,7 @@ func CanonicalBytesOpts(b []byte, opts CanonicalOptions) ([]byte, error) {
 	if err := dec.Decode(new(any)); err != io.EOF {
 		return nil, fmt.Errorf("canonical: expected exactly one JSON value")
 	}
-	norm := canonicalizeValue(v, opts, false)
+	norm := canonicalizeValue(v, opts, nil)
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
@@ -60,16 +61,17 @@ const NormalizedSessionID = "<session-id>"
 // NormalizedTxID masks the global tx watermark (v1 and v2 count independently).
 const NormalizedTxID = "<tx-id>"
 
-// Traversal allocates each output container once; field policy is independent
-// of traversal. authObject marks only a map reached through an "auth" field.
-func canonicalizeValue(v any, opts CanonicalOptions, authObject bool) any {
+// Traversal allocates each output container once. Field policy is path-aware:
+// protocol metadata is normalized only at its documented frame-level paths, so
+// application payloads with the same field names remain comparison-significant.
+func canonicalizeValue(v any, opts CanonicalOptions, path []string) any {
 	switch x := v.(type) {
 	case map[string]any:
 		out := make(map[string]any, len(x))
 		for k, value := range x {
-			value, keep := canonicalField(k, value, opts, authObject)
+			value, keep := canonicalField(k, value, opts, path)
 			if keep {
-				out[k] = canonicalizeValue(value, opts, k == "auth")
+				out[k] = canonicalizeValue(value, opts, appendPath(path, k))
 			}
 		}
 		// encoding/json emits object keys in sorted order.
@@ -77,7 +79,9 @@ func canonicalizeValue(v any, opts CanonicalOptions, authObject bool) any {
 	case []any:
 		out := make([]any, len(x))
 		for i, e := range x {
-			out[i] = canonicalizeValue(e, opts, false)
+			// A map inside an array is never a frame-level object, even when the
+			// enclosing value is the root JSON value.
+			out[i] = canonicalizeValue(e, opts, appendPath(path, "[]"))
 		}
 		return out
 	case string:
@@ -93,38 +97,65 @@ func canonicalizeValue(v any, opts CanonicalOptions, authObject bool) any {
 }
 
 // These are the existing exclusions, not permission to ignore new differences.
-// Their recursive scope is retained for compatibility; see corpus/README.md.
-func canonicalField(key string, value any, opts CanonicalOptions, authObject bool) (any, bool) {
+// Their scope is intentionally limited to protocol frame metadata; see
+// corpus/README.md for the complete path policy.
+func canonicalField(key string, value any, opts CanonicalOptions, parentPath []string) (any, bool) {
+	root := len(parentPath) == 0
 	switch key {
 	case "tx-id", "processed-tx-id":
+		if !root {
+			return value, true
+		}
 		return NormalizedTxID, true
 	case "session-id":
-		if _, ok := value.(string); ok {
-			return NormalizedSessionID, true
+		if root {
+			if _, ok := value.(string); ok {
+				return NormalizedSessionID, true
+			}
 		}
 	}
 	if !opts.Differential {
 		return value, true
 	}
-	switch key {
-	case "attrs":
-		return "<attrs>", true
-	case "processed-isn", "isn", "trace-id", "server-hostname", "server-port":
-		return nil, false
-	case "result-meta":
-		if value == nil {
-			return map[string]any{}, true
+	if root {
+		switch key {
+		case "attrs":
+			return "<attrs>", true
+		case "processed-isn", "isn", "trace-id", "server-hostname", "server-port":
+			return nil, false
+		case "result-meta":
+			if value == nil {
+				return map[string]any{}, true
+			}
 		}
-	case "admin?":
-		if authObject && value == nil {
-			return false, true
-		}
-	case "app":
-		if app, ok := value.(map[string]any); authObject && ok {
-			return map[string]any{"id": app["id"]}, true
+	}
+	if isAuthField(parentPath, key) {
+		switch key {
+		case "admin?":
+			if value == nil {
+				return false, true
+			}
+		case "app":
+			if app, ok := value.(map[string]any); ok {
+				return map[string]any{"id": app["id"]}, true
+			}
 		}
 	}
 	return value, true
+}
+
+func isAuthField(parentPath []string, key string) bool {
+	if len(parentPath) != 1 || parentPath[0] != "auth" {
+		return false
+	}
+	return key == "admin?" || key == "app"
+}
+
+func appendPath(path []string, segment string) []string {
+	out := make([]string, len(path)+1)
+	copy(out, path)
+	out[len(path)] = segment
+	return out
 }
 
 // Exact decimal semantic equality: 1, 1.0 and 1e0 compare equal, while integers

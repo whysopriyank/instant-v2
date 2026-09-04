@@ -11,34 +11,75 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
+
+func cleanupBeforePASS(keep bool, cleanup func() error) error {
+	if keep {
+		return nil
+	}
+	if err := cleanup(); err != nil {
+		return fmt.Errorf("cleanup before PASS: %w", err)
+	}
+	return nil
+}
 
 func run() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	repoRoot := findRepoRoot()
-	pgData := *flagPGData
+	preparedPGData, err := preparePGData(*flagPGData)
+	if err != nil {
+		return fmt.Errorf("pg-data safety check: %w", err)
+	}
+	pgData := preparedPGData.Path
+	clusterInitialized := false
+	cleanupDone := *flagKeep
+	cleanup := func() error {
+		if cleanupDone {
+			return nil
+		}
+		var err error
+		if clusterInitialized {
+			err = cleanupCluster(pgData, preparedPGData.Identity)
+		} else {
+			err = mustRm(pgData, preparedPGData.Identity)
+		}
+		if err == nil {
+			cleanupDone = true
+		}
+		return err
+	}
+	defer func() {
+		if err := cleanup(); err != nil {
+			fmt.Printf("   warning: datadir cleanup failed: %v\n", err)
+		}
+	}()
 
 	// ---- Phase 0: boot throwaway postgres ---------------------------------
 	fmt.Printf("== [0] booting throwaway postgres (datadir %s, port %d) ==\n", pgData, *flagPGPort)
-	mustRm(pgData)
-	if out, err := pgBin("initdb", "-D", pgData, "-U", "instant", "--auth=trust", "-E", "utf8"); err != nil {
+	if err := verifyPGDataIdentity(pgData, preparedPGData.Identity); err != nil {
+		return fmt.Errorf("pg-data changed before initdb: %w", err)
+	}
+	if out, err := pgBinInDir(pgData, preparedPGData.Identity, "initdb", "-D", ".", "-U", "instant", "--auth=trust", "-E", "utf8"); err != nil {
 		return fmt.Errorf("initdb: %v\n%s", err, out)
 	}
-	if out, err := pgCtl(pgData,
-		"-l", filepath.Join(pgData, "chaos.log"),
+	if err := verifyPGDataIdentity(pgData, preparedPGData.Identity); err != nil {
+		return fmt.Errorf("pg-data changed during initdb: %w", err)
+	}
+	if err := verifyPGDataIdentity(pgData, preparedPGData.Identity); err != nil {
+		return fmt.Errorf("pg-data changed before pg_ctl start: %w", err)
+	}
+	if out, err := pgCtl(pgData, preparedPGData.Identity,
+		"-l", "chaos.log",
 		"-o", fmt.Sprintf("-p %d -c wal_level=logical", *flagPGPort),
 		"-w", "-t", "30", "start"); err != nil {
 		return fmt.Errorf("pg_ctl start: %v\n%s", err, out)
 	}
-	if !*flagKeep {
-		defer cleanupCluster(pgData)
-	}
-
+	clusterInitialized = true
 	dsn := fmt.Sprintf("postgres://instant@localhost:%d/instant_chaos?sslmode=disable", *flagPGPort)
 	if out, err := pgBin("createdb", "-h", "localhost", "-p", fmt.Sprint(*flagPGPort), "-U", "instant", "instant_chaos"); err != nil {
 		return fmt.Errorf("createdb: %v\n%s", err, out)
@@ -94,15 +135,25 @@ func run() error {
 	tails := &tailStats{seen: map[string]bool{}, appFilter: chaosApp}
 	tailCtx, tailCancel := context.WithCancel(ctx)
 	tailDone := make(chan struct{})
-	go func() { defer close(tailDone); _ = wt.Run(tailCtx, cpLive, tails.handle) }()
-	defer tailCancel()
+	tailErr := make(chan error, 1)
+	go func() {
+		err := wt.Run(tailCtx, cpLive, tails.handle)
+		tailErr <- err
+		close(tailDone)
+	}()
+	defer func() {
+		tailCancel()
+		select {
+		case <-tailDone:
+		case <-time.After(35 * time.Second):
+		}
+	}()
 	fmt.Printf("== [1] waltail streaming (slot %s), checkpoint LSN starts at %d ==\n", wt.SlotName(), cpLive.Last())
 
 	// ---- Phase 3: build + start instantd ------------------------------------
-	// Preferred: build the live working tree (tests what will actually ship).
-	// Fallback: if that fails — e.g. a sibling workstream holds half-finished
-	// uncommitted edits — retry from a pristine `git archive HEAD` export so
-	// the chaos proof stays runnable.
+	// Build exactly the working tree that was inspected for this run. A chaos
+	// proof must fail when that candidate cannot build; substituting HEAD would
+	// certify a different revision.
 	fmt.Println("== [2] building instantd ==")
 	binDir, err := os.MkdirTemp("", "chaos-instantd-*")
 	if err != nil {
@@ -110,39 +161,26 @@ func run() error {
 	}
 	defer func() { _ = os.RemoveAll(binDir) }()
 	instantdBin := filepath.Join(binDir, "instantd")
-
-	buildAt := func(dir string) ([]byte, error) {
-		b := exec.Command("go", "build", "-o", instantdBin, "./cmd/instantd")
-		b.Dir = dir
-		return b.CombinedOutput()
+	candidate, err := captureCandidate(repoRoot)
+	if err != nil {
+		return fmt.Errorf("capture candidate provenance: %w", err)
 	}
-	// The working tree is shared with concurrently-running workstreams; a
-	// build may transiently fail while a sibling saves mid-edit. Retry a
-	// few times before falling back to the pristine HEAD export.
-	buildSrc := repoRoot
-	var lastOut []byte
-	var lastErr error
-	for attempt := 1; attempt <= 8; attempt++ {
-		lastOut, lastErr = buildAt(repoRoot)
-		if lastErr == nil {
-			break
-		}
-		fmt.Printf("   working-tree build attempt %d failed; retrying in 15s (%v)\n", attempt, lastErr)
-		time.Sleep(15 * time.Second)
+	buildSrc, snapshotHash, err := snapshotCandidate(repoRoot, candidate)
+	if err != nil {
+		return fmt.Errorf("snapshot candidate: %w", err)
 	}
-	if lastErr != nil {
-		fmt.Println("   falling back to HEAD snapshot")
-		srcDir, xerr := exportHead(repoRoot)
-		if xerr != nil {
-			return fmt.Errorf("export HEAD: %w", xerr)
-		}
-		defer func() { _ = os.RemoveAll(srcDir) }()
-		out2, err2 := buildAt(srcDir)
-		if err2 != nil {
-			return fmt.Errorf("go build instantd (working tree):\n%s\ngo build instantd (HEAD):\n%s", lastOut, out2)
-		}
-		buildSrc = srcDir // corpusctl + corpus replay against the same snapshot
+	defer func() { _ = os.RemoveAll(buildSrc) }()
+	candidate.SnapshotSHA256 = snapshotHash
+	lastOut, err := buildWorkingTree(buildSrc, instantdBin, buildInstantd)
+	if err != nil {
+		return fmt.Errorf("go build instantd candidate: %w\n%s", err, lastOut)
 	}
+	candidate.BinarySHA256, err = sha256File(instantdBin)
+	if err != nil {
+		return fmt.Errorf("hash instantd candidate: %w", err)
+	}
+	fmt.Printf("   candidate revision=%s tree=%s instantd-sha256=%s\n",
+		candidate.Revision, candidate.TreeFingerprint, candidate.BinarySHA256)
 	httpPort, err := freePort()
 	if err != nil {
 		return err
@@ -151,6 +189,12 @@ func run() error {
 	baseURL := "http://" + httpAddr
 	wsURL := fmt.Sprintf("ws://%s/runtime/session", httpAddr)
 
+	if err := verifyBinaryHash(instantdBin, candidate.BinarySHA256); err != nil {
+		return fmt.Errorf("verify instantd before first start: %w", err)
+	}
+	if err := verifySnapshotHash(buildSrc, candidate.SnapshotSHA256); err != nil {
+		return fmt.Errorf("verify candidate snapshot before first start: %w", err)
+	}
 	p1, err := startInstantd(instantdBin, dsn, httpAddr)
 	if err != nil {
 		return err
@@ -176,6 +220,9 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	if err := pollTailerError(tailErr); err != nil {
+		return fmt.Errorf("waltail before chaos: %w", err)
+	}
 	preKillFrames := 0
 	for _, s := range sessions {
 		preKillFrames += s.frameCount()
@@ -185,18 +232,28 @@ func run() error {
 
 	corpusBaseline := ""
 	if !*flagSkipCorp {
-		corpusBaseline = runCorpusReplay(buildSrc, wsURL)
+		if err := verifySnapshotHash(buildSrc, candidate.SnapshotSHA256); err != nil {
+			return fmt.Errorf("verify candidate snapshot before baseline replay: %w", err)
+		}
+		corpusBaseline, err = runCorpusReplay(buildSrc, wsURL)
+		if err != nil {
+			return fmt.Errorf("corpus baseline replay: %w", err)
+		}
 		fmt.Println("-- corpus baseline (pre-chaos) --\n" + indent(corpusBaseline))
 	}
 
 	// ---- Phase 5: THE CHAOS — SIGSTOP, then crash postgres -------------------
 	fmt.Println("== [4] CHAOS: SIGSTOP postmaster, then pg_ctl stop -m immediate ==")
-	if pm := pidOfPostmaster(pgData); pm != "" {
-		_ = exec.Command("kill", "-STOP", pm).Run()
-		time.Sleep(2 * time.Second) // hold the freeze mid-stream
-		_ = exec.Command("kill", "-CONT", pm).Run()
+	pm, err := pidOfPostmaster(pgData, preparedPGData.Identity)
+	if err != nil {
+		return fmt.Errorf("postmaster pid safety check: %w", err)
 	}
-	if out, err := pgCtl(pgData, "-m", "immediate", "-w", "stop"); err != nil {
+	if pm != "" {
+		if err := freezeAndThawPostmaster(pm, 2*time.Second); err != nil {
+			return err
+		}
+	}
+	if out, err := pgCtl(pgData, preparedPGData.Identity, "-m", "immediate", "-w", "stop"); err != nil {
 		return fmt.Errorf("immediate stop: %v\n%s", err, out)
 	}
 
@@ -244,18 +301,22 @@ func run() error {
 	fmt.Println("== [6] restarting postgres + instantd ==")
 	fmt.Println("   stopping old tailer...")
 	tailCancel()
-	select {
-	case <-tailDone:
-	case <-time.After(35 * time.Second):
-		fmt.Println("   note: old tailer loop slow to unwind (backoff)")
+	if err := waitTailer(tailDone, tailErr, 35*time.Second); err != nil {
+		return fmt.Errorf("stop old waltail: %w", err)
 	}
-	if out, err := pgCtl(pgData,
-		"-l", filepath.Join(pgData, "chaos.log"),
+	if out, err := pgCtl(pgData, preparedPGData.Identity,
+		"-l", "chaos.log",
 		"-o", fmt.Sprintf("-p %d -c wal_level=logical", *flagPGPort),
 		"-w", "-t", "60", "start"); err != nil {
 		return fmt.Errorf("pg_ctl restart: %v\n%s", err, out)
 	}
 	fmt.Printf("   starting instantd at %s...\n", httpAddr)
+	if err := verifyBinaryHash(instantdBin, candidate.BinarySHA256); err != nil {
+		return fmt.Errorf("verify instantd before recovery start: %w", err)
+	}
+	if err := verifySnapshotHash(buildSrc, candidate.SnapshotSHA256); err != nil {
+		return fmt.Errorf("verify candidate snapshot before recovery start: %w", err)
+	}
 	p2, err := startInstantd(instantdBin, dsn, httpAddr)
 	if err != nil {
 		return err
@@ -276,7 +337,24 @@ func run() error {
 	}
 	_, preTotal, preLSN := tails.snapshot()
 	wt2 := &waltail.Tailer{Pool: pool, Logger: tailLog}
-	go func() { _ = wt2.Run(context.Background(), cpPost, tails.handle) }()
+	tailCtx2, tailCancel2 := context.WithCancel(ctx)
+	tailDone2 := make(chan struct{})
+	tailErr2 := make(chan error, 1)
+	go func() {
+		err := wt2.Run(tailCtx2, cpPost, tails.handle)
+		tailErr2 <- err
+		close(tailDone2)
+	}()
+	defer func() {
+		tailCancel2()
+		select {
+		case <-tailDone2:
+		case <-time.After(35 * time.Second):
+		}
+	}()
+	if err := pollTailerError(tailErr2); err != nil {
+		return fmt.Errorf("recovered waltail: %w", err)
+	}
 	fmt.Printf("   recovered; tail_state persisted LSN %d resumed (pre-restart stream reached record LSN %d over %d records)\n",
 		cpPost.Last(), preLSN, preTotal)
 
@@ -333,15 +411,65 @@ func run() error {
 	if postSeen != len(journal) {
 		return fmt.Errorf("waltail saw %d distinct entities, journal has %d", postSeen, len(journal))
 	}
+	if err := pollTailerError(tailErr2); err != nil {
+		return fmt.Errorf("recovered waltail: %w", err)
+	}
 	fmt.Printf("   tailer: %d distinct entities == journal size; raw records %d (%d replayed across the crash)\n",
 		postSeen, postTotal, postTotal-preTotal)
 
 	// ---- Phase 8: corpus replay post-chaos ------------------------------------
 	corpusAfter := ""
 	if !*flagSkipCorp {
-		corpusAfter = runCorpusReplay(buildSrc, wsURL)
+		if err := verifySnapshotHash(buildSrc, candidate.SnapshotSHA256); err != nil {
+			return fmt.Errorf("verify candidate snapshot before post-chaos replay: %w", err)
+		}
+		corpusAfter, err = runCorpusReplay(buildSrc, wsURL)
+		if err != nil {
+			return fmt.Errorf("corpus post-chaos replay: %w", err)
+		}
 		fmt.Println("-- corpus replay (post-chaos) --\n" + indent(corpusAfter))
 	}
+	tailCancel2()
+	if err := waitTailer(tailDone2, tailErr2, 35*time.Second); err != nil {
+		return fmt.Errorf("stop recovered waltail: %w", err)
+	}
+	if err := cleanupBeforePASS(*flagKeep, cleanup); err != nil {
+		return err
+	}
+	if err := verifyBinaryHash(instantdBin, candidate.BinarySHA256); err != nil {
+		return fmt.Errorf("verify instantd before report: %w", err)
+	}
+	if err := verifySnapshotHash(buildSrc, candidate.SnapshotSHA256); err != nil {
+		return fmt.Errorf("verify candidate snapshot before report: %w", err)
+	}
+	if err := validateReportPath(*flagReport, pgData); err != nil {
+		return fmt.Errorf("report path safety check: %w", err)
+	}
+	reportPath, err := writeChaosReport(*flagReport, chaosRunReport{
+		Status:    "PASS",
+		Candidate: candidate,
+		Config: chaosRunConfig{
+			PGData:       pgData,
+			PGPort:       *flagPGPort,
+			Sessions:     *flagSessions,
+			Writes:       *flagWrites,
+			SkipCorpus:   *flagSkipCorp,
+			Keep:         *flagKeep,
+			WebSocketURL: wsURL,
+		},
+		Fixture: chaosFixture{ChaosApp: chaosApp, AttrID: attrID, CorpusApp: corpusAppID},
+		Artifact: chaosArtifact{
+			InstantdSHA256:     candidate.BinarySHA256,
+			CandidateAgreement: true,
+			ReplayBaselineOK:   corpusBaseline == "" || strings.Contains(corpusBaseline, "scenarios passed"),
+			ReplayAfterOK:      corpusAfter == "" || strings.Contains(corpusAfter, "scenarios passed"),
+			CleanupComplete:    !*flagKeep && cleanupDone,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("write chaos report: %w", err)
+	}
+	fmt.Printf("   durable chaos report: %s\n", reportPath)
 
 	printSummary(len(journal), rejectedPre, outageRejected, sessions,
 		postSeen, postTotal, postLSN, cpPost.Last(), corpusBaseline, corpusAfter)

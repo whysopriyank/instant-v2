@@ -151,6 +151,62 @@ func TestCanonicalExistingExclusionsOnly(t *testing.T) {
 	}
 }
 
+func TestCanonicalDifferentialMetadataScopePreservesPayload(t *testing.T) {
+	input := []byte(`{"session-id":"wire-session","attrs":[{"id":"metadata"}],"tx-id":7,"processed-tx-id":8,"processed-isn":"0/0/1","trace-id":"trace","server-hostname":"host","server-port":80,"result-meta":null,"auth":{"app":{"id":"a","title":"metadata"},"admin?":null},"data":{"session-id":"payload-session","attrs":[{"id":"payload-attrs"}],"tx-id":"payload-tx","processed-tx-id":"payload-processed","processed-isn":"payload-isn","trace-id":"payload-trace","server-hostname":"payload-host","server-port":"payload-port","result-meta":null,"auth":{"app":{"id":"payload-app","title":"payload-title"},"admin?":null}}}`)
+	got, err := CanonicalBytesOpts(input, CanonicalOptions{Differential: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, retained := range []string{
+		`"session-id":"payload-session"`,
+		`"attrs":[{"id":"payload-attrs"}]`,
+		`"tx-id":"payload-tx"`,
+		`"processed-tx-id":"payload-processed"`,
+		`"processed-isn":"payload-isn"`,
+		`"trace-id":"payload-trace"`,
+		`"server-hostname":"payload-host"`,
+		`"server-port":"payload-port"`,
+		`"result-meta":null`,
+		`"title":"payload-title"`,
+	} {
+		if !bytes.Contains(got, []byte(retained)) {
+			t.Fatalf("payload metadata-like field was masked: missing %s in %s", retained, got)
+		}
+	}
+	for _, masked := range []string{
+		`"session-id":"<session-id>"`,
+		`"attrs":"<attrs>"`,
+		`"tx-id":"<tx-id>"`,
+		`"processed-tx-id":"<tx-id>"`,
+		`"result-meta":{}`,
+		`"admin?":false`,
+		`"app":{"id":"a"}`,
+	} {
+		if !bytes.Contains(got, []byte(masked)) {
+			t.Fatalf("protocol metadata was not normalized: missing %s in %s", masked, got)
+		}
+	}
+}
+
+func TestCanonicalDifferentialDoesNotMaskArbitraryTimestamps(t *testing.T) {
+	for _, pair := range [][2]string{
+		{`{"timestamp":"2026-09-04T00:00:00Z"}`, `{"timestamp":"2026-09-04T00:00:01Z"}`},
+		{`{"data":{"timestamp":"2026-09-04T00:00:00Z"}}`, `{"data":{"timestamp":"2026-09-04T00:00:01Z"}}`},
+	} {
+		a, err := CanonicalBytesOpts([]byte(pair[0]), CanonicalOptions{Differential: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := CanonicalBytesOpts([]byte(pair[1]), CanonicalOptions{Differential: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Equal(a, b) {
+			t.Fatalf("arbitrary timestamp was masked: %s / %s", a, b)
+		}
+	}
+}
+
 func FuzzCanonicalIdempotent(f *testing.F) {
 	for _, seed := range []string{`{"value":9007199254740993}`, `{"auth":{"app":{"id":"a"},"admin?":null}}`, `[1.0,1e0,-0,0.123456789012345678901]`, `{"attrs":null,"result-meta":null,"tx-id":999}`} {
 		f.Add([]byte(seed))

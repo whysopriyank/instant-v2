@@ -1,7 +1,9 @@
 # Corpus contracts and evidence
 
 `manifest.json` is the deterministic WS scenario, fixture, owner, normalization,
-and coverage inventory. The 18 default scenarios are **authored v2 regression
+and coverage inventory. Its `coverage` array is the claim ledger for each
+auth/perms/query/refresh/rooms/transaction case, including transport, expected
+state, owner, and evidence status. The 18 default scenarios are **authored v2 regression
 expectations**, not recorded v1 oracles. The two original scenario paths remain
 stable. Scenarios are still NDJSON `meta`/`c2s`/`s2c` records; loading is recursive
 and sorted. Every scenario must start with one named meta record and contain
@@ -53,7 +55,8 @@ for a real service. `relations.json` seeds the forward-relation regression.
 | 18 | Aliased cardinality-one forward relation retains reference/child projection |
 
 The manifest records 22 narrowly covered surfaces, seven gaps and two unsupported
-surfaces, with zero v1 captures. Remaining gaps include the full
+surfaces, with zero v1 captures. The matrix currently has 25 entries: 9 covered,
+15 gaps, and 1 unsupported case. Remaining gaps include the full
 cardinality/merge/cascade matrix, dynamic permission
 bindings/fallbacks, token auth, multi-client room fanout, delta refresh, SSE and
 HTTP/SDK capture. Sync/stream acknowledgement placeholders and cross-node rooms
@@ -80,20 +83,24 @@ equality: `1`, `1.0`, `1e0` are equal; distinct large integers and fractional di
 remain distinct; signed zero is equivalent to zero. Huge exponents are normalized
 symbolically without allocating their expanded decimal representation.
 
-Both modes mask `tx-id`, `processed-tx-id`, and string-valued `session-id`.
-Differential mode additionally retains the pre-existing exclusions:
+Both modes mask only frame-root `tx-id`, `processed-tx-id`, and string-valued
+`session-id`. Differential mode additionally applies these path-specific rules:
 
-- Replace present `attrs` with `<attrs>`; presence versus absence still differs.
-- Remove `processed-isn`, `isn`, `trace-id`, `server-hostname`, `server-port`.
-- Project `auth.app` to `id`, change null `auth.admin?` to false, and null
-  `result-meta` to an empty object.
+- Replace present frame-root `attrs` with `<attrs>`; presence versus absence still
+  differs.
+- Remove frame-root `processed-isn`, `isn`, `trace-id`, `server-hostname`, and
+  `server-port`.
+- Project `auth.app` and `auth.admin?` only when they are direct children of the
+  frame-root `auth` object: `auth.app` becomes `{id}` and null `auth.admin?`
+  becomes `false`.
+- Convert only frame-root null `result-meta` to an empty object.
 
-No new ignored fields were added. These historical key-based rules apply
-recursively, so application payload fields with those same names can be masked.
-That is a known comparison blind spot, not proof of equality for those fields.
-Session IDs in object keys and arbitrary timestamps are **not** masked. The
-replayer compares exactly the declared frame count and does not prove absence
-of later unsolicited frames after its final expected step.
+Application payloads may use the same field names and remain comparison-significant;
+the path policy prevents metadata normalization from hiding user data. Session IDs
+in object keys and arbitrary timestamps are **not** masked. After the final expected
+frame, the replayer observes a bounded 25ms quiescence window and fails on an extra
+frame or abnormal disconnect. A silent peer, normal close, or window expiry is
+accepted; the finite window does not prove that no later frame can ever arrive.
 
 ## External replay and pinned-v1 differential
 

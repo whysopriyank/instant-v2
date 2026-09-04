@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -77,9 +78,10 @@ func LoadScenario(path string) (*Scenario, error) {
 			if len(sc.Steps) == 0 {
 				return nil, fmt.Errorf("%s:%d: missing initial meta", path, lineno)
 			}
-			// Validate it is JSON.
-			var v any
-			if err := json.Unmarshal(outer.Raw, &v); err != nil {
+			// Validate it is JSON without converting numbers through float64. The
+			// raw message is retained verbatim in the scenario for evidence.
+			v, err := decodeJSONValue(outer.Raw)
+			if err != nil {
 				return nil, fmt.Errorf("%s:%d %s: %w", path, lineno, outer.Dir, err)
 			}
 			if outer.Dir == "s2c" {
@@ -101,6 +103,25 @@ func LoadScenario(path string) (*Scenario, error) {
 		return nil, fmt.Errorf("%s: scenario requires client and expected server frames", path)
 	}
 	return sc, nil
+}
+
+// decodeJSONValue validates one JSON value while preserving json.Number for
+// the exact numeric domain used by canonicalization. It also rejects trailing
+// values so a frame cannot hide a second JSON value after a valid one.
+func decodeJSONValue(raw []byte) (any, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var value any
+	if err := dec.Decode(&value); err != nil {
+		return nil, err
+	}
+	if err := dec.Decode(new(any)); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("expected exactly one JSON value")
+		}
+		return nil, err
+	}
+	return value, nil
 }
 
 // LoadCorpus loads every *.ndjson under dir (recursively), optionally filtering by
