@@ -20,3 +20,9 @@ Start with the [repository quality guide](guides/repository-quality.md), the
 
 Next: the [production completion roadmap](plans/production-completion-roadmap.md)
 and the [delivery/database incident follow-up](reference/quality-incident-followup.md).
+For individually assignable, goal-driven work packets, use the
+[gaps and backlog precision build contract](plans/gaps-backlog-precision-build-contract.md).
+For the multi-session project finish-up program, start with the
+[finish-up contract index](plans/finish-up/README.md). It sequences the current
+gaps into one bounded goal per phase and is the preferred entry point for small
+context-window or goal-driven coding harnesses.
