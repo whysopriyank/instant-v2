@@ -90,6 +90,48 @@ func TestChecksumCorruption(t *testing.T) {
 	if !strings.Contains(err.Error(), "checksum") && !strings.Contains(err.Error(), "malformed") {
 		t.Fatalf("expected checksum error, got: %v", err)
 	}
+
+	// The rejected dump must leave the target exactly as it was.
+	var triples, attrs int
+	if err := pool.QueryRow(ctx,
+		`SELECT (SELECT count(*) FROM triples WHERE app_id=$1),
+		        (SELECT count(*) FROM attrs   WHERE app_id=$1)`, appID).Scan(&triples, &attrs); err != nil {
+		t.Fatal(err)
+	}
+	if triples != 10 || attrs != 4 {
+		t.Fatalf("corrupt import mutated target: triples=%d attrs=%d", triples, attrs)
+	}
+}
+
+// TestTruncatedDumpRejected pins DA-003 rows 3-4: a dump cut off
+// mid-stream (checksum trailer missing) is refused by the completion
+// contract and commits nothing.
+func TestTruncatedDumpRejected(t *testing.T) {
+	ctx := context.Background()
+	pool, appID, cleanup := env(t)
+	defer cleanup()
+	seedTodoApp(t, ctx, pool, appID, 2)
+	dump, _ := exportApp(t, ctx, pool, appID, backup.ExportOptions{})
+
+	target := newDatabase(t)
+	// Drop the checksum trailer at a line boundary: every remaining
+	// line parses, so only the completion contract can catch this.
+	lines := bytes.Split(bytes.TrimSuffix(dump, []byte("\n")), []byte("\n"))
+	cut := append(bytes.Join(lines[:len(lines)-1], []byte("\n")), '\n')
+	if _, err := backup.Import(ctx, target, bytes.NewReader(cut), appID); err == nil {
+		t.Fatal("expected truncated dump to fail import")
+	} else if !strings.Contains(err.Error(), "checksum") {
+		t.Fatalf("expected checksum error for truncated dump, got: %v", err)
+	}
+
+	var apps, triples int
+	if err := target.QueryRow(ctx,
+		`SELECT (SELECT count(*) FROM apps), (SELECT count(*) FROM triples)`).Scan(&apps, &triples); err != nil {
+		t.Fatal(err)
+	}
+	if apps != 0 || triples != 0 {
+		t.Fatalf("truncated import committed rows: apps=%d triples=%d", apps, triples)
+	}
 }
 
 // TestImportRejectsCrossAppDump pins the tenant boundary on restore: a dump

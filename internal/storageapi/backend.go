@@ -13,23 +13,74 @@ import (
 	"github.com/instant-v2/instant-v2/internal/platform"
 )
 
-// DiskBackend is an ObjectStore rooted at a directory under os.TempDir() (or
-// any explicit root). Presigned URLs are plain http URLs served by Handler
-// itself: the signature is HMAC-SHA256 over op|app-id|id|expiry using the
-// shared server secret, so presigning needs no external service and the whole
-// flow is testable without S3.
+// DiskBackend is an ObjectStore rooted at an explicitly configured,
+// validated durable directory (DA-001). There is deliberately no default:
+// an empty root is a construction error, never a silent temp fallback.
+// Presigned URLs are plain http URLs served by Handler itself: the
+// signature is HMAC-SHA256 over op|app-id|id|expiry using the shared server
+// secret, so presigning needs no external service and the whole flow is
+// testable without S3.
 type DiskBackend struct {
 	root   string
 	secret []byte
 }
 
-// NewDiskBackend builds a DiskBackend. An empty root defaults to
-// $TMPDIR/instant-storage.
-func NewDiskBackend(root string, secret []byte) *DiskBackend {
+// NewDiskBackend validates root and builds a DiskBackend. Validation
+// refuses empty, relative, malformed, and unwritable roots (DA-001d) so a
+// broken mount fails at startup, not at first upload. The daemon passes the
+// configured INSTANT_V2_STORAGE_ROOT; tests pass t.TempDir().
+func NewDiskBackend(root string, secret []byte) (*DiskBackend, error) {
 	if root == "" {
-		root = filepath.Join(os.TempDir(), "instant-storage")
+		return nil, fmt.Errorf("storageapi: storage root is required (set INSTANT_V2_STORAGE_ROOT)")
 	}
-	return &DiskBackend{root: root, secret: secret}
+	if !filepath.IsAbs(root) {
+		return nil, fmt.Errorf("storageapi: storage root %q must be absolute", root)
+	}
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return nil, fmt.Errorf("storageapi: storage root %q: %w", root, err)
+	}
+	if err := probeWritable(root); err != nil {
+		return nil, fmt.Errorf("storageapi: storage root %q: %w", root, err)
+	}
+	return &DiskBackend{root: root, secret: secret}, nil
+}
+
+// probeWritable creates, syncs, closes, and removes a probe file, then
+// syncs the directory, proving the mount accepts durable writes.
+func probeWritable(root string) error {
+	f, err := os.CreateTemp(root, ".writable-*")
+	if err != nil {
+		return err
+	}
+	name := f.Name()
+	if _, err := f.Write([]byte("ok")); err != nil {
+		f.Close()
+		os.Remove(name)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(name)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(name)
+		return err
+	}
+	if err := os.Remove(name); err != nil {
+		return err
+	}
+	return syncDir(root)
+}
+
+// syncDir fsyncs a directory so preceding renames survive a crash.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 // splitKey validates "<uuid>/<uuid>" keys and returns their parts.
@@ -93,10 +144,19 @@ func (d *DiskBackend) Put(key string, r io.Reader) error {
 		f.Close()
 		return err
 	}
+	// DA-001a: fsync the content before close and the directory after
+	// rename, so a stored object survives a crash, not just a clean exit.
+	if err = f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
 	if err = f.Close(); err != nil {
 		return err
 	}
-	return os.Rename(f.Name(), p)
+	if err = os.Rename(f.Name(), p); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(p))
 }
 
 func (d *DiskBackend) Open(key string) (*Object, error) {

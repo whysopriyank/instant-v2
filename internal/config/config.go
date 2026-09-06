@@ -2,9 +2,12 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 )
@@ -56,6 +59,12 @@ type Config struct {
 	// which restores the legacy DATABASE_URL-derived dev fallback.
 	StorageSecret   string // INSTANT_V2_STORAGE_SECRET
 	InsecureDevMode bool   // INSTANT_V2_INSECURE_DEV_SECRETS
+
+	// Durable file-storage root (DA-001). REQUIRED: startup fails without
+	// it unless INSTANT_V2_INSECURE_DEV_SECRETS=1, which falls back to an
+	// explicit ./.instant-dev-files directory with a loud warning — never
+	// to a temp default. The backend validates the root at construction.
+	StorageRoot string // INSTANT_V2_STORAGE_ROOT
 
 	// Resource bounds. Zero values below fall back to the documented defaults.
 	MaxSubsPerApp int // INSTANT_V2_MAX_SUBS_PER_APP, default 2000
@@ -156,6 +165,17 @@ func Load() (Config, error) {
 	if cfg.StorageSecret == "" && !cfg.InsecureDevMode {
 		return cfg, errors.New("INSTANT_V2_STORAGE_SECRET is required (set INSTANT_V2_INSECURE_DEV_SECRETS=1 only for local development)")
 	}
+	cfg.StorageRoot = os.Getenv("INSTANT_V2_STORAGE_ROOT")
+	if cfg.StorageRoot == "" {
+		if !cfg.InsecureDevMode {
+			return cfg, errors.New("INSTANT_V2_STORAGE_ROOT is required (set INSTANT_V2_INSECURE_DEV_SECRETS=1 only for local development)")
+		}
+		abs, aerr := filepath.Abs("./.instant-dev-files")
+		if aerr != nil {
+			return cfg, fmt.Errorf("resolving dev storage root: %w", aerr)
+		}
+		cfg.StorageRoot = abs
+	}
 	if cfg.MaxSubsPerApp, err = envInt("INSTANT_V2_MAX_SUBS_PER_APP", 2000); err != nil {
 		return cfg, err
 	}
@@ -239,6 +259,20 @@ func envInt64Default(key string, def int64) (int64, error) {
 		return 0, fmt.Errorf("%s %q: want positive integer", key, v)
 	}
 	return n, nil
+}
+
+// StorageFingerprint identifies the effective file-storage profile
+// (DA-001a): the resolved root plus the bounds that change what the
+// backend stores. Only the secret's presence bit feeds the hash —
+// never its value — so the fingerprint is safe to log and compare
+// across restarts while still detecting profile changes (a different
+// root, quota, or credential posture must never silently inherit
+// another profile's blobs).
+func (c Config) StorageFingerprint() string {
+	sum := sha256.Sum256([]byte(c.StorageRoot + "\x00" +
+		strconv.FormatInt(c.MaxUploadBytes, 10) + "\x00" +
+		strconv.FormatBool(c.StorageSecretIsSet())))
+	return hex.EncodeToString(sum[:])
 }
 
 // StorageSecretIsSet reports whether an explicit presigning secret was

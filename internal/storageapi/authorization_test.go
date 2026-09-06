@@ -24,7 +24,7 @@ func TestControlAppBinding(t *testing.T) {
 		} {
 			t.Run(target+tc.method+tc.path, func(t *testing.T) {
 				secret := []byte("app-binding-test")
-				store := NewDiskBackend(t.TempDir(), secret)
+				store := mustBackend(t, t.TempDir(), secret)
 				for _, app := range []string{authorized, foreign} {
 					if err := store.Put(app+"/"+file, strings.NewReader("original "+app)); err != nil {
 						t.Fatal(err)

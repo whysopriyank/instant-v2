@@ -104,6 +104,54 @@ func TestHandlerRoutesAndAuth(t *testing.T) {
 	}
 }
 
+// TestHandlerRejectsMissingAuthConfig pins DA-003 row 1: a handler
+// without an authorization callback refuses the request instead of
+// panicking on the nil func value.
+func TestHandlerRejectsMissingAuthConfig(t *testing.T) {
+	h := &backup.Handler{}
+	req := httptest.NewRequest(http.MethodGet, "/backup/00000000-0000-4000-8000-000000000001", nil)
+	rec := httptest.NewRecorder()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			t.Fatalf("nil AdminTokenCheck panicked: %v", recovered)
+		}
+	}()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+}
+
+// TestUnauthorizedRestoreWritesNothing pins DA-003 row 2 on the write
+// path: a restore with a bad admin token is rejected before Import runs,
+// leaving existing rows untouched.
+func TestUnauthorizedRestoreWritesNothing(t *testing.T) {
+	ctx := context.Background()
+	pool, appID, cleanup := env(t)
+	defer cleanup()
+	seedTodoApp(t, ctx, pool, appID, 2)
+	dump, _ := exportApp(t, ctx, pool, appID, backup.ExportOptions{})
+
+	h := &backup.Handler{Pool: pool, AdminTokenCheck: fakeAuth{valid: "tok-123"}.check}
+	req := httptest.NewRequest(http.MethodPost, "/backup/"+uuidStr(appID)+"/restore", bytes.NewReader(dump))
+	req.Header.Set("Authorization", "Bearer wrong")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+
+	var triples, attrs int
+	if err := pool.QueryRow(ctx,
+		`SELECT (SELECT count(*) FROM triples WHERE app_id=$1),
+		        (SELECT count(*) FROM attrs   WHERE app_id=$1)`, appID).Scan(&triples, &attrs); err != nil {
+		t.Fatal(err)
+	}
+	if triples != 10 || attrs != 4 {
+		t.Fatalf("unauthorized restore mutated rows: triples=%d attrs=%d", triples, attrs)
+	}
+}
+
 func firstLine(b []byte) string {
 	if i := bytes.IndexByte(b, '\n'); i >= 0 {
 		return string(b[:i])

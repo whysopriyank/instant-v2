@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -24,7 +25,7 @@ import (
 	syncpkg "github.com/instant-v2/instant-v2/internal/sync"
 )
 
-func (a *appRuntime) mountRoutes(ctx context.Context, db *sql.DB, mux *http.ServeMux, cfg config.Config, limiter *ratelimit.Limiter) (*syncpkg.WSHandler, *syncpkg.SSEHandler) {
+func (a *appRuntime) mountRoutes(ctx context.Context, db *sql.DB, mux *http.ServeMux, cfg config.Config, limiter *ratelimit.Limiter) (*syncpkg.WSHandler, *syncpkg.SSEHandler, error) {
 	authSvc := &authn.Service{
 		DB:       a.st,
 		Pool:     a.pool,
@@ -75,22 +76,48 @@ func (a *appRuntime) mountRoutes(ctx context.Context, db *sql.DB, mux *http.Serv
 			if err != nil {
 				return nil, err
 			}
+			// RT-001: run under the newest LOADED doc; drop the
+			// generation when current rules cannot be loaded.
+			gate, _, rerr := mgr.RefreshGate(ctx, sub)
+			if rerr != nil {
+				return nil, rerr
+			}
 			runner := a.ex
-			if gate, ok := sub.AttachCtx.(*syncpkg.QueryGate); ok && gate != nil {
-				// Reproduce the visibility the group was admitted under.
+			gated := gate != nil
+			if gated {
 				runner = &instaql.Executor{DB: a.readPool, Rules: gate.Rules, Admin: gate.Admin}
 			}
 			res, err := runner.Run(ctx, q, cat, appID)
 			if err != nil {
 				return nil, err
 			}
+			if gated {
+				// RT-001 publication-time validation: a concurrent
+				// re-gate may have landed while the executor ran; drop
+				// the result rather than publish stale-authorized
+				// state (same guard as refreshFor).
+				now, _, rerr := mgr.RefreshGate(ctx, sub)
+				if rerr != nil {
+					return nil, rerr
+				}
+				if now == nil || syncpkg.GateHash(now.Rules) != syncpkg.GateHash(gate.Rules) {
+					return nil, errRefreshSuperseded
+				}
+			}
 			return json.Marshal(res)
 		},
 	}
+	// RT-001: the steady-state notifier was built before mgr existed
+	// (runtime.go); rebind its Refresh now so every generation runs under
+	// the newest loaded doc, and hook Revalidate so a re-gated generation
+	// skips incremental splicing in favor of full recompute. WS/SSE
+	// snapshot paths below use the same Refresh hook.
+	a.notifier.Refresh = refreshFor(a.ex, a.cats, mgr.RefreshGate)
+	a.notifier.Revalidate = rebindChanged(mgr)
 	sseH := &syncpkg.SSEHandler{
 		Manager:        mgr,
 		Store:          a.store,
-		Refresh:        refreshFor(a.ex, a.cats),
+		Refresh:        refreshFor(a.ex, a.cats, mgr.RefreshGate),
 		MaxConns:       cfg.MaxSSEConns,
 		MaxConnsPerIP:  cfg.MaxSSEConnsPerIP,
 		HeartbeatEvery: 20 * time.Second,
@@ -158,8 +185,20 @@ func (a *appRuntime) mountRoutes(ctx context.Context, db *sql.DB, mux *http.Serv
 		a.logger.Warn("INSECURE dev mode: storage signatures derive from DATABASE_URL; never expose beyond loopback")
 		storeSecret = []byte(cfg.DatabaseURL) // deterministic dev fallback (insecure; dev only)
 	}
+	if cfg.InsecureDevMode && os.Getenv("INSTANT_V2_STORAGE_ROOT") == "" {
+		a.logger.Warn("INSECURE dev mode: file storage rooted at explicit dev directory, not durable storage", "root", cfg.StorageRoot)
+	}
+	// DA-001: the file backend assembles only on the configured durable
+	// root. A malformed or unwritable root refuses startup here — never a
+	// temp fallback, never first-upload failure.
+	store, serr := storageapi.NewDiskBackend(cfg.StorageRoot, storeSecret)
+	if serr != nil {
+		return nil, nil, fmt.Errorf("refusing to start: invalid file storage root: %w", serr)
+	}
+	a.logger.Info("file storage assembled",
+		"root", cfg.StorageRoot, "fingerprint", cfg.StorageFingerprint())
 	mux.Handle("/storage/", &storageapi.Handler{
-		Store:           storageapi.NewDiskBackend(os.TempDir()+"/instantv2-files", storeSecret),
+		Store:           store,
 		Secret:          storeSecret,
 		Triples:         a.st,
 		Catalogs:        a.cats,
@@ -179,7 +218,7 @@ func (a *appRuntime) mountRoutes(ctx context.Context, db *sql.DB, mux *http.Serv
 	gate := gateFor(a.notifier, cfg.MaxQueueDepth)
 	mux.Handle("POST /runtime/transact", transactHandler(a.st, a.cats, a.invalidate, a.invalidateChanges, gate, a.logger))
 	mux.HandleFunc("GET /health", health(db, a.notifier))
-	return ws, sseH
+	return ws, sseH, nil
 }
 
 func startAuthMaintenance(ctx context.Context, authSvc *authn.Service, logger *slog.Logger) {

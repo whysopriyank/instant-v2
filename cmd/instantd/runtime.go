@@ -15,6 +15,7 @@ import (
 	"github.com/instant-v2/instant-v2/internal/ratelimit"
 	"github.com/instant-v2/instant-v2/internal/reactive"
 	"github.com/instant-v2/instant-v2/internal/storage"
+	syncpkg "github.com/instant-v2/instant-v2/internal/sync"
 )
 
 // appRuntime holds the concrete services shared by HTTP transports and the
@@ -76,7 +77,10 @@ func runDatabase(ctx context.Context, db *sql.DB, mux *http.ServeMux, cfg config
 		defer pubConn.Release()
 	}
 
-	ws, sse := a.mountRoutes(ctx, db, mux, cfg, limiter)
+	ws, sse, err := a.mountRoutes(ctx, db, mux, cfg, limiter)
+	if err != nil {
+		return err
+	}
 	unregisterGauges := a.registerGauges(ws, sse)
 	defer unregisterGauges()
 	return serveHTTP(ctx, mux, cfg, logger, limiter, ws)
@@ -111,8 +115,11 @@ func newAppRuntime(pool, readPool *pgxpool.Pool, cfg config.Config, logger *slog
 	store.MaxSubsPerApp = cfg.MaxSubsPerApp
 	ex := &instaql.Executor{DB: readPool} // hot read plane (docs/09 §T2.3)
 	notifier := &reactive.Notifier{
-		Store:   store,
-		Refresh: refreshFor(ex, cats),
+		Store: store,
+		// No Manager exists yet at this construction site; mountRoutes
+		// replaces Refresh with the rebind hook once mgr is built. Any
+		// consumer that serves without mountRoutes keeps legacy semantics.
+		Refresh: refreshFor(ex, cats, nil),
 		Logger:  logger,
 		// Incremental result maintenance (docs/09 §T2.5): splices
 		// known entity changes into materialized results; bails to
@@ -121,6 +128,10 @@ func newAppRuntime(pool, readPool *pgxpool.Pool, cfg config.Config, logger *slog
 		// fuzz differential in internal/reactive.
 		Inc: &reactive.Incremental{
 			Source: &reactive.InstaqlSource{DB: readPool, Catalog: cats.For},
+			// RT-001: the splice probe enforces WHERE only. Splice
+			// under a closed or dynamic-non-admin gate would serve
+			// rows the oracle excludes; bail to full refresh there.
+			Authorize: syncpkg.SpliceAuthorize,
 		},
 	}
 

@@ -14,3 +14,6 @@ cmd/schemagen/schemagen
 /cmd/chaos/chaos
 .om/
 .omo/
+# Insecure-dev file-storage fallback (INSTANT_V2_STORAGE_ROOT unset with
+# INSTANT_V2_INSECURE_DEV_SECRETS=1); never commit uploaded dev blobs.
+/.instant-dev-files/

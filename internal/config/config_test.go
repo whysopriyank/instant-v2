@@ -37,6 +37,7 @@ func TestLoadDefaults(t *testing.T) {
 		"INSTANT_V2_READ_POOL_MAXCONNS":  "",
 		"INSTANT_V2_POOL_MINCONNS":       "",
 		"INSTANT_V2_STORAGE_SECRET":      "test-secret",
+		"INSTANT_V2_STORAGE_ROOT":        t.TempDir(),
 	})
 	cfg, err := Load()
 	if err != nil {
@@ -98,7 +99,7 @@ func TestLoadMetricsAddressConfiguration(t *testing.T) {
 				}
 			})
 
-			setEnv(t, map[string]string{"INSTANT_V2_STORAGE_SECRET": "s"})
+			setEnv(t, map[string]string{"INSTANT_V2_STORAGE_SECRET": "s", "INSTANT_V2_STORAGE_ROOT": t.TempDir()})
 			cfg, err := Load()
 			if err != nil {
 				t.Fatal(err)
@@ -139,6 +140,7 @@ func TestLoadTier2Knobs(t *testing.T) {
 		"INSTANT_V2_READ_POOL_MAXCONNS":  "48",
 		"INSTANT_V2_POOL_MINCONNS":       "4",
 		"INSTANT_V2_STORAGE_SECRET":      "k1",
+		"INSTANT_V2_STORAGE_ROOT":        t.TempDir(),
 	})
 	cfg, err := Load()
 	if err != nil {
@@ -207,6 +209,7 @@ func TestEnvInt32DefaultBoundaries(t *testing.T) {
 func TestLoadPoolMinOverflowRejected(t *testing.T) {
 	setEnv(t, map[string]string{
 		"INSTANT_V2_STORAGE_SECRET": "s",
+		"INSTANT_V2_STORAGE_ROOT":   t.TempDir(),
 		"INSTANT_V2_POOL_MINCONNS":  "2147483648",
 	})
 	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "INSTANT_V2_POOL_MINCONNS") {
@@ -253,7 +256,7 @@ func TestNodeNameFallback(t *testing.T) {
 
 func TestLoadPGTimeouts(t *testing.T) {
 	t.Run("defaults", func(t *testing.T) {
-		setEnv(t, map[string]string{"INSTANT_V2_STORAGE_SECRET": "s"})
+		setEnv(t, map[string]string{"INSTANT_V2_STORAGE_SECRET": "s", "INSTANT_V2_STORAGE_ROOT": t.TempDir()})
 		cfg, err := Load()
 		if err != nil {
 			t.Fatal(err)
@@ -266,6 +269,7 @@ func TestLoadPGTimeouts(t *testing.T) {
 	t.Run("override and explicit disable", func(t *testing.T) {
 		setEnv(t, map[string]string{
 			"INSTANT_V2_STORAGE_SECRET":       "s",
+			"INSTANT_V2_STORAGE_ROOT":         t.TempDir(),
 			"INSTANT_V2_PG_STATEMENT_TIMEOUT": "2s",
 			"INSTANT_V2_PG_LOCK_TIMEOUT":      "0",
 			"INSTANT_V2_PG_IDLE_TX_TIMEOUT":   "1m",
@@ -301,4 +305,76 @@ func TestLoadPGTimeouts(t *testing.T) {
 			t.Fatal("expected parse error for non-duration value")
 		}
 	})
+}
+
+func TestLoadStorageRootRequired(t *testing.T) {
+	setEnv(t, map[string]string{
+		"INSTANT_V2_STORAGE_SECRET": "s",
+		"INSTANT_V2_STORAGE_ROOT":   "",
+	})
+	if _, err := Load(); err == nil {
+		t.Fatal("missing INSTANT_V2_STORAGE_ROOT must fail without insecure dev mode")
+	} else if !strings.Contains(err.Error(), "INSTANT_V2_STORAGE_ROOT") {
+		t.Fatalf("error must name the variable, got: %v", err)
+	}
+}
+
+func TestLoadStorageRootDevFallback(t *testing.T) {
+	setEnv(t, map[string]string{
+		"INSTANT_V2_STORAGE_SECRET":       "s",
+		"INSTANT_V2_STORAGE_ROOT":         "",
+		"INSTANT_V2_INSECURE_DEV_SECRETS": "1",
+	})
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.StorageRoot == "" || cfg.StorageRoot == os.TempDir() {
+		t.Fatalf("dev fallback must be explicit, never temp: %q", cfg.StorageRoot)
+	}
+}
+
+func TestLoadStorageRootExplicitKept(t *testing.T) {
+	setEnv(t, map[string]string{
+		"INSTANT_V2_STORAGE_SECRET": "s",
+		"INSTANT_V2_STORAGE_ROOT":   t.TempDir(),
+	})
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := os.Getenv("INSTANT_V2_STORAGE_ROOT"); cfg.StorageRoot != got {
+		t.Fatalf("StorageRoot = %q, want %q", cfg.StorageRoot, got)
+	}
+}
+
+func TestStorageFingerprintProfiles(t *testing.T) {
+	base := Config{StorageRoot: "/data", MaxUploadBytes: 1 << 20, StorageSecret: "s"}
+	if f := base.StorageFingerprint(); len(f) != 64 {
+		t.Fatalf("fingerprint = %q; want 64 hex chars", f)
+	}
+	if a, b := base.StorageFingerprint(), base.StorageFingerprint(); a != b {
+		t.Fatal("fingerprint is not deterministic")
+	}
+	otherRoot := base
+	otherRoot.StorageRoot = "/other"
+	if otherRoot.StorageFingerprint() == base.StorageFingerprint() {
+		t.Fatal("different roots must fingerprint differently")
+	}
+	otherQuota := base
+	otherQuota.MaxUploadBytes++
+	if otherQuota.StorageFingerprint() == base.StorageFingerprint() {
+		t.Fatal("different quotas must fingerprint differently")
+	}
+	// Secret VALUE must not feed the hash (log-safe); presence must.
+	otherSecret := base
+	otherSecret.StorageSecret = "different-secret-same-presence"
+	if otherSecret.StorageFingerprint() != base.StorageFingerprint() {
+		t.Fatal("secret value leaked into the fingerprint")
+	}
+	noSecret := base
+	noSecret.StorageSecret = ""
+	if noSecret.StorageFingerprint() == base.StorageFingerprint() {
+		t.Fatal("credential posture change must fingerprint differently")
+	}
 }

@@ -11,7 +11,7 @@ import (
 func TestControlRejectsTrailingJSON(t *testing.T) {
 	secret := []byte("storage-boundary-test")
 	h := &Handler{
-		Store: NewDiskBackend(t.TempDir(), secret), Secret: secret,
+		Store: mustBackend(t, t.TempDir(), secret), Secret: secret,
 		AdminTokenCheck: func(context.Context, string, string) (bool, error) { return true, nil },
 	}
 	const appID = "00000000-0000-4000-8000-000000000001"
@@ -61,7 +61,7 @@ func TestControlJSONSizeBoundary(t *testing.T) {
 	base := `{"app-id":"` + app + `","filename":"file.txt"}`
 	padded := base + strings.Repeat(" ", (1<<20)-len(base))
 	secret := []byte("body-limit-test")
-	h := &Handler{Store: NewDiskBackend(t.TempDir(), secret), Secret: secret,
+	h := &Handler{Store: mustBackend(t, t.TempDir(), secret), Secret: secret,
 		AdminTokenCheck: func(context.Context, string, string) (bool, error) { return true, nil }}
 	for _, tc := range []struct {
 		name, body string

@@ -62,6 +62,11 @@ func (h *Handler) logger() *slog.Logger {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if h.AdminTokenCheck == nil {
+		h.logger().Error("backup: missing admin token check")
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
 	appStr, action, ok := parseBackupRoute(r.URL.Path)
 	if !ok {
 		writeErr(w, http.StatusNotFound, "not found")

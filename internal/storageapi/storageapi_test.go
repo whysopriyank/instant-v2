@@ -52,7 +52,7 @@ func newHandler(t *testing.T) *Handler {
 		t.Fatal(err)
 	}
 	return &Handler{
-		Store:           NewDiskBackend(t.TempDir(), secret),
+		Store:           mustBackend(t, t.TempDir(), secret),
 		Secret:          secret,
 		AdminTokenCheck: func(_ context.Context, _, tok string) (bool, error) { return tok == testAdminToken, nil },
 	}
@@ -290,7 +290,7 @@ func TestStorageAdminGate(t *testing.T) {
 	appID := platform.UUIDToStr(newUUIDStr())
 
 	// No checker wired → 503 on delete + download-url.
-	bare := &Handler{Store: NewDiskBackend(t.TempDir(), secret), Secret: secret}
+	bare := &Handler{Store: mustBackend(t, t.TempDir(), secret), Secret: secret}
 	srvBare := httptest.NewServer(bare)
 	t.Cleanup(srvBare.Close)
 	status, _ := deleteJSONAuthed(t, srvBare, "/storage/files", map[string]any{"app-id": appID, "ids": []string{uuidStrOf(newUUIDStr())}}, testAdminToken)
@@ -454,7 +454,7 @@ func dbEnv(t *testing.T) (*httptest.Server, *Handler, *pgxpool.Pool, [16]byte) {
 	if _, err := rand.Read(secret); err != nil {
 		t.Fatal(err)
 	}
-	h := &Handler{Store: NewDiskBackend(t.TempDir(), secret), Secret: secret, Triples: st, Catalogs: cats,
+	h := &Handler{Store: mustBackend(t, t.TempDir(), secret), Secret: secret, Triples: st, Catalogs: cats,
 		AdminTokenCheck: func(_ context.Context, _, tok string) (bool, error) { return tok == testAdminToken, nil }}
 	srv := httptest.NewServer(h)
 	t.Cleanup(func() { srv.Close(); pool.Close(); _ = sqldb.Close() })
