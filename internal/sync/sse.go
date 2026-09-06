@@ -212,7 +212,11 @@ func (h *SSEHandler) getSSE(w http.ResponseWriter, r *http.Request) {
 	writeEvent := func(f Frame) bool {
 		b, err := f.Encode()
 		if err != nil {
-			return true // skip malformed; keep stream alive
+			// RT-002b/RT-002e: a frame that cannot render must end the
+			// stream, never be skipped. Skipping strands the client
+			// behind an advancing watermark with no signal; ending it
+			// forces reconnect from a full snapshot.
+			return false
 		}
 		return flushEvent(b)
 	}
@@ -364,19 +368,24 @@ func (h *SSEHandler) postSSE(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		// add-query initial snapshot rides the same direct-refresh path
-		// as the WS handler.
+		// as the WS handler. A render failure ends the stream (after a
+		// 500 reply) so the client reconnects instead of idling
+		// subscribed with no state (RT-002b).
 		if op == "add-query" && h.Refresh != nil {
-			h.snapshot(r.Context(), conn.sess, f)
+			if serr := h.snapshot(r.Context(), conn.sess, f); serr != nil {
+				pushReply(conn, ErrFrame(500, "internal", platform.ClientMessage(serr)))
+				signalOverflow(conn)
+			}
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{})
 }
 
-func (h *SSEHandler) snapshot(ctx context.Context, sess *Session, f Frame) {
+func (h *SSEHandler) snapshot(ctx context.Context, sess *Session, f Frame) error {
 	rawQ, ok := f["q"]
 	if !ok {
-		return
+		return nil
 	}
 	class := wireNodelist
 	if sess.TreeResults {
@@ -385,28 +394,41 @@ func (h *SSEHandler) snapshot(ctx context.Context, sess *Session, f Frame) {
 	key := groupKey(sess.AppID, class, rawQ, sess.Admin)
 	sub, ok := h.Store.Get(key)
 	if !ok {
-		return
+		return nil
 	}
 	result, err := h.Manager.snapshotOrRefresh(ctx, h.Refresh, sub)
 	if err != nil {
-		return
+		// A failed initial refresh (including a rule-loader failure)
+		// must end the stream via the caller's 500 path — never leave
+		// the subscriber connected with no initial state.
+		return err
 	}
 	// Baseline for delta-refresh diffs is the flat envelope; SSE init-query
 	// answers with v1 :tree semantics (session.clj:1395) — a bare object
 	// tree with NO "data" wrapper key. snapshotOrRefresh seeds the baseline
 	// on the refresh path and reuses it on the duplicate path.
-	tree, terr := UnwrapTree(result)
+	// RT-002a/RT-002d: answer with the served pair so the watermark matches
+	// the snapshot even when siblings kept the group alive.
+	snap, snapTx := sub.SnapshotPair()
+	if snap == nil {
+		snap = result
+		snapTx = sub.TxID.Load()
+	}
+	tree, terr := UnwrapTree(snap)
 	if terr != nil {
-		return
+		// RT-002b: a joiner that cannot be rendered must not be left
+		// subscribed with no state on a live stream. The caller ends the
+		// stream so the client reconnects from a full snapshot.
+		return terr
 	}
 	payload := computationEntry(
 		[2]json.RawMessage{keyInstaqlQuery, json.RawMessage(rawQ)},
 		[2]json.RawMessage{keyInstaqlResult, tree},
 	)
-	_ = sess.Send(Frame{
+	return sess.Send(Frame{
 		"op":              json.RawMessage(`"refresh-ok"`),
 		"computations":    payload,
-		"processed-tx-id": json.RawMessage(mustJSON(0)),
+		"processed-tx-id": json.RawMessage(mustJSON(snapTx)),
 	})
 }
 

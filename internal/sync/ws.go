@@ -222,6 +222,12 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				defer writeMu.Unlock()
 				return conn.Write(ctx, websocket.MessageText, b)
 			}
+			// RT-002c: fan-out send failure detaches the member, then
+			// breaks the read loop here so deferred teardown runs and the
+			// client reconnects from a full snapshot.
+			sess.Close = func() {
+				_ = conn.Close(websocket.StatusGoingAway, "refresh delivery failed")
+			}
 			if err := send(reply); err != nil {
 				return
 			}
@@ -272,15 +278,27 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				// the wire gets the v1 node-list. snapshotOrRefresh seeded the
 				// baseline on the refresh path; on the reuse path it is already
 				// current and must NOT be overwritten with a stale-local copy.
-				nodes, nerr := nodelistFor(ctx, h.Manager.Deps.Catalogs, sess.AppID, result)
+				// RT-002a/RT-002d: the ack carries the served snapshot and
+				// its watermark as one pair, so a (re)subscriber
+				// establishes continuity from exactly this state —
+				// including when siblings kept the group (and its
+				// snapshot) alive across the reconnect. Falls back to
+				// the just-computed result only if the snapshot raced
+				// away mid-attach.
+				snap, snapTx := sub.SnapshotPair()
+				if snap == nil {
+					snap = result
+					snapTx = sub.TxID.Load()
+				}
+				nodes, nerr := nodelistFor(ctx, h.Manager.Deps.Catalogs, sess.AppID, snap)
 				if nerr != nil {
 					sendErr(500, "internal", nerr.Error())
 					return
 				}
 				replies[0]["q"] = json.RawMessage(rawQ)
 				replies[0]["result"] = nodes
-				replies[0]["result-meta"] = resultMetaOf(result)
-				replies[0]["processed-tx-id"] = json.RawMessage(mustJSON(0))
+				replies[0]["result-meta"] = resultMetaOf(snap)
+				replies[0]["processed-tx-id"] = json.RawMessage(mustJSON(snapTx))
 				replies[0]["processed-isn"] = json.RawMessage(mustJSON(0))
 				replies = replies[:1] // ack only; no follow-up refresh-ok
 			}

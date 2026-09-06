@@ -137,7 +137,9 @@ func (h *SSEHandler) AdminSubscribe(w http.ResponseWriter, r *http.Request) {
 	writeEvent := func(f Frame) bool {
 		b, err := f.Encode()
 		if err != nil {
-			return true // skip malformed; keep stream alive
+			// RT-002b/RT-002e: a frame that cannot render must end the
+			// stream, never be skipped (see sse.go writeEvent).
+			return false
 		}
 		return writeRaw(b)
 	}
@@ -182,12 +184,20 @@ func (h *SSEHandler) AdminSubscribe(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// RT-002a/RT-002d: carry the served pair when one exists so the
+	// watermark matches the snapshot.
+	snapTx := int64(0)
+	if sub != (*reactive.Subscription)(nil) {
+		if snap, tx := sub.SnapshotPair(); snap != nil {
+			result, meta, snapTx = snap, resultMetaOf(snap), tx
+		}
+	}
 	if !writeEvent(Frame{
 		"op":              json.RawMessage(`"add-query-ok"`),
 		"q":               qraw,
 		"result":          treeOf(result),
 		"result-meta":     meta,
-		"processed-tx-id": json.RawMessage(`0`),
+		"processed-tx-id": json.RawMessage(mustJSON(snapTx)),
 	}) {
 		return
 	}

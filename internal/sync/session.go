@@ -120,6 +120,11 @@ type Session struct {
 	// SendRaw writes pre-encoded frame bytes (shared fan-out payloads);
 	// nil falls back to nothing — group dispatch skips such sessions.
 	SendRaw func([]byte) error
+	// Close tears down the transport read loop (RT-002c): group dispatch
+	// calls it after detaching a member whose send failed, so the client
+	// reconnects and re-establishes from a full snapshot. Set by the
+	// transport loop; nil (tests, non-socket transports) detaches only.
+	Close func()
 	// TreeResults selects v1's return-type :tree (admin subscribe-query,
 	// session.clj:1395): refresh envelopes carry the bare object tree instead
 	// of the join-rows node-list used on the WS path.
