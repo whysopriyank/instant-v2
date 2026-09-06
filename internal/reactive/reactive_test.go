@@ -47,11 +47,12 @@ func TestNotifierCoalesces(t *testing.T) {
 		AppID:  "app1",
 		Query:  json.RawMessage(`{"posts":{}}`),
 		Topics: map[string]bool{"attr-a": true},
-		Emit: func(f Frame) {
+		Emit: func(f Frame) error {
 			frames++
 			if f.ProcessedTxID != 15 {
 				t.Errorf("coalesced frame tx = %d, want 15", f.ProcessedTxID)
 			}
+			return nil
 		},
 	}
 	sub.TxID.Store(5)
@@ -82,7 +83,7 @@ func TestNotifierQueueDepthCountsUniquePendingSubscriptions(t *testing.T) {
 	s := NewStore()
 	sub := &Subscription{
 		ID: "s1", AppID: "app1", Query: json.RawMessage(`{}`),
-		Topics: map[string]bool{"a": true, "b": true}, Emit: func(Frame) {},
+		Topics: map[string]bool{"a": true, "b": true}, Emit: func(Frame) error { return nil },
 	}
 	if _, err := s.Add(sub); err != nil {
 		t.Fatalf("add: %v", err)
@@ -140,7 +141,7 @@ func TestNotifierIgnoresStaleTxIDs(t *testing.T) {
 		ID: "s1", AppID: "app1",
 		Query:  json.RawMessage(`{}`),
 		Topics: map[string]bool{"a": true},
-		Emit:   func(Frame) { called = true },
+		Emit:   func(Frame) error { called = true; return nil },
 	}
 	sub.TxID.Store(10)
 	if _, err := s.Add(sub); err != nil {

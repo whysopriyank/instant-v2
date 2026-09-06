@@ -126,7 +126,7 @@ func TestRetryBackoffResetAndCap(t *testing.T) {
 			return json.RawMessage(`{"v":"latest"}`), nil
 		},
 	}
-	sub.Emit = func(Frame) { emits.Add(1) }
+	sub.Emit = func(Frame) error { emits.Add(1); return nil }
 
 	n.Notify(context.Background(), "app", []string{"title"}, 1)
 	if !n.drainPass(context.Background(), slog.Default()) {
@@ -198,7 +198,7 @@ func TestRetryLatestWatermarkAndUnknownKnowledgeAreSticky(t *testing.T) {
 			return json.RawMessage(`{"v":"latest"}`), nil
 		},
 	}
-	sub.Emit = func(frame Frame) { gotFrame = frame }
+	sub.Emit = func(frame Frame) error { gotFrame = frame; return nil }
 
 	first := Change{Etype: "posts", EntityID: "p1", AttrIDs: []string{"title"}}
 	second := Change{Etype: "posts", EntityID: "p2", AttrIDs: []string{"title"}}

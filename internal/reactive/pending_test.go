@@ -60,7 +60,7 @@ func TestDrainOwnsChangeEpoch(t *testing.T) {
 	for _, id := range []string{"a", "b"} {
 		if _, err := store.Add(&Subscription{
 			ID: id, AppID: "app", Topics: map[string]bool{id: true},
-			Emit: func(frame Frame) { frames <- frame },
+			Emit: func(frame Frame) error { frames <- frame; return nil },
 		}); err != nil {
 			t.Fatal(err)
 		}

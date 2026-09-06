@@ -3,6 +3,8 @@ package sync
 // Query admission, permission gates, and invalidation-topic projection.
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,13 +16,33 @@ import (
 )
 
 // QueryGate is the permission snapshot stored on every subscription at
-// attach time (Subscription.AttachCtx). Refresh executors rebuild the same
-// visibility the group was admitted under: Rules drives instaql's view gate
-// (closed etypes render empty; dynamic ones were rejected pre-attach for
-// non-admin callers), Admin bypasses.
+// attach time (Subscription.AttachCtx). Refresh executors must NOT reuse it
+// blindly: Manager.RefreshGate reloads the current persisted doc before every
+// generation and transparently re-gates the subscription when the content
+// changed (RT-001). Rules drives instaql's view gate (closed etypes render
+// empty; dynamic ones were rejected pre-attach for non-admin callers),
+// Admin bypasses.
 type QueryGate struct {
 	Rules *perms.RuleDoc
 	Admin bool
+}
+
+// NewQueryGate snapshots the admission doc for one subscription.
+func NewQueryGate(doc *perms.RuleDoc, admin bool) *QueryGate {
+	return &QueryGate{Rules: doc, Admin: admin}
+}
+
+// GateHash identifies admitted rule content. A nil doc (default-open,
+// no rules row) hashes distinctly from any persisted doc, so
+// open→restricted and restricted→open transitions are both detected.
+// Hashing is content-based so unrelated catalog invalidations that reload
+// identical bytes never trigger a re-gate.
+func GateHash(doc *perms.RuleDoc) string {
+	if doc == nil || len(doc.Raw) == 0 {
+		return "open"
+	}
+	sum := sha256.Sum256(doc.Raw)
+	return hex.EncodeToString(sum[:])
 }
 
 // collectEtypes walks a raw InstaQL body and returns every etype name at any
@@ -48,6 +70,18 @@ func collectEtypes(rawQ json.RawMessage) []string {
 	walk(q)
 	return out
 }
+
+// errRulesReload marks a rule reload failure during version-bound re-gating.
+// Callers refuse the op with rules-unavailable, exactly like an unloadable
+// attach-time doc, never with a wider or narrower error.
+var errRulesReload = errors.New("sync: rule reload failed during re-gate")
+
+// errGenerationSuperseded drops a generation overtaken by a concurrent
+// rule change between computation and publication (RT-001). The notifier
+// already treats emit errors as retryable, and the initial-answer flight
+// treats refresh errors as retryable, so this fails closed on both paths
+// without new handling.
+var errGenerationSuperseded = errors.New("sync: generation superseded by a concurrent rule change")
 
 // gateQuery enforces view rules for a would-be subscription. Returns:
 //   - err non-nil → dynamic view rule and caller is not admin (reject).
@@ -115,12 +149,18 @@ func (m *Manager) handleAddQuery(ctx context.Context, sess *Session, f Frame) ([
 
 	// Attach (creates the shared subscription on first use). Cap breaches
 	// reject with the exact 429 protocol frames and close the connection.
-	if _, aerr := m.attachGroup(sess, rawQ, topics, cat, class, doc); aerr != nil {
+	// A rule reload failure during version-bound re-gating refuses with
+	// rules-unavailable, exactly like an unloadable attach-time doc.
+	if _, aerr := m.attachGroup(ctx, sess, rawQ, topics, cat, class, doc); aerr != nil {
 		var capErr *reactive.SubLimitError
 		if errors.As(aerr, &capErr) {
 			return []Frame{ErrFrame(429, "subscription-limit",
 					fmt.Sprintf("per-app subscription cap (%d) exceeded", capErr.Max))},
 				fmt.Errorf("%w: %v", ErrCloseSession, aerr)
+		}
+		if errors.Is(aerr, errRulesReload) {
+			return []Frame{ErrFrame(503, "rules-unavailable",
+				"permission rules temporarily unavailable; retry shortly")}, nil
 		}
 		return []Frame{ErrFrame(500, "internal", platform.ClientMessage(aerr))}, aerr
 	}

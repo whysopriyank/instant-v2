@@ -303,7 +303,7 @@ func errorsAsSubLimit(err error, target **SubLimitError) bool {
 func TestNotifierEmitsDeltaPatches(t *testing.T) {
 	s := NewStore()
 	frames := make(chan Frame, 2)
-	emit := func(fr Frame) { frames <- fr }
+	emit := func(fr Frame) error { frames <- fr; return nil }
 	sub := &Subscription{
 		ID: "sub-1", AppID: "app1", Topics: map[string]bool{"attr-a": true},
 		Emit: emit,
@@ -391,7 +391,7 @@ func TestQueueDepthGauge(t *testing.T) {
 	for i := range 5 {
 		if _, err := s.Add(&Subscription{
 			ID: fmt.Sprintf("q%d", i), AppID: "app", Topics: map[string]bool{"t": true},
-			Emit: func(Frame) {},
+			Emit: func(Frame) error { return nil },
 		}); err != nil {
 			t.Fatal(err)
 		}

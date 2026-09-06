@@ -20,7 +20,7 @@ func newGatedStack(t *testing.T) (*Notifier, *Subscription) {
 		ID: "g1", AppID: "app1",
 		Query:  json.RawMessage(`{}`),
 		Topics: map[string]bool{"t": true},
-		Emit:   func(Frame) {},
+		Emit:   func(Frame) error { return nil },
 	}
 	if _, err := s.Add(sub); err != nil {
 		t.Fatalf("add: %v", err)
@@ -44,7 +44,7 @@ func TestGateFloodDenyDrainAllow(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		if _, err := n.Store.Add(&Subscription{
 			ID: fmt.Sprintf("g-extra-%d", i), AppID: "app1",
-			Topics: map[string]bool{"t": true}, Emit: func(Frame) {},
+			Topics: map[string]bool{"t": true}, Emit: func(Frame) error { return nil },
 		}); err != nil {
 			t.Fatal(err)
 		}

@@ -120,7 +120,7 @@ func groupKey(appID string, class wireClass, rawQ json.RawMessage, admin bool) s
 //
 // Caller must have computed topics and cat already (same compilation the
 // pre-group code performed).
-func (m *Manager) attachGroup(sess *Session, rawQ json.RawMessage, topics map[string]bool,
+func (m *Manager) attachGroup(ctx context.Context, sess *Session, rawQ json.RawMessage, topics map[string]bool,
 	cat *platform.AttrCatalog, class wireClass, doc *perms.RuleDoc,
 ) (*queryGroup, error) {
 	key := groupKey(sess.AppID, class, rawQ, sess.Admin)
@@ -135,16 +135,31 @@ func (m *Manager) attachGroup(sess *Session, rawQ json.RawMessage, topics map[st
 
 	g := m.groups[key]
 	if g == nil {
+		gate := NewQueryGate(doc, sess.Admin)
 		sub := &reactive.Subscription{
 			ID:        key,
 			AppID:     sess.AppID,
 			Query:     rawQ,
 			Topics:    topics,
-			AttachCtx: &QueryGate{Rules: doc, Admin: sess.Admin},
+			AttachCtx: gate,
 		}
+		sub.SetAuthGate(gate)
 		sub.Delta.Store(sess.Features["delta-refresh"])
-		sub.Emit = func(fr reactive.Frame) {
-			m.dispatchGroup(g, fr)
+		// Coordinated publication (RT-001): refuse generations overtaken
+		// by a concurrent re-gate between computation and fan-out. The
+		// notifier stamps Frame.Gen at attempt start; a mismatch means
+		// the rules moved underneath this generation, so it is dropped
+		// through the existing emit-error retry path instead of
+		// publishing stale-authorized state. Only the epoch comparison
+		// is synchronized with swaps — dispatch itself stays outside
+		// any lock, so a slow member cannot stall re-gating. Content
+		// sent after a passing check raced a swap is still reserved-era
+		// self-consistent state, re-gated on the next generation.
+		sub.Emit = func(fr reactive.Frame) error {
+			if sub.Gen.Load() != fr.Gen {
+				return errGenerationSuperseded
+			}
+			return m.dispatchGroup(g, fr)
 		}
 		if _, err := m.Deps.Store.Add(sub); err != nil {
 			return nil, err
@@ -155,6 +170,25 @@ func (m *Manager) attachGroup(sess *Session, rawQ json.RawMessage, topics map[st
 			members: map[*Session]member{},
 		}
 		m.groups[key] = g
+	}
+
+	// Version-bound membership (RT-001d): a joiner admitted under different
+	// persisted rules than the group must not share the group's snapshot or
+	// its gate. The joiner's doc may itself predate a concurrent rebind, so
+	// reload the newest doc at this decision point and adopt it. A reload
+	// failure refuses the join exactly like an unloadable attach-time doc
+	// (RT-001e) instead of pinning either possibly-stale snapshot.
+	// Content-hash comparison keeps unrelated catalog invalidations from
+	// disturbing the group. groupsMu is held throughout; rulesFor only
+	// takes the leaf catalog lock, so no lock-order inversion is possible.
+	if cur, ok := g.sub.AttachCtx.(*QueryGate); !ok || cur == nil || GateHash(cur.Rules) != GateHash(doc) {
+		fresh, ferr := m.rulesFor(ctx, sess.AppID)
+		if ferr != nil {
+			return nil, fmt.Errorf("%w: %v", errRulesReload, ferr)
+		}
+		if cur2, ok2 := g.sub.AttachCtx.(*QueryGate); !ok2 || cur2 == nil || GateHash(cur2.Rules) != GateHash(fresh) {
+			m.rebindGroupLocked(g, fresh)
+		}
 	}
 
 	// Upgrade the group to delta-capable when any member negotiates it.
@@ -264,9 +298,30 @@ func (m *Manager) snapshotOrRefresh(
 		return nil, err
 	}
 
+	// Coordinate initial publication with re-gating (RT-001): settle the
+	// gate before capturing the epoch, so the post-refresh check below
+	// fires only on swaps concurrent with this flight — not on the
+	// flight's own legitimate re-gate. A reload failure here is
+	// deliberately ignored: refresh() performs its own load and reports
+	// the failure itself, and failing here would break gate-unaware
+	// refresh funcs whose contracts predate re-gating.
+	_, _, _ = m.RefreshGate(ctx, sub)
+	gen := sub.Gen.Load()
 	result, err := refresh(ctx, sub)
 	if err == nil {
+		// Publish only if no re-gate landed mid-flight; otherwise fail
+		// the flight so waiters recompute under the new gate. Epochs
+		// are monotonic, so this has no ABA hazard. The lock serializes
+		// the check with swaps (RefreshGate and rebindGroupLocked both
+		// bump under groupsMu); refresh itself stays outside it.
+		m.groupsMu.Lock()
+		if sub.Gen.Load() != gen {
+			m.groupsMu.Unlock()
+			m.completeSnapshotFlight(sub.ID, flight, nil, errGenerationSuperseded)
+			return nil, errGenerationSuperseded
+		}
 		sub.SetSnapshot(result)
+		m.groupsMu.Unlock()
 	}
 	m.completeSnapshotFlight(sub.ID, flight, result, err)
 	return result, err
@@ -293,11 +348,15 @@ func (m *Manager) releaseSnapshotFlight(flight *snapshotFlight) {
 
 // dispatchGroup renders ONE full envelope (+ optional delta variant) for the
 // generation and fans pre-encoded bytes to every member. Replaces the old
-// per-session Emit body.
-func (m *Manager) dispatchGroup(g *queryGroup, fr reactive.Frame) {
+// per-session Emit body. It reports whether the generation was acceptably
+// served (RT-002b/RT-002c): a render failure serves nothing and returns an
+// error so the generation is retried, never published; a member send
+// failure detaches and closes that member (reconnect re-establishes from a
+// full snapshot) without failing its siblings.
+func (m *Manager) dispatchGroup(g *queryGroup, fr reactive.Frame) error {
 	members, anyDelta := g.snapshotMembers()
 	if len(members) == 0 {
-		return
+		return nil
 	}
 	logger := m.logger()
 
@@ -307,7 +366,7 @@ func (m *Manager) dispatchGroup(g *queryGroup, fr reactive.Frame) {
 		tree, terr := UnwrapTree(fr.ResultJSON)
 		if terr != nil {
 			logger.Error("groups: unwrap tree", "err", terr)
-			return
+			return fmt.Errorf("groups: unwrap tree: %w", terr)
 		}
 		// Single render + single encode per generation. resultMetaOf returns
 		// non-empty bytes for essentially every instaql result (at minimum
@@ -336,7 +395,7 @@ func (m *Manager) dispatchGroup(g *queryGroup, fr reactive.Frame) {
 		nodes, nerr := BuildNodeList(g.cat, fr.ResultJSON)
 		if nerr != nil {
 			logger.Error("groups: node-list render", "err", nerr)
-			return
+			return fmt.Errorf("groups: node-list render: %w", nerr)
 		}
 		payload := computationEntry(
 			[2]json.RawMessage{keyInstaqlQuery, json.RawMessage(fr.QueryJSON)},
@@ -347,6 +406,13 @@ func (m *Manager) dispatchGroup(g *queryGroup, fr reactive.Frame) {
 			"computations":    payload,
 			"processed-tx-id": json.RawMessage(mustJSON(fr.ProcessedTxID)),
 		})
+	}
+
+	// RT-002e: an encoding failure must never reach the wire as an empty
+	// frame. encodeFrame already logs; refuse the generation here so the
+	// retry path recomputes it instead of certifying silence.
+	if len(fullRaw) == 0 {
+		return fmt.Errorf("groups: frame encode produced no bytes")
 	}
 
 	var deltaRaw []byte
@@ -374,11 +440,30 @@ func (m *Manager) dispatchGroup(g *queryGroup, fr reactive.Frame) {
 			b = fullRaw
 			metrics.RefreshFrames.WithLabelValues("full").Inc()
 		}
-		if err := mem.sess.SendRaw(b); err != nil && logger != nil {
-			logger.Debug("groups: send", "err", err)
-		} else if err == nil {
-			metrics.FanoutBytes.Add(float64(len(b)))
+		if err := mem.sess.SendRaw(b); err != nil {
+			// RT-002c: a member that was not served must not keep a
+			// watermark for this generation. Detach it now and close its
+			// transport so it reconnects and re-establishes from a full
+			// snapshot; siblings are unaffected.
+			if logger != nil {
+				logger.Debug("groups: send failed; detaching member", "err", err)
+			}
+			m.failMember(g, mem.sess)
+			continue
 		}
+		metrics.FanoutBytes.Add(float64(len(b)))
+	}
+	return nil
+}
+
+// failMember detaches one unserved member and tears down its transport
+// (RT-002c). Detach is eager so concurrent dispatches stop routing to it;
+// Close breaks the transport read loop, whose deferred teardown completes
+// the cleanup. A nil Close (tests, non-socket transports) detaches only.
+func (m *Manager) failMember(g *queryGroup, sess *Session) {
+	m.detachMember(sess, g.key)
+	if sess.Close != nil {
+		sess.Close()
 	}
 }
 

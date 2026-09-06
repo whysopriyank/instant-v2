@@ -252,10 +252,11 @@ func newDiffHarness(t testing.TB, inc bool) *diffHarness {
 		counter := &atomic.Int64{}
 		h.calls[sub.ID] = counter
 		mu := &h.mu
-		sub.Emit = func(f Frame) {
+		sub.Emit = func(f Frame) error {
 			mu.Lock()
 			h.frames[f.SubID] = f.ResultJSON
 			mu.Unlock()
+			return nil
 		}
 		if _, err := h.store.Add(sub); err != nil {
 			t.Fatalf("add %s: %v", dq.name, err)
@@ -410,7 +411,7 @@ func TestNotifyChangesUnknownBroadcastDirtiesWholeApp(t *testing.T) {
 		ID: "sub-odd", AppID: diffApp,
 		Query:  json.RawMessage(`{"posts":{}}`),
 		Topics: map[string]bool{"unrelated": true},
-		Emit:   func(Frame) { oddSeen = true },
+		Emit:   func(Frame) error { oddSeen = true; return nil },
 	}
 	if _, err := h.store.Add(odd); err != nil {
 		t.Fatalf("add odd: %v", err)

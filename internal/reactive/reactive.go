@@ -33,6 +33,12 @@ type Frame struct {
 	ResultJSON    json.RawMessage `json:"instaql-result"`
 	PatchJSON     json.RawMessage `json:"-"`
 	ProcessedTxID int64           `json:"processed-tx-id"`
+	// Gen is the rule-generation epoch stamped by the notifier at
+	// attempt start (RT-001). Transports carrying a permission gate
+	// refuse frames whose epoch no longer matches the subscription,
+	// so a generation overtaken by a concurrent re-gate between
+	// computation and fan-out is dropped instead of published.
+	Gen uint64 `json:"-"`
 }
 
 // Subscription is one registered live query.
@@ -47,14 +53,27 @@ type Subscription struct {
 	AppID  string
 	Query  json.RawMessage
 	Topics map[string]bool // attr-id set from the compiled plan
-	// TxID is the last processed transaction watermark. Atomic: Notify
-	// reads it on caller goroutines while drain workers write it.
+	// TxID is the last SERVED transaction watermark: stored only for
+	// generations with an acceptable fan-out outcome, jointly after the
+	// snapshot (RT-002a). Atomic: Notify reads it on caller goroutines
+	// while drain workers write it.
 	TxID atomic.Int64
+	// Gen is the permission-gate epoch (RT-001): bumped by the sync
+	// layer on every gate swap, stamped by the notifier onto each
+	// emitted frame. Monotonic: values are never reused, so epoch
+	// comparison has no ABA hazard. Opaque to this package beyond the
+	// stamp; sync owns the bumps.
+	Gen atomic.Uint64
 	// Delta marks groups with at least one delta-refresh member; eligible
 	// refreshes ship patches. Atomic: upgraded from session goroutines at
 	// member attach while drain workers read it.
-	Delta     atomic.Bool
-	Emit      func(Frame)
+	Delta atomic.Bool
+	// Emit fans one computed generation out to the transport and reports
+	// whether it was acceptably served: nil means rendered, with every
+	// member served or terminally detached; non-nil means nothing was
+	// served and the generation must be retried, never published
+	// (RT-002b). Production is sync group dispatch; tests may fake it.
+	Emit      func(Frame) error
 	Cancelled bool
 
 	mu sync.Mutex
@@ -70,6 +89,30 @@ type Subscription struct {
 	// refresh results. Guarded by mu alongside last. Zero value = disabled.
 	mat  matState
 	last json.RawMessage // last full snapshot; diff baseline for delta-refresh
+	// authGate is the permission gate admitted for the subscription,
+	// recorded by the sync layer alongside every AttachCtx install so the
+	// incremental engine can authorize splices without touching AttachCtx
+	// itself (which is owned by the sync layer's lock). Guarded by
+	// authMu; nil until the first install.
+	authMu   sync.Mutex
+	authGate any
+}
+
+// SetAuthGate records the gate admitted for the subscription. Called by
+// the sync layer on every AttachCtx install (attach, re-gate, rebind);
+// nil clears it. A generation that cannot load the current gate never
+// reaches the splice path, so a stale recording is never consumed.
+func (s *Subscription) SetAuthGate(g any) {
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
+	s.authGate = g
+}
+
+// AuthGate returns the last recorded admitted gate (nil if none).
+func (s *Subscription) AuthGate() any {
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
+	return s.authGate
 }
 
 // Snapshot returns the last full result emitted for this subscription
@@ -78,6 +121,21 @@ func (s *Subscription) Snapshot() json.RawMessage {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.last
+}
+
+// SnapshotPair returns the served snapshot and its watermark as one pair
+// (RT-002a/RT-002d): reconnecting clients establish continuity from exactly
+// this state. Read order is load-bearing — TxID first, then snapshot.
+// Publication order is snapshot first, TxID second, and a watermark is only
+// ever stored for an acceptably served generation. Together these imply the
+// returned pair can only skew conservative: the watermark never describes
+// state newer than the snapshot (at worst it understates coverage, which
+// converges by re-delivery, never by silent staleness).
+func (s *Subscription) SnapshotPair() (json.RawMessage, int64) {
+	tx := s.TxID.Load()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.last, tx
 }
 
 // SetSnapshot records the full result as the diff baseline after it has been
@@ -224,6 +282,14 @@ type Notifier struct {
 	// keeps today's byte-for-byte full-recompute path.
 	Inc *Incremental
 
+	// Revalidate, when non-nil, runs before incremental maintenance for one
+	// generation and reports whether the subscription's admission context
+	// changed (RT-001: persisted rule change). A true result forces full
+	// recompute so spliced state admitted under stale rules can never emit;
+	// an error drops the generation fail-closed. nil — the default —
+	// preserves the exact pre-RT-001 splice behavior.
+	Revalidate func(ctx context.Context, sub *Subscription) (changed bool, err error)
+
 	pending map[string]int64 // subID → latest tx-id awaiting refresh
 	// pendingCh belongs to the same queued epoch as pending. Both maps are
 	// detached together by drainPass. Absent entry means unknown changes and
@@ -344,13 +410,18 @@ func (e *ShedError) Error() string {
 // the middle band flaps neither way.
 //
 // maxDepth <= 0 yields an always-allow gate (INSTANT_V2_MAX_QUEUE_DEPTH=0,
-// today's behavior). Degenerate corner: maxDepth == 1 has low-water 0, so
-// once latched it never reopens — operators should set maxDepth >= 2.
+// today's behavior). RT-003: the low-water mark is at least 1, so a
+// depth-one gate latches at depth 1 and reopens at depth 0 instead of
+// wedging shut (maxDepth/2 == 0 can never be undercut). Behavior for
+// maxDepth >= 2 is unchanged.
 func (n *Notifier) Gate(maxDepth int64) func(appID string) error {
 	if maxDepth <= 0 {
 		return func(string) error { return nil }
 	}
 	low := maxDepth / 2
+	if low < 1 {
+		low = 1
+	}
 	var shedding atomic.Bool
 	return func(string) error {
 		depth := n.gauge.Load()
@@ -640,6 +711,12 @@ func (n *Notifier) refreshOneAttempt(ctx context.Context, log *slog.Logger, id s
 	if ctx.Err() != nil || !ok || sub.isCancelled() || txID <= sub.TxID.Load() {
 		return
 	}
+	// Stamp the rule-generation epoch before computing (RT-001): the
+	// transport refuses frames from attempts overtaken by a concurrent
+	// re-gate. Stamping early (rather than after refreshResult) is what
+	// makes the check meaningful — a swap landing anywhere in this
+	// attempt, including inside incremental computation, is detected.
+	gen := sub.Gen.Load()
 	result, err := n.refreshResult(ctx, sub, changes)
 	if err != nil {
 		log.Error("reactive: refresh failed", "sub", id, "err", err)
@@ -666,25 +743,45 @@ func (n *Notifier) refreshOneAttempt(ctx context.Context, log *slog.Logger, id s
 			}
 		}
 	}
-	sub.SetSnapshot(result) // baseline is ALWAYS the latest full result
-
-	sub.TxID.Store(txID) // watermark AFTER successful emit materialization
+	// RT-002a/RT-002b: nothing about this generation becomes observable
+	// until the fan-out outcome is known. Snapshot first, watermark second
+	// (see SnapshotPair for why this order plus read order keeps any skew
+	// conservative). On emit failure neither advances and the bounded retry
+	// re-arms the same txID — identical to the refresh-error path, so a
+	// poisoned generation can neither leak nor starve newer invalidations
+	// (newer txIDs always pass the progress guard above).
 	if sub.Emit != nil {
-		sub.Emit(Frame{
+		if err := sub.Emit(Frame{
 			SubID:         id,
 			QueryJSON:     sub.Query,
 			ResultJSON:    result,
 			PatchJSON:     patchJSON,
 			ProcessedTxID: txID,
-		})
+			Gen:           gen,
+		}); err != nil {
+			log.Error("reactive: emit failed; generation dropped, retry armed", "sub", id, "err", err)
+			n.scheduleRetry(ctx, sub, txID, changes, failures+1)
+			return
+		}
 	}
+	sub.SetSnapshot(result)
+	sub.TxID.Store(txID)
 }
 
 // refreshResult produces one drain's envelope. When the invalidation carried
 // a known change set and the engine is wired, incremental maintenance gets
 // first crack (docs/reference/09-tier2-architecture.md §T2.5); any bail-out falls back
 func (n *Notifier) refreshResult(ctx context.Context, sub *Subscription, changes []Change) (json.RawMessage, error) {
-	if changes != nil && n.Inc != nil {
+	forceFull := false
+	if n.Revalidate != nil {
+		changed, rerr := n.Revalidate(ctx, sub)
+		if rerr != nil {
+			metrics.Refreshes.WithLabelValues("error").Inc()
+			return nil, rerr
+		}
+		forceFull = changed
+	}
+	if !forceFull && changes != nil && n.Inc != nil {
 		if out, ok := n.Inc.apply(ctx, sub, changes); ok {
 			metrics.Refreshes.WithLabelValues("spliced").Inc()
 			return out, nil

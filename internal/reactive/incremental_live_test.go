@@ -111,10 +111,11 @@ func TestLiveIncrementalMatchesExecutor(t *testing.T) {
 			Query:  json.RawMessage(dq.raw),
 			Topics: topics,
 		}
-		sub.Emit = func(f Frame) {
+		sub.Emit = func(f Frame) error {
 			mu.Lock()
 			frames[f.SubID] = f.ResultJSON
 			mu.Unlock()
+			return nil
 		}
 		if _, err := store.Add(sub); err != nil {
 			t.Fatal(err)

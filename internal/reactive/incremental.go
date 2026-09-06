@@ -43,6 +43,15 @@ type Incremental struct {
 	// Source resolves current membership and entity payloads against
 	// storage for one form probe.
 	Source ChangeSource
+	// Authorize reports whether a splice over etypes may serve under the
+	// subscription's admitted gate. The membership probe mirrors only the
+	// query WHERE — never view rules — so splicing under a closed or
+	// dynamic-non-admin gate would serve rows the full-query oracle
+	// excludes. A false verdict bails to full refresh (fail closed to
+	// correct behavior, not to an error). Nil preserves legacy behavior
+	// and must only be used where no permission gate exists (hermetic
+	// tests); every production wiring sets it.
+	Authorize func(sub *Subscription, etypes []string) bool
 }
 
 // ChangeSource is the data plane the engine probes per drain. The production
@@ -178,6 +187,20 @@ func (e *Incremental) apply(ctx context.Context, sub *Subscription, changes []Ch
 	st := &sub.mat
 	if e == nil || e.Source == nil || !st.ready || st.elig != eligYes || len(changes) == 0 {
 		return nil, false
+	}
+	if e.Authorize != nil {
+		// Splice authorization (RT-001): the probe below enforces only
+		// WHERE membership. Roots are flat top-level etypes (classify
+		// rejects nesting), so a per-root view check covers every etype
+		// the splice can touch. Bailing serves the oracle result.
+		etypes := make([]string, 0, len(st.roots))
+		for et := range st.roots {
+			etypes = append(etypes, et)
+		}
+		sort.Strings(etypes)
+		if !e.Authorize(sub, etypes) {
+			return nil, false
+		}
 	}
 
 	// Stage copy-on-write clones for every queried etype actually touched.

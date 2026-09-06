@@ -35,7 +35,7 @@ func TestRefreshFailureDoesNotHotLoop(t *testing.T) {
 		AppID:  "a",
 		Query:  json.RawMessage(`{}`),
 		Topics: map[string]bool{"t1": true},
-		Emit:   func(Frame) {},
+		Emit:   func(Frame) error { return nil },
 	}
 	if _, err := store.Add(sub); err != nil {
 		t.Fatalf("store.Add: %v", err)
