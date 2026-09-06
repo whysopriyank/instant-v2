@@ -1,21 +1,28 @@
 # Proposed release envelope
 
-Decision ID: `DEC-001-dev-checkpoint-20260904`
-Status: `PROPOSED` — not an approval and not a release claim
-Proposed at (UTC): `2026-09-04T02:10:07Z`
-Candidate scope: `codex/quality-implementation-checkpoint` at
-`5ccea252c70e47fda970caccf6c7feb5945d3968`
-Supersedes: none
-Decision owner: **UNASSIGNED**
-Owner approval: **PENDING** — name, UTC timestamp, and immutable approval
-evidence reference are required before this document can become `APPROVED`.
+Decision ID: `DEC-001-single-node-alpha-20260905`
+Status: `APPROVED` — single-node alpha release profile
+Proposed at (UTC): `2026-09-05T08:31:04Z`
+Approved at (UTC): `2026-09-05T08:35:12Z`
+Candidate scope: `main` at `14e2988e79851b34e340b41ebaf7ea109132b70e`
+WITH uncommitted work (RT-001 rebinding PARTIAL, RT-002 delivery repair
+implemented-unproven, F-001 ledger) — no immutable release candidate is
+selected; FR-002 must run on a clean tree.
+Supersedes: `DEC-001-dev-checkpoint-20260904` (retained in git history)
+Decision owner: **Priyank, project owner**
+Owner approval: **APPROVED by Priyank, project owner, at
+`2026-09-05T08:35:12Z`. Evidence: owner approval recorded in the finish-up
+working session (goal `goal-b42ffd44-b3b2-455a-8de3-f46f87a7d149`) following
+the F-002 single-node-alpha proposal; successor changes require a new
+owner-approved decision per the schema below.
 
 This is the durable proposed output for
-[DEC-001](../plans/gaps-backlog-precision-build-contract.md#dec-001--supported-release-envelope-and-policy-freeze).
-It selects the smallest credible **Development checkpoint** default from the
-available evidence. It does not authorize production use, support a public
-surface, accept an exception, or select a later packet. An agent must not treat
-any `DEFERRED` row as `EXCLUDED`, nor treat this proposal as owner approval.
+[DEC-001](../plans/gaps-backlog-precision-build-contract.md#dec-001--supported-release-envelope-and-policy-freeze)
+and [F-002](../plans/finish-up/01-scope-and-decisions.md). It selects the
+smallest defensible first release: **single-node alpha** on primary
+PostgreSQL. It does not authorize production use, accept an exception, or
+select a later packet. An agent must not treat any `DEFERRED` row as
+`EXCLUDED`, nor treat this proposal as owner approval.
 
 ## Decision schema and change control
 
@@ -28,62 +35,65 @@ new owner-approved decision.
 
 `EXCLUDED` is valid only when the approved decision names the exact surface and
 the source, support documentation, corpus matrix, and release gate enforce the
-failure/inaccessibility. This proposal has no accepted exclusions. `DEFERRED`
+failure/inaccessibility. This proposal has no accepted exclusions: rows marked
+"proposed exclusion" become `EXCLUDED` only on approval. `DEFERRED`
 means unselected and unavailable as a release claim, not silently unsupported.
 
 ## Evidence basis
 
-- The candidate is a development checkpoint with a pre-existing dirty product
-  tree; the precise preservation and stabilization work is CP-001 through
-  CP-003 in the [precision contract](../plans/gaps-backlog-precision-build-contract.md).
-- The repository documents a single-binary, self-host-first direction, but also
-  says that current status is partial and does not establish production readiness
-  or frozen-v1 compatibility in the [root README](../../README.md) and
-  [quality verification](quality-verification.md).
-- Current evidence lacks a pinned-v1 differential run, a qualified performance
-  bundle, release artifacts, deployed provider acceptance, and production
-  recovery/soak/container acceptance. These are tracked by C-003 through C-005,
-  O-003 through O-005, PERF-001, and REL-001 through REL-004.
+- Current-candidate truth ledger
+  [`docs/plans/current-candidate-truth-ledger.md`](../plans/current-candidate-truth-ledger.md)
+  (F-001, reconciled 2026-09-05; pass-1 rows historically verified with
+  current-candidate acceptance pending).
+- RT-001 permission rebinding: repair implemented, PARTIAL, uncommitted;
+  runtime red/green owed to a runnable host.
+- RT-002 delivery semantics: repaired per the frozen transparent re-gate +
+  explicit-disconnect policy (reconnect from full snapshot); runtime proof
+  owed to a runnable host.
+- Current evidence still lacks a pinned-v1 differential run, a qualified
+  performance bundle, release artifacts, deployed provider acceptance, and
+  production recovery/soak/container acceptance.
 
 ## Proposed profile
 
-| Field | Proposed development-checkpoint value | Approval-required follow-up |
-|---|---|---|
-| Profile | `Development checkpoint` | Owner may select a different profile only in a new decision. |
-| Candidate/ref | The ref named above; no immutable release candidate is selected. | Pin a clean immutable SHA for any release acceptance. |
-| OS/architecture | No native or container support target is selected. The authoring host is not a support claim. | Name each OS/arch and native/container distribution. |
-| Topology | No deployment topology is selected; no multi-node or read-replica claim. | Select single-node/multi-node and primary/replica semantics. |
-| SDK/protocol compatibility | No frozen SDK version, transport, or v1-parity claim. | Name SDK versions, operations, and accepted differences. |
-| Runtime/API surface | No public HTTP, WS, SSE, admin, auth, storage, presence, rooms, sync, or stream support claim. | Enumerate supported routes/operations and enforced exclusions. |
-| Providers and magic code | No deployed Google, GitHub, Apple, custom OIDC, or magic-code delivery support claim. | Select providers, delivery path, nonce/retry lifecycle, and evidence. |
-| Persistence and backup | No durable local-disk/S3/object-backup, migration, rollback, or restore support claim. | Select durable modes and prove the required drills. |
-| Security policy | No owner acceptance of rate-limit capacity behavior, origins, secrets, or failure envelopes. | Record exact policy and security-review evidence. |
-| Compatibility | No corpus, pinned-v1, or differential compatibility claim. | Freeze corpus/v1 policy and accepted-difference registry. |
-| Performance | No comparative performance claim or performance acceptance gate. | Declare hardware, cells, budgets, and measurement authority. |
-| Capacity/recovery | No capacity, latency, error, memory, drain, recovery, RPO, or RTO promise. | Declare measurable budgets and qualifying run authority. |
+| Area | Proposed single-node-alpha value |
+|---|---|
+| Release level | Single-node alpha: one `instantd`, primary PostgreSQL only |
+| Distribution | From-source on an owner-named Linux target qualified via OP-003; container unqualified until OP-004; Go ≥1.25 |
+| Protocol | WS covered paths + HTTP admin/runtime/storage per CF-003 matrix; presence, sync/stream, SSE explicitly unsupported until their rows pass (501/error paths enforced) |
+| Auth | Magic-code delivery excluded (503 retained); Google/GitHub local contract required, real-provider acceptance excluded (no provider claim); Apple excluded |
+| Permissions | Dynamic view rules excluded (rejection enforced); live sessions transparently re-gated at refresh boundaries (reauthorize-or-detach realtime policy) |
+| Storage | Durable configured local root required (DA-001 assembles); object backup excluded (503 enforced) |
+| Topology | Single node; no multi-node (OP-001) or read-replica (OP-002) claim |
+| Security | Bounded fail-closed rate-limit overflow (DA-007 implements); production requires explicit `INSTANT_V2_WS_ALLOWED_ORIGINS` (wildcard dev-only, gate-rejected for alpha) |
+| Compatibility | No frozen SDK, transport, or v1-parity claim; corpus matrix closed per CF-003 for selected surfaces |
+| Reliability | RPO: no promise; RTO 1h single-node restart; drain 30s SIGTERM |
+| Performance | No comparative performance claim or acceptance gate (QR-002 excluded) |
+| Harnesses | `cmd/benchsmoke` declared historical (EV-006 removes false claims); soak/chaos/bench entrypoints supported for dev use with mandatory artifacts per EV repairs |
+| Delivery | No tag/publish/sign/SBOM/canary; only a named owner may authorize external mutations |
 
-## Proposed development constraints and budgets
+## Proposed alpha qualification envelope
 
-These are guardrails for the proposed checkpoint, not production service-level
-objectives:
+Guardrails for the alpha (not production SLOs):
 
 | Area | Proposed value | Consequence |
 |---|---|---|
-| Verification | Hermetic build/tests plus only the package integrations explicitly selected by the coordinator. | Passing checks establish only their recorded scope. |
-| Live databases/endpoints | No authority is granted by this artifact. | A packet requiring an owned database, local service, or credentials remains blocked until separately authorized. |
-| Chaos/live faults | No chaos invocation or live fault authority. | T-001/T-002 remain deferred; unsafe chaos output cannot be accepted. |
-| Soak/recovery/performance | No campaign duration, load, latency, error, resource, RPO/RTO, or comparative budget. | O-004, O-005, and PERF-001 cannot run as acceptance work. |
-| Publishing/deployment | No tag, publish, signing, SBOM, registry, canary, or rollback authority. | REL-002 and REL-004 remain deferred. |
+| Verification | Hermetic build/tests plus only the package integrations explicitly selected by the coordinator | Passing checks establish only their recorded scope |
+| Soak | One 500-session × 15 min run on a named owned host, full time-series + exact teardown (QR-001); 150-session CI lane is smoke only; 5k×30m explicitly not required | O-004-style capacity claims cannot be made |
+| Live databases/endpoints | No authority is granted by this artifact | Any packet needing an owned database, local service, or credentials stays blocked until separately authorized |
+| Chaos/live faults | No chaos invocation or live fault authority | Destructive lanes stay deferred; unsafe chaos output cannot be accepted |
+| Publishing/deployment | No tag, publish, signing, SBOM, registry, canary, or rollback authority | REL-002/REL-004 and FR-003/FR-004 remain unselected |
 
 ## External-authority registry
 
 | Authority ID | Activity | State | Required approver/evidence before use |
 |---|---|---|---|
-| `AUTH-PROVIDER-001` | Real OAuth/OIDC provider or magic-code delivery acceptance | `NOT_GRANTED` | Named owner, target/credentials scope, redacted artifact location, security review. |
-| `AUTH-FAULT-001` | Live process, PostgreSQL, destructive chaos, or fault injection | `NOT_GRANTED` | Named owner, exact owned resources, rollback/cleanup plan, safety review. |
-| `AUTH-PERF-001` | Soak or comparative performance campaign | `NOT_GRANTED` | Named owner, quiet hardware, frozen workload/budgets, artifact destination. |
-| `AUTH-PUBLISH-001` | Tag, sign, SBOM, registry, or release publication | `NOT_GRANTED` | Named owner, protected ref, credential/OIDC model, dry-run evidence. |
-| `AUTH-DEPLOY-001` | Canary, traffic, production data, or rollback operation | `NOT_GRANTED` | Named operator, target, data/traffic scope, runbook, rollback authority. |
+| `AUTH-PROVIDER-001` | Real OAuth/OIDC provider or magic-code delivery acceptance | `NOT_GRANTED` | Named owner, target/credentials scope, redacted artifact location, security review |
+| `AUTH-FAULT-001` | Live process, PostgreSQL, destructive chaos, or fault injection | `NOT_GRANTED` | Named owner, exact owned resources, rollback/cleanup plan, safety review |
+| `AUTH-PERF-001` | Soak or comparative performance campaign | `NOT_GRANTED` | Named owner, quiet hardware, frozen workload/budgets, artifact destination |
+| `AUTH-PUBLISH-001` | Tag, sign, SBOM, registry, or release publication | `NOT_GRANTED` | Named owner, protected ref, credential/OIDC model, dry-run evidence |
+| `AUTH-DEPLOY-001` | Canary, traffic, production data, or rollback operation | `NOT_GRANTED` | Named operator, target, data/traffic scope, runbook, rollback authority |
+| `AUTH-RUNTIME-001` | DB-backed/loopback runtime proof runs (red/green/corpus slice) on an owned host | `NOT_GRANTED` | Named owner, exact host/database scope, cleanup plan |
 
 ## Accepted-difference registry
 
@@ -95,60 +105,57 @@ approval reference. A missing entry is a discrepancy, not an implicit exception.
 ## Packet selection ledger
 
 All rows are scoped to the candidate above. `REQUIRED` means required to finish
-the proposed development checkpoint. `DEFERRED` means no work is selected by this
-proposal. No row is `EXCLUDED` because an unapproved proposal cannot create an
-enforceable support restriction.
+the proposed alpha. `DEFERRED` means no work is selected by this proposal; rows
+marked "proposed exclusion" are enforced as exclusions only on approval. No row
+is `EXCLUDED` because an unapproved proposal cannot create an enforceable
+support restriction.
 
-| Packet | Selection | Exact surface / rationale | Dependency and enforcement/evidence reference |
-|---|---|---|---|
-| CP-001 | `REQUIRED` | Validate the existing transaction ordering and permission-state dirty candidate. | First; handoff under the precision contract. |
-| CP-002 | `REQUIRED` | Validate the existing auth attribute-cache dirty candidate. | First; handoff under the precision contract. |
-| CP-003 | `REQUIRED` | Validate the existing admin mutation/runtime dirty candidate. | CP-001 and CP-002; handoff under the precision contract. |
-| DEC-001 | `REQUIRED` | Persist this proposed support/authority inventory; owner approval remains pending. | CP status known; this document. |
-| P-001 | `DEFERRED` | Runtime signup-rule wiring is not selected for this checkpoint. | CP-002/003; no auth support claim. |
-| P-002 | `DEFERRED` | OAuth route assembly is not selected. | CP-002/003 and a future envelope; no provider support claim. |
-| P-003 | `DEFERRED` | Magic-code delivery adapter/policy is not selected. | CP-002 and future delivery authority. |
-| P-004 | `DEFERRED` | Reactive retry lifecycle is not selected. | Stabilized candidate; no realtime support claim. |
-| P-005 | `DEFERRED` | `serverCreatedAt` ordering is not selected. | Future query/order surface decision. |
-| P-006 | `DEFERRED` | COPY parity is not selected and must not be exposed. | CP-001; no COPY support claim. |
-| P-007 | `DEFERRED` | Admin presence semantics are not selected. | Future admin-surface decision. |
-| P-008 | `DEFERRED` | Sync/stream semantics are not selected. | Future protocol-surface decision. |
-| P-009 | `DEFERRED` | Rate-limit capacity policy is not owner-accepted. | Future security owner and review. |
-| P-010 | `DEFERRED` | Durable object/file storage assembly is not selected. | CP-003 and future storage decision. |
-| P-011 | `DEFERRED` | Deployed provider/OIDC nonce acceptance is not selected. | P-002 plus `AUTH-PROVIDER-001`. |
-| C-001 | `DEFERRED` | Exact-number corpus loading is not selected; no comparator claim. | Stabilized candidate. |
-| C-002 | `DEFERRED` | Volatile masking/quiescence work is not selected; no comparator claim. | Stabilized candidate. |
-| C-003 | `DEFERRED` | HTTP/SSE capture adapters are not selected. | Future supported paths and capture authority. |
-| C-004 | `DEFERRED` | Coverage matrix expansion is not selected. | Product/corpus selection. |
-| C-005 | `DEFERRED` | Pinned-v1 differential acceptance is not selected. | C-001 through C-004 and external local-service authority. |
-| T-001 | `DEFERRED` | Chaos safety repair is not selected; chaos invocation remains prohibited. | Stabilized candidate; `AUTH-FAULT-001` for any future run. |
-| T-002 | `DEFERRED` | Chaos provenance repair is not selected; chaos output is not acceptance evidence. | T-001 and `AUTH-FAULT-001`. |
-| B-001 | `DEFERRED` | Benchmark evidence repair is not selected; benchmark output is not acceptance evidence. | Stabilized candidate; no performance claim. |
-| O-001 | `DEFERRED` | Multi-node invalidation recovery is not selected. | Future multi-node topology decision. |
-| O-002 | `DEFERRED` | Read-replica visibility is not selected. | Future read-replica decision. |
-| O-003 | `DEFERRED` | Native Linux/container acceptance is not selected. | Future shipped-target decision. |
-| O-004 | `DEFERRED` | Soak/capacity evidence is not selected. | Future budgets and `AUTH-PERF-001`. |
-| O-005 | `DEFERRED` | Recovery/drain/backup acceptance is not selected. | O-003, future durability decision, and `AUTH-FAULT-001`. |
-| PERF-001 | `DEFERRED` | Qualified comparison is not selected. | B-001/C-005/O-003..005, budgets, `AUTH-PERF-001`. |
-| D-001 | `DEFERRED` | Final release-support documentation reconciliation follows selected packets only. | Final selected handoffs. |
-| REL-001 | `DEFERRED` | Composed release gate is not selected. | Future approved envelope and final docs. |
-| REL-002 | `DEFERRED` | Publishing/signing/SBOM workflow is not selected. | `AUTH-PUBLISH-001`. |
-| REL-003 | `DEFERRED` | Immutable release-candidate acceptance is not selected. | REL-001 and an approved release envelope. |
-| REL-004 | `DEFERRED` | Canary/rollback is not selected. | REL-003 and `AUTH-DEPLOY-001`. |
+| Packet | Selection | Exact surface / rationale |
+|---|---|---|
+| F-001 | `REQUIRED` | Current-candidate truth ledger; reconciled |
+| F-002 | `REQUIRED` | This decision; approved by Priyank at `2026-09-05T08:35:12Z` (reaffirmed `2026-09-06` working session) |
+| RT-001 | `REQUIRED` | Dynamic permission rebinding (transparent re-gate); runtime proof owed |
+| RT-002 | `REQUIRED` | Refresh outcome semantics (explicit disconnect + full replay); runtime proof owed |
+| RT-003 | `REQUIRED` | Depth-one recovery or validation exclusion of depth one |
+| DA-001 | `REQUIRED` | Durable local storage assembly; object backup proposed exclusion |
+| DA-002 | `REQUIRED` | Upload atomicity and signed metadata |
+| DA-003 | `REQUIRED` | Backup fail-closed (local paths; object paths stay 503) |
+| DA-004V | `REQUIRED` | Dynamic view rules: enforce exclusion consistently |
+| DA-004 | `REQUIRED` | Admin permission-check fidelity |
+| DA-005 | `REQUIRED` | Admin provisioning/mutation atomicity |
+| DA-006A | `REQUIRED` | OAuth local lifecycle contract (no provider claim) |
+| DA-006B | `DEFERRED` | Real provider acceptance; proposed exclusion from alpha |
+| DA-007 | `REQUIRED` | Rate-limit saturation policy (bounded fail-closed) |
+| DA-008A | `REQUIRED` | Magic-code fail-closed retention and enforcement |
+| DA-008B | `DEFERRED` | Real delivery acceptance; proposed exclusion from alpha |
+| EV-001..006 | `REQUIRED` | Harness repairs incl. benchsmoke historical ruling |
+| CF-001 | `DEFERRED` | COPY acceptance; proposed exclusion (no production caller) |
+| CF-002 | `REQUIRED` | Recorder and fixture lifecycle |
+| CF-003 | `REQUIRED` | Selected coverage matrix closure |
+| CF-004/005 | `DEFERRED` | Pinned-v1 env/differential; proposed exclusion (no parity claim) |
+| OP-001/002 | `DEFERRED` | Multi-node/replica; proposed exclusion |
+| OP-003 | `REQUIRED` | Native Linux qualification of the declared target |
+| OP-004 | `DEFERRED` | Container qualification; proposed exclusion until declared |
+| OP-005 | `REQUIRED` | Crash/bounce/drain core |
+| OP-006 | `DEFERRED` | Backup/restore drill; requires backup selection |
+| QR-001 | `REQUIRED` | Alpha-envelope soak (500×15m) |
+| QR-002 | `DEFERRED` | Comparative performance; proposed exclusion |
+| QR-003 | `REQUIRED` | Composed fail-closed candidate gate |
+| QR-004 | `DEFERRED` | Publish workflow; unselected |
+| QR-005 | `REQUIRED` | Supply-chain reconciliation (bounded) |
+| FR-001/002 | `REQUIRED` | Documentation truth; immutable acceptance on a clean tree |
+| FR-003/004 | `DEFERRED` | Publish/canary; unselected |
+| TD-001..005 | `DEFERRED` | Debt; promote only on material evidence |
 
 ## Approval record
 
-Approval is intentionally blank. To approve a successor, record all fields
-below and change its status to `APPROVED` only after the named owner has made the
-decision outside the implementation agent.
-
-| Field | Required value |
+| Field | Recorded value |
 |---|---|
-| Decision ID / predecessor | New ID and `DEC-001-dev-checkpoint-20260904` |
-| Approved profile and candidate/ref | Explicit profile, clean SHA/tree, configuration scope |
-| Approving owner | Name and role |
-| Approval timestamp (UTC) | ISO-8601 UTC timestamp |
-| Immutable evidence reference | Issue, signed record, or durable approval artifact |
-| Packet changes | Every row changed from this ledger, with reason and enforcement location |
-| Authority grants | Registry IDs, exact targets, credentials/data scope, expiry, and rollback/cleanup plan |
-| Support/budget values | Every profile field and capacity/recovery/performance budget |
+| Decision ID / predecessor | `DEC-001-single-node-alpha-20260905` / `DEC-001-dev-checkpoint-20260904` |
+| Approved profile and candidate/ref | Single-node alpha; `main` at `14e2988e79851b34e340b41ebaf7ea109132b70e` with uncommitted RT-001/RT-002/F-001 work disclosed above; no immutable candidate selected |
+| Approving owner | Priyank, project owner |
+| Approval timestamp (UTC) | `2026-09-05T08:35:12Z` |
+| Immutable evidence reference | Finish-up working session approval record (goal `goal-b42ffd44-b3b2-455a-8de3-f46f87a7d149`); this file's git history |
+| Packet changes | None from the proposal: REQUIRED/DEFERRED ledger above stands as approved |
+| Authority grants | None granted; every `AUTH-*` registry row remains `NOT_GRANTED` |
+| Support/budget values | Profile and alpha envelope tables above, approved as written |

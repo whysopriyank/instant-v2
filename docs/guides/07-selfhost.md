@@ -29,6 +29,22 @@ lock — safe to run multiple replicas against one DB).
 | `DATABASE_URL` | — (required) | Postgres DSN |
 | `INSTANT_V2_HTTP_ADDR` | `:8080` | Listen address (`INSTANT_V2_HTTP_PORT` also accepted) |
 | `INSTANT_V2_STORAGE_SECRET` | — (required) | HMAC key signing storage presigned URLs. Startup fails without it; set `INSTANT_V2_INSECURE_DEV_SECRETS=1` to allow the legacy DSN-derived dev fallback |
+| `INSTANT_V2_STORAGE_ROOT` | — (required) | Durable file-storage root. Startup fails without it (or on a malformed/unwritable root) unless `INSTANT_V2_INSECURE_DEV_SECRETS=1`, which uses an explicit `./.instant-dev-files` directory — never temp storage. Mount a writable volume here (see below) |
+
+### File storage volume
+
+The daemon runs as UID/GID `65532:65532` and validates its storage root at
+startup: the directory must exist (or be creatable), be absolute, and accept
+synced writes, otherwise the daemon refuses to start. Mount a persistent
+volume owned by `65532` and point `INSTANT_V2_STORAGE_ROOT` at it:
+
+```sh
+# host path /srv/instant-files owned by 65532:65532
+docker run -v /srv/instant-files:/data:rw -e INSTANT_V2_STORAGE_ROOT=/data …
+```
+
+Ephemeral container storage loses blobs on restart; object-backup routes stay
+`503` until an S3-compatible store is wired (not selected for the alpha).
 | `INSTANT_V2_MAX_SUBS_PER_APP` | 2000 | Live subscription cap per app (0 would mean unlimited) |
 | `INSTANT_V2_MAX_WS_CONNS` | 20000 | Concurrent websocket connection cap |
 | `INSTANT_V2_MAX_SSE_CONNS` | 10000 | Concurrent SSE stream cap |
