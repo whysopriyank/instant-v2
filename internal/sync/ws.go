@@ -17,6 +17,9 @@ import (
 	"github.com/instant-v2/instant-v2/internal/reactive"
 )
 
+// wsWriteTimeout bounds one fan-out/direct socket write (H-01g): a wedged peer must not stall its group or delay revocation healing indefinitely. Dispatch holds no process-wide lock across I/O; on timeout failMember detaches+closes so siblings and other groups progress. 10s covers large refresh envelopes on slow links without masking wedged peers as healthy.
+const wsWriteTimeout = 10 * time.Second
+
 // WSHandler upgrades and serves /runtime/session connections.
 type WSHandler struct {
 	Manager *Manager
@@ -183,7 +186,13 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		writeMu.Lock()
 		defer writeMu.Unlock()
-		return conn.Write(ctx, websocket.MessageText, b)
+		// Bounded write (RT-001g/H-01g): a wedged peer must not stall fan-out
+		// or revocation indefinitely. No process-wide lock is held across this
+		// I/O (dispatch stays outside groupsMu); on timeout failMember
+		// detaches+closes so siblings and other groups progress.
+		wctx, cancel := context.WithTimeout(ctx, wsWriteTimeout)
+		defer cancel()
+		return conn.Write(wctx, websocket.MessageText, b)
 	}
 	sendErr := func(status int, typ, msg string) {
 		_ = send(ErrFrame(status, typ, msg))
@@ -220,7 +229,9 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			sess.SendRaw = func(b []byte) error {
 				writeMu.Lock()
 				defer writeMu.Unlock()
-				return conn.Write(ctx, websocket.MessageText, b)
+				wctx, cancel := context.WithTimeout(ctx, wsWriteTimeout)
+				defer cancel()
+				return conn.Write(wctx, websocket.MessageText, b)
 			}
 			// RT-002c: fan-out send failure detaches the member, then
 			// breaks the read loop here so deferred teardown runs and the
@@ -269,11 +280,13 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					sendErr(500, "internal", "subscription missing after add-query")
 					return
 				}
-				result, rerr := h.Manager.snapshotOrRefresh(ctx, h.Refresh, sub)
+				_, rerr := h.Manager.snapshotOrRefresh(ctx, h.Refresh, sub)
 				if rerr != nil {
 					sendErr(400, "invalid-query", platform.ClientMessage(rerr))
 					return
 				}
+				// Post-render pre-send guard (RT-001d): a re-gate landing after the flight but before this ack hits the wire must not be served as an authorized new answer. Capture the epoch after the flight; recheck after render before enriching/sending.
+				genAfter := sub.Gen.Load()
 				// Baseline for delta-refresh diffs is always the flat envelope;
 				// the wire gets the v1 node-list. snapshotOrRefresh seeded the
 				// baseline on the refresh path; on the reuse path it is already
@@ -282,17 +295,26 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				// its watermark as one pair, so a (re)subscriber
 				// establishes continuity from exactly this state —
 				// including when siblings kept the group (and its
-				// snapshot) alive across the reconnect. Falls back to
-				// the just-computed result only if the snapshot raced
-				// away mid-attach.
+				// snapshot) alive across the reconnect.
+				// Fail-closed (H-01d S1): a successful flight guarantees a
+				// non-nil snapshot; nil here means a concurrent re-gate cleared
+				// it after the flight published (swap landed between publish
+				// and genAfter). Serving result (stale-allow) would be a new
+				// authorized answer after observed deny — close to force
+				// reconnect under the new gate instead.
 				snap, snapTx := sub.SnapshotPair()
 				if snap == nil {
-					snap = result
-					snapTx = sub.TxID.Load()
+					sendErr(400, "invalid-query", "subscription re-gated during subscribe")
+					return
 				}
 				nodes, nerr := nodelistFor(ctx, h.Manager.Deps.Catalogs, sess.AppID, snap)
 				if nerr != nil {
 					sendErr(500, "internal", nerr.Error())
+					return
+				}
+				if sub.Gen.Load() != genAfter {
+					// Revoked during render: fail closed (close forces reconnect under the new gate) rather than serve superseded bytes as a new answer.
+					sendErr(400, "invalid-query", "subscription re-gated during subscribe")
 					return
 				}
 				replies[0]["q"] = json.RawMessage(rawQ)

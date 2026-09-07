@@ -182,51 +182,87 @@ func classify(rawQuery json.RawMessage) (map[string]*instaql.Form, bool) {
 // only means slightly-new-or-stale rows; the watermark dedupe re-dirties the
 // sub for any tx it hasn't processed, so the next drain reconciles.
 func (e *Incremental) apply(ctx context.Context, sub *Subscription, changes []Change) (json.RawMessage, bool) {
-	sub.mu.Lock()
-	defer sub.mu.Unlock()
-	st := &sub.mat
-	if e == nil || e.Source == nil || !st.ready || st.elig != eligYes || len(changes) == 0 {
+	if e == nil || e.Source == nil || len(changes) == 0 {
 		return nil, false
 	}
+	// Snapshot mat state under sub.mu, then release across DB I/O (H-01):
+	// holding sub.mu across Members/Entities stalled swaps (ClearServedState)
+	// on one slow store. The epoch (Gen) versions the snapshot: a swap clears
+	// baselines BEFORE bumping (clear-then-bump), so post-I/O Gen mismatch or
+	// cleared ready bails to full refresh instead of splicing stale state.
+	sub.mu.Lock()
+	if !sub.mat.ready || sub.mat.elig != eligYes {
+		sub.mu.Unlock()
+		return nil, false
+	}
+	roots := make(map[string]*instaql.Form, len(sub.mat.roots))
+	for et, f := range sub.mat.roots {
+		roots[et] = f
+	}
+	baseLast := sub.mat.last
+	gen0 := sub.Gen.Load()
+	// Stage copy-on-write clones for every queried etype actually touched.
+	staged := map[string]*matForm{}
+	var order []string // deterministic commit order for tests
+	for _, c := range changes {
+		if _, queried := roots[c.Etype]; !queried {
+			continue // etype not in any flat root form: cannot affect the envelope
+		}
+		if _, s := staged[c.Etype]; !s {
+			if sub.mat.forms[c.Etype] == nil {
+				sub.mu.Unlock()
+				return nil, false
+			}
+			staged[c.Etype] = sub.mat.forms[c.Etype].clone()
+			order = append(order, c.Etype)
+		}
+	}
+	sort.Strings(order)
+	if len(staged) == 0 {
+		// Nothing queried was touched: the current envelope is provably exact
+		// only if no swap landed during the snapshot; recheck epoch.
+		ready := sub.mat.ready
+		last := sub.mat.last
+		sub.mu.Unlock()
+		if !ready || sub.Gen.Load() != gen0 {
+			return nil, false
+		}
+		return last, true
+	}
+	// Authorize outside sub.mu (it takes authMu; holding sub.mu across it
+	// stalled swaps the same way). Roots are flat (classify rejects nesting).
+	// Capture etypes for the check, then release before I/O.
+	sub.mu.Unlock()
 	if e.Authorize != nil {
-		// Splice authorization (RT-001): the probe below enforces only
-		// WHERE membership. Roots are flat top-level etypes (classify
-		// rejects nesting), so a per-root view check covers every etype
-		// the splice can touch. Bailing serves the oracle result.
-		etypes := make([]string, 0, len(st.roots))
-		for et := range st.roots {
+		etypes := make([]string, 0, len(roots))
+		for et := range roots {
 			etypes = append(etypes, et)
 		}
 		sort.Strings(etypes)
 		if !e.Authorize(sub, etypes) {
 			return nil, false
 		}
-	}
-
-	// Stage copy-on-write clones for every queried etype actually touched.
-	staged := map[string]*matForm{}
-	var order []string // deterministic commit order for tests
-	for _, c := range changes {
-		if _, queried := st.roots[c.Etype]; !queried {
-			continue // etype not in any flat root form: cannot affect the envelope
+		// A swap landing during Authorize (rule-store I/O) must invalidate
+		// the staged clones taken above; recheck epoch before probing.
+		if sub.Gen.Load() != gen0 {
+			return nil, false
 		}
-		if _, s := staged[c.Etype]; !s {
-			staged[c.Etype] = st.forms[c.Etype].clone()
-			order = append(order, c.Etype)
-		}
-	}
-	sort.Strings(order)
-	if len(staged) == 0 {
-		// Nothing queried was touched: the current envelope is provably exact.
-		return st.last, true
 	}
 
 	for _, etype := range order {
-		f := st.roots[etype]
+		f := roots[etype]
 		nf := staged[etype]
 		ids := changedIDs(changes, etype)
+		// A swap landing during the probes must invalidate this splice;
+		// check before each etype's reads (probes are rule-unaware WHERE-only).
+		if sub.Gen.Load() != gen0 {
+			return nil, false
+		}
 		members, err := e.Source.Members(ctx, sub.AppID, f, ids)
 		if err != nil {
+			return nil, false
+		}
+		if sub.Gen.Load() != gen0 {
 			return nil, false
 		}
 		// Fetch payloads only for entities that currently qualify; a member
@@ -239,6 +275,9 @@ func (e *Incremental) apply(ctx context.Context, sub *Subscription, changes []Ch
 		}
 		ents, err := e.Source.Entities(ctx, sub.AppID, f, fetch)
 		if err != nil {
+			return nil, false
+		}
+		if sub.Gen.Load() != gen0 {
 			return nil, false
 		}
 		for _, id := range ids {
@@ -259,14 +298,22 @@ func (e *Incremental) apply(ctx context.Context, sub *Subscription, changes []Ch
 		}
 	}
 
-	out, ok := renderEnvelope(st.last, staged)
+	out, ok := renderEnvelope(baseLast, staged)
 	if !ok {
 		return nil, false
 	}
-	for etype, nf := range staged {
-		st.forms[etype] = nf
+	// Commit under sub.mu only if no swap landed during the probes; a swap
+	// clears ready+baselines first (clear-then-bump), so Gen mismatch or
+	// cleared ready bails instead of committing stale-spliced state.
+	sub.mu.Lock()
+	defer sub.mu.Unlock()
+	if sub.Gen.Load() != gen0 || !sub.mat.ready {
+		return nil, false
 	}
-	st.last = out
+	for etype, nf := range staged {
+		sub.mat.forms[etype] = nf
+	}
+	sub.mat.last = out
 	return out, true
 }
 

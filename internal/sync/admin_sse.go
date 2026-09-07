@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/instant-v2/instant-v2/internal/platform"
 	"github.com/instant-v2/instant-v2/internal/reactive"
 )
 
@@ -104,10 +105,10 @@ func (h *SSEHandler) AdminSubscribe(w http.ResponseWriter, r *http.Request) {
 		Subs:        map[string]bool{},
 		Rooms:       map[string]bool{},
 	}
-	events := make(chan Frame, 128)
+	events := make(chan sseEvent, 128)
 	sess.Send = func(f Frame) error {
 		select {
-		case events <- f:
+		case events <- sseEvent{frame: f}:
 			return nil
 		default:
 			return errSSEBackpressure
@@ -115,7 +116,23 @@ func (h *SSEHandler) AdminSubscribe(w http.ResponseWriter, r *http.Request) {
 	}
 	sess.SendRaw = func(b []byte) error {
 		select {
-		case events <- Frame{"__raw": json.RawMessage(b)}:
+		case events <- sseEvent{frame: Frame{"__raw": json.RawMessage(b)}}:
+			return nil
+		default:
+			return errSSEBackpressure
+		}
+	}
+	sess.SendRawGen = func(b []byte, gen uint64, subID string) error {
+		select {
+		case events <- sseEvent{frame: Frame{"__raw": json.RawMessage(b)}, hasGen: true, gen: gen, subID: subID}:
+			return nil
+		default:
+			return errSSEBackpressure
+		}
+	}
+	sess.SendGen = func(f Frame, gen uint64, subID string) error {
+		select {
+		case events <- sseEvent{frame: f, hasGen: true, gen: gen, subID: subID}:
 			return nil
 		default:
 			return errSSEBackpressure
@@ -176,18 +193,39 @@ func (h *SSEHandler) AdminSubscribe(w http.ResponseWriter, r *http.Request) {
 	}
 	key := groupKey(sess.AppID, class, qraw, sess.Admin)
 	sub, _ := h.Store.Get(key)
+	// Coordinated initial answer (RT-001d): use the same single-flight as the
+	// WS/SSE paths so a concurrent re-gate fails the flight instead of serving
+	// stale-allow as a new answer. Direct h.Refresh bypassed the flight and
+	// its generation guard.
 	result, meta := json.RawMessage("null"), json.RawMessage("{}")
-	if sub != (*reactive.Subscription)(nil) && h.Refresh != nil {
-		if res, rerr := h.Refresh(r.Context(), sub); rerr == nil {
-			result = res
-			meta = resultMetaOf(res)
-		}
-	}
-
-	// RT-002a/RT-002d: carry the served pair when one exists so the
-	// watermark matches the snapshot.
 	snapTx := int64(0)
-	if sub != (*reactive.Subscription)(nil) {
+	if sub != (*reactive.Subscription)(nil) && h.Refresh != nil {
+		_, rerr := h.Manager.snapshotOrRefresh(r.Context(), h.Refresh, sub)
+		if rerr != nil {
+			writeEvent(ErrFrame(400, "subscribe-failed", platform.ClientMessage(rerr)))
+			h.teardownSubs(sess)
+			return
+		}
+		genAfter := sub.Gen.Load()
+		// RT-002a/RT-002d: carry the served pair so the watermark matches.
+		// Fail-closed (H-01d S1): success guarantees non-nil snapshot; nil
+		// means a concurrent re-gate cleared after publish — teardown rather
+		// than serve stale res as a new answer.
+		if snap, tx := sub.SnapshotPair(); snap != nil {
+			result, meta, snapTx = snap, resultMetaOf(snap), tx
+		} else {
+			writeEvent(ErrFrame(400, "subscribe-failed", "subscription re-gated during subscribe"))
+			h.teardownSubs(sess)
+			return
+		}
+		if sub.Gen.Load() != genAfter {
+			writeEvent(ErrFrame(400, "subscribe-failed", "subscription re-gated during subscribe"))
+			h.teardownSubs(sess)
+			return
+		}
+	} else if sub != (*reactive.Subscription)(nil) {
+		// RT-002a/RT-002d: carry the served pair when one exists so the
+		// watermark matches the snapshot.
 		if snap, tx := sub.SnapshotPair(); snap != nil {
 			result, meta, snapTx = snap, resultMetaOf(snap), tx
 		}
@@ -219,7 +257,15 @@ func (h *SSEHandler) AdminSubscribe(w http.ResponseWriter, r *http.Request) {
 		case <-ctx.Done():
 			h.teardownSubs(sess)
 			return
-		case f := <-events:
+		case ev := <-events:
+			// Generation guard (RT-001f): drop queued envelopes superseded
+			// after enqueue, same contract as the runtime SSE stream.
+			if ev.hasGen && h.Store != nil {
+				if gsub, ok := h.Store.Get(ev.subID); !ok || gsub.Gen.Load() != ev.gen {
+					continue
+				}
+			}
+			f := ev.frame
 			var ok bool
 			if raw, isRaw := f["__raw"]; isRaw {
 				ok = writeRaw(raw)

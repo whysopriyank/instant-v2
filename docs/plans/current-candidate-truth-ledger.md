@@ -1,12 +1,15 @@
 # Current-candidate truth ledger (F-001)
 
 Packet: `F-001` in `docs/plans/finish-up/01-scope-and-decisions.md`.
-Candidate: `14e2988e79851b34e340b41ebaf7ea109132b70e` on `main`, captured
-`2026-09-05T05:19:05Z` (clean tree at capture) and re-fingerprinted
-`2026-09-05T08:11:16Z` (dirty tree, see below).
+Candidate: `26a1caf9856110b711315aaed4c5cbeaec3bbc36` on `main`, captured
+`2026-09-06T17:29:15Z` (clean tree at capture: G1 `20433cd`, G2 `e8565ce`,
+G3 `b1550d1`, G4 `26a1caf` landed above the prior baseline, unpushed).
 Toolchain: `go1.27.0 darwin/arm64`.
-Planning baseline `5ccea252c70e47fda970caccf6c7feb5945d3968` is an ancestor of
-this candidate; its dirty tree no longer exists as uncommitted work.
+History (preserved, not current): `14e2988e79851b34e340b41ebaf7ea109132b70e`
+captured `2026-09-05T05:19:05Z` (clean) and re-fingerprinted
+`2026-09-05T08:11:16Z` (dirty); planning baseline `5ccea25` is an ancestor
+of this candidate and its dirty tree no longer exists as uncommitted work.
+All dated sections below that cite the old fingerprint remain scoped to it.
 
 Reconciliation record (2026-09-05T08:11:16Z): the tree is now dirty with
 in-progress packet work. Modified: `cmd/instantd/refresh.go`,
@@ -229,3 +232,11 @@ listed by `git status --short` this date. Nothing below rewrites the
 - Review-closure note: RT-002 reliability review is accepted contingent on one unsandboxed live green — satisfied in-session (updated `TestLiveReconnectConvergesAfterDrop` green with `-race`; `wantTx+1` mutation probe red with exit 1, reverted, zero residue; verbatim outputs pasted in the working session). Security (RT-001) and data (DA-003) reviews remain owed.
 - Independent-acceptance note: all four owner-tasked items accepted by independent pass — splice fix (severity confirmed, lock audit holds, G1/G3 must land in same push), fail-closed default, fingerprint fields, DA-003 light touch. RT-001 security and DA-003 data reviews now done (adversarial self-review + independent pass); DA-001 accepted. G1 staged (18 files); G2–G4 commands approved. No commits without owner word. Full stats refresh deferred to commit time.
 - Commit record: G1 `20433cd` (RT-001, 18 files), G2 `e8565ce` (RT-002/RT-003, 8 files), G3 `b1550d1` (DA-001/DA-003, 15 files) landed on `main` above `14e2988`, unpushed, in the approved order with G1+G3 in the same push train. This ledger plus the release envelope and selfhost guide commit as G4; the tree is otherwise clean. Corpus 11/17 pagination failures remain pre-existing (proven on `14e2988` HEAD via stash); all other cited evidence re-verified green pre-commit with `-race`.
+
+## Session-recovery patch reconciliation (2026-09-07T16:25:56Z, HEAD 26a1caf main, go1.27.0 darwin/arm64)
+Dirty fingerprint (post-repair): `93745bf01e222d5a00d37bc7ff2fd4dae76717c95eddc07d1fcaebebf1eed567` (`git diff | shasum -a 256`); 17 modified tracked + untracked `execution-ledger.md`, `session-recovery-patch-contract.md`, `internal/sync/h01_regression_test.go`, `internal/reactive/h01e_regression_test.go`. Prior `26a1caf` clean sections above retained as history; nothing below rewrites them.
+- H-01: observed-epoch linearization; WS single-envelope wire remainder + rule-only-without-Notify indefinite delay recorded as PENDING (no approval invented). SSE queued envelopes drop at dequeue (zero wire leak); initial answers fail closed on post-publish swap; mat cleared atomically clear-then-bump; splice/rule loads outside locks; WS 10s write bound. Matrix H-01a..h pinned per execution-ledger (live H-01h + S1 decision tests green with -race).
+- H-02: WS live reconnect (equal result+watermark, liveness) green; SSE live reconnect + delta live reconnect + SDK corrective-frame proof remain gaps (not claimed).
+- H-03: no repair needed; 5 required tests green -race x2; new barrier `TestDiskBackendSecondUploadWaitsForRootConfirmation` pins ordering; external-dir trust + single-process scope documented.
+- H-04: six packages -race green, vet + diff-check clean; corpus 05 PASS, 11/17 FAIL preserved pre-existing (instaql/CF, untouched).
+- DEC-001 `DEC-001-single-node-alpha-20260905` APPROVED scope unchanged; no new decision; every AUTH-* remains NOT_GRANTED; FR-002 still requires clean tree + owner-approved grouping.

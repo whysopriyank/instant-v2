@@ -147,6 +147,36 @@ func (s *Subscription) SetSnapshot(result json.RawMessage) {
 	s.last = result
 }
 
+// ClearIncremental drops incremental-engine state (RT-001): a gate swap must
+// never leave a baseline spliced under the old gate for a later generation
+// to extend. Called under the swap lock (groupsMu → sub.mu order); materialize
+// re-seeds from the next successful full refresh under the new gate.
+func (s *Subscription) ClearIncremental() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.mat.ready = false
+	s.mat.last = nil
+	s.mat.forms = nil
+	s.mat.roots = nil
+}
+
+// ClearServedState drops the served snapshot, delta baseline, and incremental
+// baseline atomically (RT-001d/H-01): a swap must never leave any baseline
+// from the old gate for a later generation to reuse or extend. Caller must
+// hold the swap lock (groupsMu); this takes sub.mu once so snapshot+mat clear
+// together. The generation bump follows (clear-then-bump) so readers either see
+// old Gen+old baselines (consistent, dropped at Emit/Publish) or cleared
+// baselines (bail to full recompute) — never new Gen+stale baselines.
+func (s *Subscription) ClearServedState() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.last = nil
+	s.mat.ready = false
+	s.mat.last = nil
+	s.mat.forms = nil
+	s.mat.roots = nil
+}
+
 // Store is a per-app subscription registry with an inverted topic index.
 type Store struct {
 	// MaxSubsPerApp caps concurrent subscriptions per app id; 0 = unlimited.
@@ -289,6 +319,19 @@ type Notifier struct {
 	// an error drops the generation fail-closed. nil — the default —
 	// preserves the exact pre-RT-001 splice behavior.
 	Revalidate func(ctx context.Context, sub *Subscription) (changed bool, err error)
+
+	// Publish commits one computed generation as the subscription's served
+	// state (snapshot + watermark) and reports whether the generation was
+	// still current. When non-nil, it MUST coordinate with whatever
+	// invalidates generations (RT-001: the sync layer compares the
+	// stamped epoch against the live epoch under the swap lock, so a
+	// re-gate landing between fan-out and publication refuses the stale
+	// commit instead of restoring superseded state). A false result drops
+	// the generation and re-arms the retry, exactly like an emit failure.
+	// nil — the default — publishes unconditionally and must only be
+	// used where generations cannot be invalidated (hermetic tests);
+	// every production wiring sets it.
+	Publish func(sub *Subscription, gen uint64, result json.RawMessage, txID int64) bool
 
 	pending map[string]int64 // subID → latest tx-id awaiting refresh
 	// pendingCh belongs to the same queued epoch as pending. Both maps are
@@ -764,8 +807,19 @@ func (n *Notifier) refreshOneAttempt(ctx context.Context, log *slog.Logger, id s
 			return
 		}
 	}
-	sub.SetSnapshot(result)
-	sub.TxID.Store(txID)
+	// RT-001: the commit itself is coordinated. A re-gate that landed
+	// after the fan-out check must refuse this stale generation rather
+	// than restore superseded state over a cleared (or newer) snapshot.
+	if n.Publish != nil {
+		if !n.Publish(sub, gen, result, txID) {
+			log.Error("reactive: generation superseded before publish; retry armed", "sub", id)
+			n.scheduleRetry(ctx, sub, txID, changes, failures+1)
+			return
+		}
+	} else {
+		sub.SetSnapshot(result)
+		sub.TxID.Store(txID)
+	}
 }
 
 // refreshResult produces one drain's envelope. When the invalidation carried

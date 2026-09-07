@@ -114,6 +114,10 @@ func (a *appRuntime) mountRoutes(ctx context.Context, db *sql.DB, mux *http.Serv
 	// snapshot paths below use the same Refresh hook.
 	a.notifier.Refresh = refreshFor(a.ex, a.cats, mgr.RefreshGate)
 	a.notifier.Revalidate = rebindChanged(mgr)
+	// RT-001: commit generations under the swap lock so a re-gate
+	// landing after fan-out refuses the stale snapshot (see
+	// Manager.PublishGeneration). Same late binding as Refresh above.
+	a.notifier.Publish = mgr.PublishGeneration
 	sseH := &syncpkg.SSEHandler{
 		Manager:        mgr,
 		Store:          a.store,

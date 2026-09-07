@@ -114,12 +114,27 @@ type Session struct {
 	Features Features
 	Admin    bool
 	AuthUser map[string]any
-	Subs     map[string]bool // subscription ids owned by this session
-	Rooms    map[string]bool
-	Send     func(Frame) error // transport-bound writer
+	// Subs holds subscription ids owned by this session. Guarded by mu
+	// on EVERY access: writers are refresh-dispatch workers (failMember)
+	// and the connection's own query/disconnect paths, which run
+	// concurrently under send failure. groupsMu alone is insufficient —
+	// the duplicate-check reader and DetachAll take other (or no) locks.
+	Subs  map[string]bool
+	Rooms map[string]bool
+	Send  func(Frame) error // transport-bound writer
 	// SendRaw writes pre-encoded frame bytes (shared fan-out payloads);
 	// nil falls back to nothing — group dispatch skips such sessions.
 	SendRaw func([]byte) error
+	// SendRawGen is the generation-aware fan-out writer (RT-001f): it carries
+	// the stamped epoch and group key so queued transports (SSE) can drop
+	// superseded envelopes at dequeue time instead of serving them post-revoke.
+	// Nil falls back to SendRaw with a pre-send epoch check in dispatch.
+	// Production SSE sets it; WS and tests may leave it nil.
+	SendRawGen func(b []byte, gen uint64, subID string) error
+	// SendGen is the generation-aware Frame writer for queued initial answers
+	// (RT-001d): same dequeue-drop contract as SendRawGen. Nil falls back to
+	// Send with a pre-send epoch check by the caller.
+	SendGen func(f Frame, gen uint64, subID string) error
 	// Close tears down the transport read loop (RT-002c): group dispatch
 	// calls it after detaching a member whose send failed, so the client
 	// reconnects and re-establishes from a full snapshot. Set by the

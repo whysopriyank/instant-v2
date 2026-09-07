@@ -4,10 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/instant-v2/instant-v2/internal/platform"
@@ -23,6 +25,18 @@ import (
 type DiskBackend struct {
 	root   string
 	secret []byte
+	// createMu serializes first-use initialization of app directories:
+	// a concurrent Put must not trust (EEXIST) or proceed past a
+	// directory entry whose root sync has not been confirmed. The hot
+	// path also takes the lock so it cannot observe incomplete creation.
+	createMu sync.Mutex
+	// unconfirmed tracks entries left behind when both root sync and
+	// rollback failed. Existence must not turn those entries into success.
+	// Guarded by createMu.
+	unconfirmed map[string]bool
+	// syncRoot persists directory entries; syncDir in production,
+	// overridden by tests to inject a root-sync failure.
+	syncRoot func(string) error
 }
 
 // NewDiskBackend validates root and builds a DiskBackend. Validation
@@ -42,7 +56,7 @@ func NewDiskBackend(root string, secret []byte) (*DiskBackend, error) {
 	if err := probeWritable(root); err != nil {
 		return nil, fmt.Errorf("storageapi: storage root %q: %w", root, err)
 	}
-	return &DiskBackend{root: root, secret: secret}, nil
+	return &DiskBackend{root: root, secret: secret, syncRoot: syncDir}, nil
 }
 
 // probeWritable creates, syncs, closes, and removes a probe file, then
@@ -127,12 +141,69 @@ func (d *DiskBackend) PresignDownload(key string, ttl time.Duration) (string, er
 	return d.presign("download", "files", key, ttl)
 }
 
+// confirmAppDir ensures appDir exists with its root entry persisted.
+// Concurrent first uploads serialize here: no Put proceeds past a
+// directory whose root sync is unconfirmed, and a failed confirmation
+// removes the entry so the next contender re-initializes from scratch.
+func (d *DiskBackend) confirmAppDir(appDir string) error {
+	d.createMu.Lock()
+	defer d.createMu.Unlock()
+	if d.unconfirmed[appDir] {
+		if err := d.syncRoot(d.root); err != nil {
+			return err
+		}
+		delete(d.unconfirmed, appDir)
+	}
+	if st, serr := os.Stat(appDir); serr == nil {
+		if st.IsDir() {
+			return nil
+		}
+		return fmt.Errorf("storageapi: %q is not a directory", appDir)
+	} else if !errors.Is(serr, fs.ErrNotExist) {
+		return serr
+	}
+	if err := os.Mkdir(appDir, 0o755); err != nil {
+		if os.IsExist(err) {
+			// An external actor created it concurrently; without a
+			// confirmed sync of our own, re-stat to at least confirm
+			// it is a directory, then trust the volume (as before).
+			if st, serr := os.Stat(appDir); serr != nil {
+				return serr
+			} else if !st.IsDir() {
+				return fmt.Errorf("storageapi: %q is not a directory", appDir)
+			}
+			return nil
+		}
+		return err
+	}
+	if err := d.syncRoot(d.root); err != nil {
+		// Roll back: a later Put must re-initialize (and re-confirm),
+		// never trust this entry.
+		if removeErr := os.Remove(appDir); removeErr != nil && !errors.Is(removeErr, fs.ErrNotExist) {
+			if d.unconfirmed == nil {
+				d.unconfirmed = make(map[string]bool)
+			}
+			d.unconfirmed[appDir] = true
+		}
+		return err
+	}
+	return nil
+}
+
 func (d *DiskBackend) Put(key string, r io.Reader) error {
 	_, _, p, err := d.file(key)
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+	// Only one level is ever created (root/<app-id>), but an entry's
+	// existence alone proves nothing about its durability: a concurrent
+	// first upload may have created it without confirming the root sync
+	// yet. So every Put serializes directory confirmation on createMu —
+	// uncontended cost is noise beside the fsyncs below — and a failed
+	// confirmation rolls the entry back instead of leaving it for later
+	// uploads to trust. Entries predating the backend (operator-created)
+	// are the volume's responsibility, as before.
+	if err := d.confirmAppDir(filepath.Dir(p)); err != nil {
 		return err
 	}
 	f, err := os.CreateTemp(filepath.Dir(p), ".upload-*")

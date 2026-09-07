@@ -120,75 +120,130 @@ func groupKey(appID string, class wireClass, rawQ json.RawMessage, admin bool) s
 //
 // Caller must have computed topics and cat already (same compilation the
 // pre-group code performed).
+func (m *Manager) newGroupLocked(key string, sess *Session, rawQ json.RawMessage, topics map[string]bool, cat *platform.AttrCatalog, class wireClass, doc *perms.RuleDoc) (*queryGroup, error) {
+	gate := NewQueryGate(doc, sess.Admin)
+	sub := &reactive.Subscription{
+		ID:        key,
+		AppID:     sess.AppID,
+		Query:     rawQ,
+		Topics:    topics,
+		AttachCtx: gate,
+	}
+	sub.SetAuthGate(gate)
+	sub.Delta.Store(sess.Features["delta-refresh"])
+	// Coordinated publication (RT-001): refuse generations overtaken
+	// by a concurrent re-gate. The notifier stamps Frame.Gen at
+	// attempt start; validity is enforced at three points: admission
+	// in Emit, per member inside dispatch (SSE uses queued epoch drop),
+	// and commit in PublishGeneration (a swap landing after fan-out refuses
+	// the stale snapshot instead of restoring superseded state).
+	// Defined boundary for partially served generations: direct-write members
+	// served before the swap keep one superseded envelope — wire bytes cannot
+	// be recalled — but the server certifies nothing (no snapshot, no watermark
+	// advance), stays attached, and the armed retry re-serves every attached
+	// member under the new gate at the same txID, healing the stale read.
+	// Queued (SSE) members drop superseded envelopes at dequeue and heal the
+	// same way with zero wire leak. Holding the swap lock across socket writes
+	// would close the per-send window, but a wedged client would then stall all
+	// re-gating process-wide — a worse failure mode for a security boundary.
+	// Dispatch itself stays outside any lock, so a slow member cannot stall
+	// re-gating.
+	g := &queryGroup{
+		key: key, class: class, appID: sess.AppID,
+		sub: sub, cat: cat,
+		members: map[*Session]member{},
+	}
+	sub.Emit = func(fr reactive.Frame) error {
+		if sub.Gen.Load() != fr.Gen {
+			return errGenerationSuperseded
+		}
+		return m.dispatchGroup(g, fr)
+	}
+	if _, err := m.Deps.Store.Add(sub); err != nil {
+		return nil, err
+	}
+	m.groups[key] = g
+	return g, nil
+}
+
 func (m *Manager) attachGroup(ctx context.Context, sess *Session, rawQ json.RawMessage, topics map[string]bool,
 	cat *platform.AttrCatalog, class wireClass, doc *perms.RuleDoc,
 ) (*queryGroup, error) {
 	key := groupKey(sess.AppID, class, rawQ, sess.Admin)
 
 	m.groupsMu.Lock()
-	defer m.groupsMu.Unlock()
-
 	capN := m.Deps.Store.MaxSubsPerApp
 	if capN > 0 && m.appMembers[sess.AppID]+1 > capN {
+		m.groupsMu.Unlock()
 		return nil, &reactive.SubLimitError{AppID: sess.AppID, Max: capN}
 	}
-
 	g := m.groups[key]
 	if g == nil {
-		gate := NewQueryGate(doc, sess.Admin)
-		sub := &reactive.Subscription{
-			ID:        key,
-			AppID:     sess.AppID,
-			Query:     rawQ,
-			Topics:    topics,
-			AttachCtx: gate,
-		}
-		sub.SetAuthGate(gate)
-		sub.Delta.Store(sess.Features["delta-refresh"])
-		// Coordinated publication (RT-001): refuse generations overtaken
-		// by a concurrent re-gate between computation and fan-out. The
-		// notifier stamps Frame.Gen at attempt start; a mismatch means
-		// the rules moved underneath this generation, so it is dropped
-		// through the existing emit-error retry path instead of
-		// publishing stale-authorized state. Only the epoch comparison
-		// is synchronized with swaps — dispatch itself stays outside
-		// any lock, so a slow member cannot stall re-gating. Content
-		// sent after a passing check raced a swap is still reserved-era
-		// self-consistent state, re-gated on the next generation.
-		sub.Emit = func(fr reactive.Frame) error {
-			if sub.Gen.Load() != fr.Gen {
-				return errGenerationSuperseded
-			}
-			return m.dispatchGroup(g, fr)
-		}
-		if _, err := m.Deps.Store.Add(sub); err != nil {
+		var err error
+		g, err = m.newGroupLocked(key, sess, rawQ, topics, cat, class, doc)
+		if err != nil {
+			m.groupsMu.Unlock()
 			return nil, err
 		}
-		g = &queryGroup{
-			key: key, class: class, appID: sess.AppID,
-			sub: sub, cat: cat,
-			members: map[*Session]member{},
-		}
-		m.groups[key] = g
 	}
-
-	// Version-bound membership (RT-001d): a joiner admitted under different
-	// persisted rules than the group must not share the group's snapshot or
-	// its gate. The joiner's doc may itself predate a concurrent rebind, so
-	// reload the newest doc at this decision point and adopt it. A reload
-	// failure refuses the join exactly like an unloadable attach-time doc
-	// (RT-001e) instead of pinning either possibly-stale snapshot.
-	// Content-hash comparison keeps unrelated catalog invalidations from
-	// disturbing the group. groupsMu is held throughout; rulesFor only
-	// takes the leaf catalog lock, so no lock-order inversion is possible.
-	if cur, ok := g.sub.AttachCtx.(*QueryGate); !ok || cur == nil || GateHash(cur.Rules) != GateHash(doc) {
-		fresh, ferr := m.rulesFor(ctx, sess.AppID)
+	// Version-bound membership (RT-001d): decide under the lock whether a
+	// reload is needed, then release across rule-store I/O so one wedged load
+	// cannot stall revocation of other groups (H-01g). The swap rechecks under
+	// the lock so concurrent re-gates still converge.
+	cur, curOK := g.sub.AttachCtx.(*QueryGate)
+	needReload := !curOK || cur == nil || GateHash(cur.Rules) != GateHash(doc)
+	m.groupsMu.Unlock()
+	var fresh *perms.RuleDoc
+	if needReload {
+		var ferr error
+		fresh, ferr = m.rulesFor(ctx, sess.AppID)
 		if ferr != nil {
 			return nil, fmt.Errorf("%w: %v", errRulesReload, ferr)
 		}
-		if cur2, ok2 := g.sub.AttachCtx.(*QueryGate); !ok2 || cur2 == nil || GateHash(cur2.Rules) != GateHash(fresh) {
-			m.rebindGroupLocked(g, fresh)
+		m.groupsMu.Lock()
+		// Re-lookup: the group could have been deleted (last member left)
+		// while we loaded. Recreate with the fresh doc in that case.
+		g2 := m.groups[key]
+		if g2 == nil {
+			var err error
+			g2, err = m.newGroupLocked(key, sess, rawQ, topics, cat, class, fresh)
+			if err != nil {
+				m.groupsMu.Unlock()
+				return nil, err
+			}
+			g = g2
+		} else {
+			g = g2
+			if cur2, ok2 := g.sub.AttachCtx.(*QueryGate); !ok2 || cur2 == nil || GateHash(cur2.Rules) != GateHash(fresh) {
+				m.rebindGroupLocked(g, fresh)
+			}
 		}
+		m.groupsMu.Unlock()
+	} else {
+		// No reload needed; re-acquire for member add below.
+		m.groupsMu.Lock()
+		// Re-lookup in case of concurrent delete (defensive; group had at
+		// least one member or was just created, so deletion is unlikely but
+		// possible if the last member left between unlock and relock).
+		if g2 := m.groups[key]; g2 != nil {
+			g = g2
+		} else {
+			var err error
+			g, err = m.newGroupLocked(key, sess, rawQ, topics, cat, class, doc)
+			if err != nil {
+				m.groupsMu.Unlock()
+				return nil, err
+			}
+		}
+		m.groupsMu.Unlock()
+	}
+	m.groupsMu.Lock()
+	// Re-check the cap after releasing across rule-store I/O: concurrent
+	// attaches could have filled it while we loaded (H-01g independence must
+	// not break admission accounting).
+	if capN > 0 && m.appMembers[sess.AppID]+1 > capN {
+		m.groupsMu.Unlock()
+		return nil, &reactive.SubLimitError{AppID: sess.AppID, Max: capN}
 	}
 
 	// Upgrade the group to delta-capable when any member negotiates it.
@@ -200,8 +255,11 @@ func (m *Manager) attachGroup(ctx context.Context, sess *Session, rawQ json.RawM
 	g.members[sess] = member{sess: sess, delta: sess.Features["delta-refresh"]}
 	g.mu.Unlock()
 	m.appMembers[sess.AppID]++
+	m.groupsMu.Unlock()
 
+	sess.mu.Lock()
 	sess.Subs[key] = true
+	sess.mu.Unlock()
 	return g, nil
 }
 
@@ -213,7 +271,9 @@ func (m *Manager) detachMember(sess *Session, id string) {
 
 	g, ok := m.groups[id]
 	if !ok {
+		sess.mu.Lock()
 		delete(sess.Subs, id)
+		sess.mu.Unlock()
 		return
 	}
 	g.mu.Lock()
@@ -221,7 +281,9 @@ func (m *Manager) detachMember(sess *Session, id string) {
 	empty := len(g.members) == 0
 	g.mu.Unlock()
 
+	sess.mu.Lock()
 	delete(sess.Subs, id)
+	sess.mu.Unlock()
 	if m.appMembers[sess.AppID] > 0 {
 		m.appMembers[sess.AppID]--
 	}
@@ -232,11 +294,16 @@ func (m *Manager) detachMember(sess *Session, id string) {
 }
 
 // DetachAll tears down every group membership held by sess (disconnect path).
+// The id snapshot is taken under sess.mu: a concurrent failMember on a
+// refresh worker may detach (and delete) mid-iteration, and detachMember
+// tolerates already-gone memberships, so the snapshot may safely go stale.
 func (m *Manager) DetachAll(sess *Session) {
+	sess.mu.Lock()
 	ids := make([]string, 0, len(sess.Subs))
 	for id := range sess.Subs {
 		ids = append(ids, id)
 	}
+	sess.mu.Unlock()
 	for _, id := range ids {
 		m.detachMember(sess, id)
 	}
@@ -258,7 +325,12 @@ func (m *Manager) snapshotOrRefresh(
 	refresh func(context.Context, *reactive.Subscription) (json.RawMessage, error),
 	sub *reactive.Subscription,
 ) (json.RawMessage, error) {
-	if snap := sub.Snapshot(); snap != nil {
+	// Version-bound fast path (RT-001d): a cached snapshot is reusable only
+	// if no re-gate landed around the read. A swap clears the snapshot under
+	// groupsMu, but this read takes only sub.mu; without the epoch check a
+	// reader racing the clear could serve stale-allow as a new answer.
+	gen0 := sub.Gen.Load()
+	if snap := sub.Snapshot(); snap != nil && sub.Gen.Load() == gen0 {
 		return snap, nil
 	}
 
@@ -429,7 +501,7 @@ func (m *Manager) dispatchGroup(g *queryGroup, fr reactive.Frame) error {
 	}
 
 	for _, mem := range members {
-		if mem.sess.SendRaw == nil {
+		if mem.sess.SendRaw == nil && mem.sess.SendRawGen == nil {
 			continue // transport without raw support can't join groups
 		}
 		var b []byte
@@ -440,13 +512,33 @@ func (m *Manager) dispatchGroup(g *queryGroup, fr reactive.Frame) error {
 			b = fullRaw
 			metrics.RefreshFrames.WithLabelValues("full").Inc()
 		}
-		if err := mem.sess.SendRaw(b); err != nil {
+		var serr error
+		if mem.sess.SendRawGen != nil {
+			// Generation-aware queue (RT-001f, SSE): the epoch travels
+			// with the bytes so the dequeue writer drops superseded
+			// envelopes instead of serving them post-revoke. No pre-send
+			// drop here — enqueue always succeeds unless backpressured —
+			// so every member gets a healing retry via the same txID.
+			serr = mem.sess.SendRawGen(b, fr.Gen, g.key)
+		} else {
+			// Per-member admission (RT-001): a re-gate that landed after
+			// Emit's check — or mid-fan-out — stops the stale spread here
+			// by failing the generation (the retry path recomputes under
+			// the new gate). One atomic load per member; no lock, no stall.
+			// Bytes already sent are irreducible, but the refused commit
+			// certifies nothing stale.
+			if g.sub.Gen.Load() != fr.Gen {
+				return errGenerationSuperseded
+			}
+			serr = mem.sess.SendRaw(b)
+		}
+		if serr != nil {
 			// RT-002c: a member that was not served must not keep a
 			// watermark for this generation. Detach it now and close its
 			// transport so it reconnects and re-establishes from a full
 			// snapshot; siblings are unaffected.
 			if logger != nil {
-				logger.Debug("groups: send failed; detaching member", "err", err)
+				logger.Debug("groups: send failed; detaching member", "err", serr)
 			}
 			m.failMember(g, mem.sess)
 			continue

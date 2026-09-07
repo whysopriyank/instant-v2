@@ -7,10 +7,14 @@ package storageapi
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 const (
@@ -90,6 +94,179 @@ func TestDiskBackendPutSurvivesReopen(t *testing.T) {
 	}
 	if !bytes.Equal(got.Bytes(), want) {
 		t.Fatal("reopened backend returned different bytes")
+	}
+}
+
+// Desired: a first upload to a fresh root persists its namespace — the
+// app directory entry is created and the object round-trips through a
+// backend reopen (P1: the root fsync on creation is what makes the
+// directory entry crash-durable; crash injection itself is out of scope
+// for this deterministic suite, so this pins the path the fix touches).
+func TestDiskBackendFirstUploadPersistsNamespace(t *testing.T) {
+	root := t.TempDir()
+	key := redApp + "/" + redObj
+	want := []byte("first-upload-payload")
+	be := mustBackend(t, root, []byte("red-test-secret"))
+	if err := be.Put(key, bytes.NewReader(want)); err != nil {
+		t.Fatalf("first Put: %v", err)
+	}
+	if st, err := os.Stat(filepath.Join(root, redApp)); err != nil || !st.IsDir() {
+		t.Fatalf("app dir entry missing after first Put: %v", err)
+	}
+	obj, err := mustBackend(t, root, []byte("red-test-secret")).Open(key)
+	if err != nil {
+		t.Fatalf("Open after reopen: %v", err)
+	}
+	defer obj.Body.Close()
+	got := new(bytes.Buffer)
+	if _, err := got.ReadFrom(obj.Body); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if !bytes.Equal(got.Bytes(), want) {
+		t.Fatal("reopened backend returned different bytes")
+	}
+}
+
+// Desired: concurrent first uploads to one fresh app directory all
+// succeed with readable results — no contender may trust (EEXIST) or
+// bypass another's unconfirmed initialization, and none may fail on a
+// creation race.
+func TestDiskBackendConcurrentFirstUploads(t *testing.T) {
+	root := t.TempDir()
+	be := mustBackend(t, root, []byte("red-test-secret"))
+	const n = 32
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			key := redApp + "/" + fmt.Sprintf("00000000-0000-4000-8000-%012d", i)
+			errs[i] = be.Put(key, bytes.NewReader([]byte(fmt.Sprintf("payload-%d", i))))
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent Put %d: %v", i, err)
+		}
+	}
+	reopened := mustBackend(t, root, []byte("red-test-secret"))
+	for i := 0; i < n; i++ {
+		obj, err := reopened.Open(redApp + "/" + fmt.Sprintf("00000000-0000-4000-8000-%012d", i))
+		if err != nil {
+			t.Fatalf("Open %d after reopen: %v", i, err)
+		}
+		got := new(bytes.Buffer)
+		_, rerr := got.ReadFrom(obj.Body)
+		obj.Body.Close()
+		if rerr != nil || got.String() != fmt.Sprintf("payload-%d", i) {
+			t.Fatalf("object %d mismatch: %q, err %v", i, got.String(), rerr)
+		}
+	}
+}
+
+// Desired: a failed root confirmation leaves no entry behind — the next
+// upload re-initializes (and re-confirms) instead of trusting it.
+func TestDiskBackendFailedRootSyncRollsBack(t *testing.T) {
+	root := t.TempDir()
+	be := mustBackend(t, root, []byte("red-test-secret"))
+	fail := errors.New("injected root sync failure")
+	be.syncRoot = func(string) error { return fail }
+	key := redApp + "/" + redObj
+	if err := be.Put(key, bytes.NewReader([]byte("x"))); err == nil {
+		t.Fatal("Put with failing root sync must fail")
+	}
+	if _, err := os.Stat(filepath.Join(root, redApp)); !os.IsNotExist(err) {
+		t.Fatalf("unconfirmed app dir entry left behind: %v", err)
+	}
+	// Recovery: with a working sync the same upload initializes cleanly.
+	be.syncRoot = syncDir
+	if err := be.Put(key, bytes.NewReader([]byte("x"))); err != nil {
+		t.Fatalf("Put after rollback: %v", err)
+	}
+}
+
+// A failed cleanup must not turn an unconfirmed directory into a trusted
+// existing directory on retry. The injected sync failure leaves a child to
+// make directory removal fail, as can happen with concurrent external I/O.
+func TestDiskBackendFailedCleanupDoesNotBypassRootSync(t *testing.T) {
+	root := t.TempDir()
+	be := mustBackend(t, root, []byte("test-secret"))
+	failure := errors.New("root sync failed")
+	calls := 0
+	be.syncRoot = func(string) error {
+		calls++
+		if err := os.WriteFile(filepath.Join(root, redApp, "occupied"), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return failure
+	}
+	key := redApp + "/" + redObj
+	if err := be.Put(key, strings.NewReader("first")); !errors.Is(err, failure) {
+		t.Fatalf("first Put = %v; want sync failure", err)
+	}
+	if err := be.Put(key, strings.NewReader("retry")); !errors.Is(err, failure) {
+		t.Fatalf("retry bypassed failed root confirmation: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("root confirmation attempts = %d; want 2", calls)
+	}
+	be.syncRoot = syncDir
+	if err := be.Put(key, strings.NewReader("recovered")); err != nil {
+		t.Fatalf("confirmed retry: %v", err)
+	}
+}
+
+// Desired: a second concurrent first upload blocks until the first root
+// confirmation completes — it cannot acknowledge before confirmation.
+// Barrier: syncRoot signals entry then blocks; the second Put must not
+// complete within the bound; release lets both succeed. No sleeps; explicit
+// entry signal + bounded wait.
+func TestDiskBackendSecondUploadWaitsForRootConfirmation(t *testing.T) {
+	root := t.TempDir()
+	be := mustBackend(t, root, []byte("red-test-secret"))
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	be.syncRoot = func(s string) error {
+		once.Do(func() { close(entered) })
+		<-release
+		return syncDir(s)
+	}
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- be.Put(redApp+"/"+redObj, strings.NewReader("first")) }()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first Put did not enter root confirmation")
+	}
+	secondDone := make(chan error, 1)
+	go func() {
+		key := redApp + "/00000000-0000-4000-8000-000000000001"
+		secondDone <- be.Put(key, strings.NewReader("second"))
+	}()
+	select {
+	case err := <-secondDone:
+		t.Fatalf("second upload acknowledged before root confirmation: %v", err)
+	case <-time.After(500 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case err := <-firstDone:
+		if err != nil {
+			t.Fatalf("first Put after release: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("first Put did not complete after release")
+	}
+	select {
+	case err := <-secondDone:
+		if err != nil {
+			t.Fatalf("second Put after release: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("second Put did not complete after release")
 	}
 }
 

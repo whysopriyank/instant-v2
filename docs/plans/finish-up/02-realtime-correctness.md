@@ -20,7 +20,7 @@ reactive refresh → daemon query executor.
 
 | Row | Desired invariant | Red evidence |
 |---|---|---|
-| RT-001a | An allow→deny rule update prevents all subsequent protected frames on the existing subscription. | Attach under allow, persist deny, trigger refresh, observe leak before repair. |
+| RT-001a | An allow→deny rule update prevents all subsequent protected frames on the existing subscription, within one bounded race: a generation admitted before the re-gate may deliver at most one superseded envelope to members served before the swap lands (wire bytes cannot be recalled). The server certifies nothing for it — no snapshot, no watermark advance — and the armed retry re-serves every attached member under the new gate at the same txID. | Attach under allow, persist deny, trigger refresh, observe leak before repair; race order pinned by `TestSwapMidFanOutStopsSpreadAndRefusesCommit`, healing by `TestMidFanOutSwapHealsThroughNotifierRetry`. Bound added post-approval; owner ratification pending. |
 | RT-001b | A deny→allow change follows the declared reauthorization/reconnect policy without using stale state. | Controlled rule-version transition. |
 | RT-001c | Concurrent rule update and data invalidation has one safe deterministic outcome. | Barriers around version read and refresh. |
 | RT-001d | Shared subscription groups cannot mix members authorized under incompatible rule versions. | Two members spanning a rule transition. |

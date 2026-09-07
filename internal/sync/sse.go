@@ -34,7 +34,7 @@ import (
 
 type sseConn struct {
 	sess      *Session
-	events    chan Frame
+	events    chan sseEvent
 	sessionID string
 	// overflow is signaled (non-blocking, capacity 1) whenever a reply
 	// cannot fit the event buffer. The GET writer ends the stream on
@@ -49,6 +49,18 @@ type sseConn struct {
 	// initialized flips true after a successful protocol `init` op; every
 	// other op is refused before that (mirrors the WS loop guard).
 	initialized bool
+}
+
+// sseEvent is one queued SSE frame plus its optional generation guard
+// (RT-001f): fan-out envelopes and initial answers carry the stamped epoch
+// and group key; the GET writer drops them if a re-gate superseded the epoch
+// before the socket write, instead of serving denied data post-revoke.
+// Control replies (errors, handshake) carry no guard and always send.
+type sseEvent struct {
+	frame  Frame
+	hasGen bool
+	gen    uint64
+	subID  string
 }
 
 // SSEHandler serves the /runtime/sse pair. Wire Manager/Store/Refresh exactly
@@ -170,7 +182,7 @@ func (h *SSEHandler) getSSE(w http.ResponseWriter, r *http.Request) {
 	hash := tokenHashOf(sseToken)
 	conn := &sseConn{
 		sessionID: sessionID,
-		events:    make(chan Frame, 128),
+		events:    make(chan sseEvent, 128),
 		overflow:  make(chan struct{}, 1),
 	}
 	if h.conns == nil {
@@ -253,7 +265,18 @@ func (h *SSEHandler) getSSE(w http.ResponseWriter, r *http.Request) {
 			// reconnect with backoff and re-initialize; silently dropping
 			// frames would leave them stale with no signal at all.
 			return
-		case f := <-conn.events:
+		case ev := <-conn.events:
+			// Generation guard (RT-001f): a queued envelope superseded by
+			// a re-gate that landed after enqueue is dropped, never served
+			// as an authorized new answer. The notifier's retry re-serves
+			// every attached member under the new gate at the same txID,
+			// so dropping converges instead of stranding.
+			if ev.hasGen && h.Store != nil {
+				if sub, ok := h.Store.Get(ev.subID); !ok || sub.Gen.Load() != ev.gen {
+					continue
+				}
+			}
+			f := ev.frame
 			if raw, isRaw := f["__raw"]; isRaw {
 				writeDeadline()
 				if _, err := fmt.Fprintf(w, "data: %s\n\n", raw); err != nil {
@@ -302,7 +325,7 @@ func (h *SSEHandler) postSSE(w http.ResponseWriter, r *http.Request) {
 			Rooms:    map[string]bool{},
 			Send: func(f Frame) error {
 				select {
-				case conn.events <- f:
+				case conn.events <- sseEvent{frame: f}:
 					return nil
 				default:
 					signalOverflow(conn)
@@ -311,7 +334,25 @@ func (h *SSEHandler) postSSE(w http.ResponseWriter, r *http.Request) {
 			},
 			SendRaw: func(b []byte) error {
 				select {
-				case conn.events <- Frame{"__raw": json.RawMessage(b)}:
+				case conn.events <- sseEvent{frame: Frame{"__raw": json.RawMessage(b)}}:
+					return nil
+				default:
+					signalOverflow(conn)
+					return errSSEBackpressure
+				}
+			},
+			SendRawGen: func(b []byte, gen uint64, subID string) error {
+				select {
+				case conn.events <- sseEvent{frame: Frame{"__raw": json.RawMessage(b)}, hasGen: true, gen: gen, subID: subID}:
+					return nil
+				default:
+					signalOverflow(conn)
+					return errSSEBackpressure
+				}
+			},
+			SendGen: func(f Frame, gen uint64, subID string) error {
+				select {
+				case conn.events <- sseEvent{frame: f, hasGen: true, gen: gen, subID: subID}:
 					return nil
 				default:
 					signalOverflow(conn)
@@ -345,6 +386,9 @@ func (h *SSEHandler) postSSE(w http.ResponseWriter, r *http.Request) {
 				h.Manager.Deps.Rooms.LeaveAll(conn.sess)
 			}
 			sess.Send = conn.sess.Send
+			sess.SendRaw = conn.sess.SendRaw
+			sess.SendRawGen = conn.sess.SendRawGen
+			sess.SendGen = conn.sess.SendGen
 			conn.sess = sess
 			conn.initialized = true
 			pushReply(conn, reply)
@@ -396,23 +440,31 @@ func (h *SSEHandler) snapshot(ctx context.Context, sess *Session, f Frame) error
 	if !ok {
 		return nil
 	}
-	result, err := h.Manager.snapshotOrRefresh(ctx, h.Refresh, sub)
+	_, err := h.Manager.snapshotOrRefresh(ctx, h.Refresh, sub)
 	if err != nil {
 		// A failed initial refresh (including a rule-loader failure)
 		// must end the stream via the caller's 500 path — never leave
 		// the subscriber connected with no initial state.
 		return err
 	}
+	// Post-render pre-send guard (RT-001d): a re-gate landing after the
+	// flight but before this answer hits the queue must not be served as
+	// an authorized new answer. Capture the epoch after the flight, render,
+	// then recheck before enqueue; on mismatch fail so the caller ends the
+	// stream and the client reconnects under the new gate.
+	genAfter := sub.Gen.Load()
 	// Baseline for delta-refresh diffs is the flat envelope; SSE init-query
 	// answers with v1 :tree semantics (session.clj:1395) — a bare object
 	// tree with NO "data" wrapper key. snapshotOrRefresh seeds the baseline
 	// on the refresh path and reuses it on the duplicate path.
 	// RT-002a/RT-002d: answer with the served pair so the watermark matches
 	// the snapshot even when siblings kept the group alive.
+	// Fail-closed (H-01d S1): success guarantees non-nil snapshot; nil means a
+	// concurrent re-gate cleared after publish — return superseded to end the
+	// stream rather than serve stale result as a new answer.
 	snap, snapTx := sub.SnapshotPair()
 	if snap == nil {
-		snap = result
-		snapTx = sub.TxID.Load()
+		return errGenerationSuperseded
 	}
 	tree, terr := UnwrapTree(snap)
 	if terr != nil {
@@ -421,15 +473,22 @@ func (h *SSEHandler) snapshot(ctx context.Context, sess *Session, f Frame) error
 		// stream so the client reconnects from a full snapshot.
 		return terr
 	}
+	if sub.Gen.Load() != genAfter {
+		return errGenerationSuperseded
+	}
 	payload := computationEntry(
 		[2]json.RawMessage{keyInstaqlQuery, json.RawMessage(rawQ)},
 		[2]json.RawMessage{keyInstaqlResult, tree},
 	)
-	return sess.Send(Frame{
+	fr := Frame{
 		"op":              json.RawMessage(`"refresh-ok"`),
 		"computations":    payload,
 		"processed-tx-id": json.RawMessage(mustJSON(snapTx)),
-	})
+	}
+	if sess.SendGen != nil {
+		return sess.SendGen(fr, genAfter, key)
+	}
+	return sess.Send(fr)
 }
 
 // closeTearDown drops the SSE registration and tears down the session's
@@ -461,7 +520,7 @@ func signalOverflow(conn *sseConn) {
 // silently missing deliveries (audit backlog B1).
 func pushReply(conn *sseConn, f Frame) {
 	select {
-	case conn.events <- f:
+	case conn.events <- sseEvent{frame: f}:
 	default:
 		signalOverflow(conn)
 	}

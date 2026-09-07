@@ -169,6 +169,12 @@ func TestRealtimeRebindDeniesExistingSubscription(t *testing.T) {
 			_, changed, err := mgr.RefreshGate(ctx, sub)
 			return changed, err
 		},
+		// Production-faithful coordinated commit (cmd/instantd/routes.go):
+		// late-bound like RefreshGate above; mgr is assigned below before
+		// any invalidation can arrive.
+		Publish: func(sub *reactive.Subscription, gen uint64, res json.RawMessage, txID int64) bool {
+			return mgr.PublishGeneration(sub, gen, res, txID)
+		},
 	}
 	runNotifier(t, notifier)
 
@@ -306,6 +312,12 @@ func TestRealtimeRegrantRestoresExistingSubscription(t *testing.T) {
 		Revalidate: func(ctx context.Context, sub *reactive.Subscription) (bool, error) {
 			_, changed, err := mgr.RefreshGate(ctx, sub)
 			return changed, err
+		},
+		// Production-faithful coordinated commit (cmd/instantd/routes.go):
+		// late-bound like RefreshGate above; mgr is assigned below before
+		// any invalidation can arrive.
+		Publish: func(sub *reactive.Subscription, gen uint64, res json.RawMessage, txID int64) bool {
+			return mgr.PublishGeneration(sub, gen, res, txID)
 		},
 	}
 	runNotifier(t, notifier)
@@ -445,6 +457,12 @@ func TestRealtimeRuleOutageDropsAndRecovers(t *testing.T) {
 		Revalidate: func(ctx context.Context, sub *reactive.Subscription) (bool, error) {
 			_, changed, err := mgr.RefreshGate(ctx, sub)
 			return changed, err
+		},
+		// Production-faithful coordinated commit (cmd/instantd/routes.go):
+		// late-bound like RefreshGate above; mgr is assigned below before
+		// any invalidation can arrive.
+		Publish: func(sub *reactive.Subscription, gen uint64, res json.RawMessage, txID int64) bool {
+			return mgr.PublishGeneration(sub, gen, res, txID)
 		},
 	}
 	runNotifier(t, notifier)
@@ -602,6 +620,12 @@ func TestSteadyDenySecondCommitDoesNotLeak(t *testing.T) {
 		Revalidate: func(ctx context.Context, sub *reactive.Subscription) (bool, error) {
 			_, changed, err := mgr.RefreshGate(ctx, sub)
 			return changed, err
+		},
+		// Production-faithful coordinated commit (cmd/instantd/routes.go):
+		// late-bound like RefreshGate above; mgr is assigned below before
+		// any invalidation can arrive.
+		Publish: func(sub *reactive.Subscription, gen uint64, res json.RawMessage, txID int64) bool {
+			return mgr.PublishGeneration(sub, gen, res, txID)
 		},
 	}
 	runNotifier(t, notifier)

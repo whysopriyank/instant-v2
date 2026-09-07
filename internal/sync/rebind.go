@@ -2,6 +2,7 @@ package sync
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/instant-v2/instant-v2/internal/perms"
 	"github.com/instant-v2/instant-v2/internal/reactive"
@@ -45,21 +46,29 @@ func (m *Manager) RefreshGate(ctx context.Context, sub *reactive.Subscription) (
 	if sub == nil {
 		return nil, false, nil
 	}
-	// RT-001c: the whole read-decide-swap serializes on groupsMu. Reading
-	// AttachCtx outside the swap lock raced concurrent generations on the
-	// interface word; holding one lock across the reload keeps installs
-	// totally ordered. Lock order matches attachGroup (groupsMu outermost,
-	// catalog leaf lock inside rulesFor); no caller holds groupsMu across
-	// RefreshGate, so this cannot self-deadlock.
+	// RT-001c: read the admitted gate under the swap lock, then reload
+	// outside it. Holding groupsMu across rule-store I/O stalled every
+	// group on one wedged load; the swap below rechecks under the lock so
+	// concurrent generations still converge on identical content. Lock
+	// order matches attachGroup (groupsMu outermost, catalog leaf lock
+	// inside rulesFor only when called under it — here rulesFor runs
+	// unlocked, so no inversion).
 	m.groupsMu.Lock()
-	defer m.groupsMu.Unlock()
 	old, _ := sub.AttachCtx.(*QueryGate)
+	m.groupsMu.Unlock()
 	if old == nil {
 		return nil, false, nil
 	}
 	doc, err := m.rulesFor(ctx, sub.AppID)
 	if err != nil {
 		return nil, false, err
+	}
+	m.groupsMu.Lock()
+	defer m.groupsMu.Unlock()
+	// A concurrent generation already re-gated while we loaded; converge.
+	if cur, _ := sub.AttachCtx.(*QueryGate); cur != old {
+		sub.SetAuthGate(cur)
+		return cur, true, nil
 	}
 	if doc == old.Rules {
 		sub.SetAuthGate(old)
@@ -70,35 +79,55 @@ func (m *Manager) RefreshGate(ctx context.Context, sub *reactive.Subscription) (
 		return old, false, nil
 	}
 	next := NewQueryGate(doc, old.Admin)
-	if cur, _ := sub.AttachCtx.(*QueryGate); cur != old {
-		// A concurrent generation already re-gated; converge on it.
-		sub.SetAuthGate(cur)
-		return cur, true, nil
-	}
 	sub.AttachCtx = next
 	sub.SetAuthGate(next)
-	// Advance the generation epoch first: any concurrent publisher
-	// holding the old epoch is refused at publication from here on.
-	// Epochs are monotonic, so comparison has no ABA hazard.
+	// RT-001d: clear baselines BEFORE bumping the epoch (clear-then-bump).
+	// A swapped gate must never share the previous gate's snapshot,
+	// delta baseline, or incremental state. Clearing first ensures readers
+	// either see old Gen+old baselines (dropped at Emit/Publish) or cleared
+	// baselines (bail to full) — never new Gen+stale baselines which would
+	// splice under the wrong gate. See ClearServedState.
+	sub.ClearServedState()
+	// Advance the generation epoch last: any concurrent publisher holding
+	// the old epoch is refused at publication from here on. Epochs are
+	// monotonic, so comparison has no ABA hazard.
 	sub.Gen.Add(1)
-	// RT-001d: a swapped gate must never share the previous gate's
-	// snapshot. Clear it so a joiner admitted under the new doc
-	// recomputes instead of reading state rendered under the old one;
-	// the current generation re-seeds it on success, and delta readers
-	// fall back to a full frame on a nil baseline.
-	sub.SetSnapshot(nil)
 	return next, true, nil
 }
 
+// PublishGeneration commits one fanned-out generation as the
+// subscription's served state, coordinated with re-gating (RT-001): the
+// epoch comparison runs under groupsMu — the same lock every swap takes —
+// so a re-gate landing between fan-out and publication refuses the stale
+// commit instead of restoring superseded state over a cleared (or newer)
+// snapshot. Snapshot-then-watermark order matches the notifier's
+// conservative-skew contract. False drops the generation to the retry
+// path, which recomputes under the new gate. Lock order groupsMu → sub.mu
+// matches snapshotOrRefresh; no path takes them in reverse.
+func (m *Manager) PublishGeneration(sub *reactive.Subscription, gen uint64, result json.RawMessage, txID int64) bool {
+	if sub == nil {
+		return false
+	}
+	m.groupsMu.Lock()
+	defer m.groupsMu.Unlock()
+	if sub.Gen.Load() != gen {
+		return false
+	}
+	sub.SetSnapshot(result)
+	sub.TxID.Store(txID)
+	return true
+}
+
 // rebindGroupLocked swaps a group's admitted gate after a version-mismatched
-// attach (RT-001d) and drops the possibly stale snapshot so the joiner's
-// initial answer refreshes under the new gate. Caller must hold groupsMu.
+// attach (RT-001d) and drops served state atomically so the joiner's initial
+// answer refreshes under the new gate. Clear-then-bump order matches
+// RefreshGate; see ClearServedState. Caller must hold groupsMu.
 func (m *Manager) rebindGroupLocked(g *queryGroup, doc *perms.RuleDoc) {
 	gate := NewQueryGate(doc, g.admittedAdmin())
 	g.sub.AttachCtx = gate
 	g.sub.SetAuthGate(gate)
+	g.sub.ClearServedState()
 	g.sub.Gen.Add(1)
-	g.sub.SetSnapshot(nil)
 }
 
 // SpliceAuthorize reports whether the incremental engine may splice etypes

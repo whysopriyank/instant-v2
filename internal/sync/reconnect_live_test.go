@@ -139,6 +139,9 @@ func TestLiveReconnectConvergesAfterDrop(t *testing.T) {
 			_, changed, err := mgr.RefreshGate(c, sub)
 			return changed, err
 		},
+		Publish: func(sub *reactive.Subscription, gen uint64, res json.RawMessage, txID int64) bool {
+			return mgr.PublishGeneration(sub, gen, res, txID)
+		},
 	}
 	runNotifier(t, notifier)
 

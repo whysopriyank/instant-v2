@@ -12,12 +12,14 @@ package sync
 // sockets).
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/instant-v2/instant-v2/internal/perms"
 	"github.com/instant-v2/instant-v2/internal/platform"
@@ -159,6 +161,297 @@ func TestEmitRejectsSupersededGeneration(t *testing.T) {
 	gate, _ := g.sub.AttachCtx.(*QueryGate)
 	if GateHash(gate.Rules) != GateHash(denyDoc) {
 		t.Fatal("re-gate did not install deny; the test staged nothing")
+	}
+}
+
+// TestSwapMidFanOutStopsSpreadAndRefusesCommit stages the exact P1
+// interleaving: the admission check passes, then a real re-gate lands
+// inside the first member's send — after the check, mid-fan-out, before
+// publication. The stale spread must stop at the next member, Emit must
+// fail, and the coordinated commit must refuse the stale generation so
+// no allow-era snapshot or watermark is restored over the deny that
+// cleared it. Either member may send first (map order), so both carry
+// the trigger; exactly one frame total may go out — the irreducible
+// remainder, never certified.
+func TestSwapMidFanOutStopsSpreadAndRefusesCommit(t *testing.T) {
+	ctx := context.Background()
+	allowDoc := &perms.RuleDoc{Raw: json.RawMessage(`{"allow":"all"}`)}
+	denyDoc := &perms.RuleDoc{Raw: json.RawMessage(`{"deny":"all"}`)}
+
+	var current atomic.Pointer[perms.RuleDoc]
+	current.Store(allowDoc)
+	mgr := NewManager(Deps{
+		Store: reactive.NewStore(),
+		Rules: func(context.Context, string) (*perms.RuleDoc, error) {
+			return current.Load(), nil
+		},
+	})
+	rawQ := json.RawMessage(`{"todos":{}}`)
+
+	var mu sync.Mutex
+	var frames1, frames2 [][]byte
+	var swapped atomic.Bool
+	var g *queryGroup
+	mkSend := func(dst *[][]byte) func([]byte) error {
+		return func(b []byte) error {
+			// First send anywhere trips a REAL re-gate (deny install:
+			// epoch bump + snapshot clear), then succeeds — the bytes
+			// are already admitted and cannot be recalled.
+			if swapped.CompareAndSwap(false, true) {
+				current.Store(denyDoc)
+				if _, _, err := mgr.RefreshGate(ctx, g.sub); err != nil {
+					t.Errorf("mid-fan-out re-gate: %v", err)
+				}
+			}
+			mu.Lock()
+			*dst = append(*dst, b)
+			mu.Unlock()
+			return nil
+		}
+	}
+	s1 := &Session{ID: "s1", AppID: "app", Subs: map[string]bool{}, SendRaw: mkSend(&frames1)}
+	s2 := &Session{ID: "s2", AppID: "app", Subs: map[string]bool{}, SendRaw: mkSend(&frames2)}
+	var err error
+	g, err = mgr.attachGroup(ctx, s1, rawQ, map[string]bool{}, &platform.AttrCatalog{}, wireTree, allowDoc)
+	if err != nil {
+		t.Fatalf("attach s1: %v", err)
+	}
+	if _, err = mgr.attachGroup(ctx, s2, rawQ, map[string]bool{}, &platform.AttrCatalog{}, wireTree, allowDoc); err != nil {
+		t.Fatalf("attach s2: %v", err)
+	}
+
+	gen := treeFrame()
+	gen.Gen = g.sub.Gen.Load() // stamp exactly as the notifier does
+	if g.sub.Emit == nil {
+		t.Fatal("attach did not install Emit")
+	}
+	if err := g.sub.Emit(gen); !errors.Is(err, errGenerationSuperseded) {
+		t.Fatalf("mid-fan-out swap: Emit returned %v; want superseded drop", err)
+	}
+	mu.Lock()
+	total := len(frames1) + len(frames2)
+	mu.Unlock()
+	if total != 1 {
+		t.Fatalf("stale spread reached %d members; want exactly the irreducible one", total)
+	}
+	// Honest remainder, pinned rather than wished away: the one admitted
+	// send went out (its wire bytes postdate the swap by construction of
+	// the trigger, watermark included) and its member stays attached.
+	mu.Lock()
+	var stale []byte
+	if len(frames1) == 1 {
+		stale = frames1[0]
+	} else {
+		stale = frames2[0]
+	}
+	mu.Unlock()
+	if !bytes.Contains(stale, []byte(`"e1"`)) {
+		t.Fatalf("irreducible frame is not the stale generation: %s", stale)
+	}
+	sessMu := func(s *Session) bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.Subs[g.key]
+	}
+	if !sessMu(s1) || !sessMu(s2) {
+		t.Fatal("partial generation detached a member; healing requires attachment")
+	}
+
+	// The commit must refuse the stale generation: no allow-era snapshot
+	// restored, no watermark advanced.
+	if mgr.PublishGeneration(g.sub, gen.Gen, gen.ResultJSON, gen.ProcessedTxID) {
+		t.Fatal("stale generation committed over the deny-cleared snapshot")
+	}
+	if snap := g.sub.Snapshot(); snap != nil {
+		t.Fatalf("deny-cleared snapshot re-poisoned: %s", snap)
+	}
+	if tx := g.sub.TxID.Load(); tx != 0 {
+		t.Fatalf("watermark advanced to %d for a refused generation", tx)
+	}
+
+	// Healing leg: the armed retry re-serves every attached member under
+	// the new gate at the same txID, superseding the stale envelope.
+	heal := treeFrame()
+	heal.Gen = g.sub.Gen.Load()
+	heal.ResultJSON = json.RawMessage(`{"data":{"todos":[]}}`)
+	if err := g.sub.Emit(heal); err != nil {
+		t.Fatalf("healing generation refused: %v", err)
+	}
+	mu.Lock()
+	n1, n2 := len(frames1), len(frames2)
+	last1, last2 := frames1[n1-1], frames2[n2-1]
+	mu.Unlock()
+	if n1 != 2 || n2 != 1 {
+		// One member sent first (stale + heal = 2 frames); the other was
+		// stopped pre-send (heal only = 1). Either order is legal.
+		if n1 != 1 || n2 != 2 {
+			t.Fatalf("healing fan-out = (%d, %d); want (2,1) or (1,2)", n1, n2)
+		}
+		last1, last2 = last2, last1
+	}
+	if !bytes.Contains(last1, []byte(`"todos":[]`)) || !bytes.Contains(last2, []byte(`"todos":[]`)) {
+		t.Fatalf("members did not converge on deny-state:\n%s\n%s", last1, last2)
+	}
+	if !mgr.PublishGeneration(g.sub, heal.Gen, heal.ResultJSON, heal.ProcessedTxID) {
+		t.Fatal("healing generation refused; commit path is broken, not strict")
+	}
+
+	// Positive control: the current epoch still commits.
+	cur := g.sub.Gen.Load()
+	if !mgr.PublishGeneration(g.sub, cur, json.RawMessage(`{"deny":"state"}`), 8) {
+		t.Fatal("current generation refused; commit path is broken, not strict")
+	}
+	if snap := g.sub.Snapshot(); string(snap) != `{"deny":"state"}` {
+		t.Fatalf("current commit did not publish: %s", snap)
+	}
+	if tx := g.sub.TxID.Load(); tx != 8 {
+		t.Fatalf("watermark = %d; want 8", tx)
+	}
+	gate, _ := g.sub.AttachCtx.(*QueryGate)
+	if GateHash(gate.Rules) != GateHash(denyDoc) {
+		t.Fatal("re-gate did not install deny; the test staged nothing")
+	}
+}
+
+// TestMidFanOutSwapHealsThroughNotifierRetry executes the automatic
+// recovery the unit test above only stages: a real notifier drain fans
+// a stale generation, a real re-gate lands mid-fan-out, Emit refuses,
+// and the notifier's own retry (no manual re-emit) re-serves every
+// attached member under the new gate. A follow-up invalidation then
+// proves continued liveness. Member order is map-random, so assertions
+// are order-agnostic; all synchronization is frame-driven (the ~100ms
+// retry timer is production behavior awaited under a bound, never slept
+// on).
+func TestMidFanOutSwapHealsThroughNotifierRetry(t *testing.T) {
+	ctx := context.Background()
+	allowDoc := &perms.RuleDoc{Raw: json.RawMessage(`{"allow":"all"}`)}
+	denyDoc := &perms.RuleDoc{Raw: json.RawMessage(`{"deny":"all"}`)}
+	allowResult := json.RawMessage(`{"data":{"todos":[{"id":"e1"}]}}`)
+	denyResult := json.RawMessage(`{"data":{"todos":[]}}`)
+
+	var current atomic.Pointer[perms.RuleDoc]
+	current.Store(allowDoc)
+	store := reactive.NewStore()
+	mgr := NewManager(Deps{
+		Store: store,
+		Rules: func(context.Context, string) (*perms.RuleDoc, error) {
+			return current.Load(), nil
+		},
+	})
+	rawQ := json.RawMessage(`{"todos":{}}`)
+	topics := map[string]bool{"attr1": true}
+
+	// Refresh models rules changing mid-flight: the first computation
+	// runs under allow, every later one under deny.
+	var refreshCalls atomic.Int64
+	refresh := func(context.Context, *reactive.Subscription) (json.RawMessage, error) {
+		if refreshCalls.Add(1) == 1 {
+			return allowResult, nil
+		}
+		return denyResult, nil
+	}
+	notifier := &reactive.Notifier{
+		Store:   store,
+		Refresh: refresh,
+		Revalidate: func(ctx context.Context, sub *reactive.Subscription) (bool, error) {
+			_, changed, err := mgr.RefreshGate(ctx, sub)
+			return changed, err
+		},
+		Publish: mgr.PublishGeneration,
+	}
+	nctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	go notifier.Run(nctx)
+
+	var mu sync.Mutex
+	frames := map[string][][]byte{}
+	arrived := make(chan struct{}, 8)
+	var swapped atomic.Bool
+	var g *queryGroup
+	mkSend := func(id string) func([]byte) error {
+		return func(b []byte) error {
+			// First send anywhere installs a REAL deny re-gate, then
+			// succeeds: the admitted bytes go out post-swap.
+			if swapped.CompareAndSwap(false, true) {
+				current.Store(denyDoc)
+				if _, _, err := mgr.RefreshGate(ctx, g.sub); err != nil {
+					t.Errorf("mid-fan-out re-gate: %v", err)
+				}
+			}
+			mu.Lock()
+			frames[id] = append(frames[id], b)
+			mu.Unlock()
+			arrived <- struct{}{}
+			return nil
+		}
+	}
+	mkSess := func(id string) *Session {
+		return &Session{ID: id, AppID: "app", Subs: map[string]bool{}, SendRaw: mkSend(id)}
+	}
+	s1, s2 := mkSess("s1"), mkSess("s2")
+	var err error
+	g, err = mgr.attachGroup(ctx, s1, rawQ, topics, &platform.AttrCatalog{}, wireTree, allowDoc)
+	if err != nil {
+		t.Fatalf("attach s1: %v", err)
+	}
+	if _, err = mgr.attachGroup(ctx, s2, rawQ, topics, &platform.AttrCatalog{}, wireTree, allowDoc); err != nil {
+		t.Fatalf("attach s2: %v", err)
+	}
+
+	// Attempt 1 fans stale; the retry re-serves deny; a follow-up
+	// invalidation proves liveness. Exactly 1+2+2 frames, ever: the
+	// retry timer fires exactly once and attempt 3 schedules nothing.
+	notifier.Notify(ctx, "app", []string{"attr1"}, 5)
+	waitFrames := func(n int, what string) {
+		t.Helper()
+		deadline := time.After(10 * time.Second)
+		for i := 0; i < n; i++ {
+			select {
+			case <-arrived:
+			case <-deadline:
+				t.Fatalf("timed out waiting for %s frame %d/%d", what, i+1, n)
+			}
+		}
+	}
+	waitFrames(3, "healing")
+	// Attempt 3 runs strictly after attempt 2's publish (drain passes
+	// serialize per subscription), so observing its frames proves the
+	// commit landed without any sleep or poll.
+	notifier.Notify(ctx, "app", []string{"attr1"}, 6)
+	waitFrames(2, "liveness")
+
+	mu.Lock()
+	defer mu.Unlock()
+	f1, f2 := frames["s1"], frames["s2"]
+	// Order-agnostic: one member saw stale then two deny envelopes; the
+	// other saw deny twice. No member saw stale twice; none missed deny.
+	var three, two [][]byte
+	switch {
+	case len(f1) == 3 && len(f2) == 2:
+		three, two = f1, f2
+	case len(f1) == 2 && len(f2) == 3:
+		three, two = f2, f1
+	default:
+		t.Fatalf("fan-out = (%d, %d); want (3,2) or (2,3)", len(f1), len(f2))
+	}
+	if !bytes.Contains(three[0], []byte(`"e1"`)) {
+		t.Fatalf("first envelope is not the stale generation: %s", three[0])
+	}
+	for i, f := range three[1:] {
+		if !bytes.Contains(f, []byte(`"todos":[]`)) {
+			t.Fatalf("healing envelope %d missed deny-state: %s", i, f)
+		}
+	}
+	for i, f := range two {
+		if !bytes.Contains(f, []byte(`"todos":[]`)) {
+			t.Fatalf("converged envelope %d missed deny-state: %s", i, f)
+		}
+	}
+	if snap := g.sub.Snapshot(); string(snap) != string(denyResult) {
+		t.Fatalf("snapshot = %s; want committed deny-state", snap)
+	}
+	if tx := g.sub.TxID.Load(); tx != 6 {
+		t.Fatalf("watermark = %d; want 6", tx)
 	}
 }
 

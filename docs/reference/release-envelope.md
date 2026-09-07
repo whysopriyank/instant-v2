@@ -22,7 +22,8 @@ and [F-002](../plans/finish-up/01-scope-and-decisions.md). It selects the
 smallest defensible first release: **single-node alpha** on primary
 PostgreSQL. It does not authorize production use, accept an exception, or
 select a later packet. An agent must not treat any `DEFERRED` row as
-`EXCLUDED`, nor treat this proposal as owner approval.
+`EXCLUDED`, nor treat this approved profile as broader than its rows:
+approval covers exactly the selections above, nothing implied.
 
 ## Decision schema and change control
 
@@ -60,7 +61,7 @@ means unselected and unavailable as a release claim, not silently unsupported.
 |---|---|
 | Release level | Single-node alpha: one `instantd`, primary PostgreSQL only |
 | Distribution | From-source on an owner-named Linux target qualified via OP-003; container unqualified until OP-004; Go ≥1.25 |
-| Protocol | WS covered paths + HTTP admin/runtime/storage per CF-003 matrix; presence, sync/stream, SSE explicitly unsupported until their rows pass (501/error paths enforced) |
+| Protocol | WS + SSE transports for covered query/transact paths (unit/harness suite: fallback, overflow-detach, per-IP cap, heartbeat, init guard, snapshot-error close) + HTTP admin/runtime/storage per CF-003 matrix; presence and sync/stream OPERATIONS explicitly unsupported until their rows pass (501 enforced at the op dispatcher, pinned by `unsupported_test.go`) — SSE-transport selection CORRECTED post-approval from a stale exclusion row; owner ratification pending, no broader change |
 | Auth | Magic-code delivery excluded (503 retained); Google/GitHub local contract required, real-provider acceptance excluded (no provider claim); Apple excluded |
 | Permissions | Dynamic view rules excluded (rejection enforced); live sessions transparently re-gated at refresh boundaries (reauthorize-or-detach realtime policy) |
 | Storage | Durable configured local root required (DA-001 assembles); object backup excluded (503 enforced) |
