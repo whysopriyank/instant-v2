@@ -316,8 +316,11 @@ bookkeeping row above. The program manifest remains canonical; RT-001/RT-002/
 DA-001/DA-003/CF-002/CF-003/QR-005 stay PARTIAL, COMPLETE rows stay COMPLETE,
 and BLOCKED/NOT_SELECTED/DEFERRED rows are unchanged.
 
-New candidate: recorded after the final commit below. Working tree after the
-ledger commit is clean.
+New candidate: code commits close at `c4d9ce6`. The ledger-reconciliation commit
+on top of it (this stabilization section plus the truth-ledger corpus update)
+is the stabilized candidate; its SHA is the HEAD shown in `git log` at close
+and quoted in the stabilization final report. Working tree after that commit
+is clean.
 
 ## H-00 baseline (2026-09-07T15:51:40Z, go1.27.0 darwin/arm64, HEAD 26a1caf main)
 - Porcelain: 13 modified tracked + untracked execution-ledger.md + session-recovery-patch-contract.md (preserved, no reset/stash).
