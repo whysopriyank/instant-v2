@@ -243,12 +243,20 @@ in `program-manifest.md`; this ledger does not replace or narrow that program.
 ## Stabilization reconciliation (2026-09-16, go1.27.1 darwin/arm64, old candidate 85298d3, dirty)
 
 Baseline captured: HEAD `85298d365d744e3a5c4f7abea2f3fabb014e8177` on `main`;
-98 modified tracked files + 46 untracked paths (144 total); tracked-diff
+98 modified tracked files + 46 untracked paths (144 total); recorded tracked-diff
 fingerprint `a74a2d54acc21e314c762737e933c574036c5e3e1f08b9c6884fc515b0482ec5`
-(`git diff --no-ext-diff --unified=0 | shasum -a 256`). The ledger's "dirty
-candidate" description was accurate: every packet refresh section below already
-records `HEAD 85298d3, dirty`, and no clean-SHA, external, Linux, provider,
-recovery, soak, or clean-candidate evidence was claimed.
+(`git diff --no-ext-diff --unified=0 | shasum -a 256`) preserved as a recorded
+observation; it cannot be regenerated from the clean Git history because no
+byte-for-byte snapshot of the original dirty tree was preserved. The ledger's
+"dirty candidate" description was accurate: every packet refresh section below
+already records `HEAD 85298d3, dirty`, and no clean-SHA, external, Linux,
+provider, recovery, soak, or clean-candidate evidence was claimed.
+
+Preservation scope: the old-to-new commit range contains the same recorded
+total of 144 unique paths, and no stabilization-time deletion, reset, checkout,
+clean, or stash was recorded. Because no byte-for-byte snapshot of the original
+dirty tree was preserved, exact content-level losslessness of the former
+untracked files is not independently reproducible after stabilization.
 
 Change inventory (all 144 dirty paths classified; no file deleted, reset,
 stashed, or restored):
@@ -269,6 +277,9 @@ stashed, or restored):
   section in this ledger and the program manifest.
 - DISPOSABLE-GENERATED: none committed. No runtime artifact, snapshot, log, or
   coverage output was staged.
+- Preservation claim (narrowed): all 144 recorded paths are represented in the
+  old-to-new commit range; the current tree is clean; exact historical content
+  equality is not independently verifiable.
 - Known config-test caveat (preserved, not repaired here): `TestLoadStorageRootExplicitKept`
   passes hermetically and with fixture OAuth env, but fails when the ambient
   `DATABASE_URL` leaks into the test process because `Load()` now requires
@@ -303,7 +314,8 @@ the DB-backed legs rerun here):
   ./internal/instaql ./internal/perms -count=1` PASS; owned-DB corpus replay
   (18 scenarios) PASS; owned-DB `TestCF003*` matrix (8 tests) PASS;
   `corpusctl --mode validate` PASS; `corpusctl --mode validate-release` PASS;
-  `scripts/test-quality-release-gate.sh` 21 passed / 0 failed;
+  `scripts/test-quality-release-gate.sh` 21 passed / 0 failed (run through
+  `bash` during stabilization; run directly after the executable-bit repair);
   `scripts/test-quality-supply-chain-preflight.sh` 22 passed / 0 failed; all
   touched shell scripts `bash -n` clean.
 - No external, Linux, provider, recovery, soak-campaign, or clean-candidate

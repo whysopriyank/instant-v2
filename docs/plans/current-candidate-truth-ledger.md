@@ -709,12 +709,18 @@ claimed.
 
 The dirty candidate described across the refresh sections above (HEAD
 `85298d365d744e3a5c4f7abea2f3fabb014e8177`, 98 modified + 46 untracked paths,
-tracked-diff fingerprint
-`a74a2d54acc21e314c762737e933c574036c5e3e1f08b9c6884fc515b0482ec5`) was
-stabilized into focused local commits in dependency order (realtime; storage/
-backup/config; auth/rate-limit; admin/permissions/transaction; evidence
+recorded tracked-diff fingerprint
+`a74a2d54acc21e314c762737e933c574036c5e3e1f08b9c6884fc515b0482ec5` preserved as
+a recorded observation that cannot be regenerated from the clean Git history)
+was stabilized into focused local commits in dependency order (realtime;
+storage/backup/config; auth/rate-limit; admin/permissions/transaction; evidence
 tooling; corpus/matrix; release-gate/preflight; ledger reconciliation), with no
-reset, checkout, clean, stash, push, deployment, or discarded change. Packet
+recorded reset, checkout, clean, stash, push, deployment, or discarded change.
+The old-to-new commit range contains the same recorded total of 144 unique
+paths, and no stabilization-time deletion, reset, checkout, clean, or stash was
+recorded. Because no byte-for-byte snapshot of the original dirty tree was
+preserved, exact content-level losslessness of the former untracked files is
+not independently reproducible after stabilization. Packet
 states are unchanged from the program manifest (canonical): COMPLETE rows stay
 COMPLETE, PARTIAL/BLOCKED/NOT_SELECTED/DEFERRED rows stay as recorded; the only
 ledger bookkeeping change is the DA-001-R SUPERSEDED note in
