@@ -166,7 +166,7 @@ func reSign(h *Handler, rawURL, op, appID, id string, exp int64) string {
 	q := u.Query()
 	q.Set("app-id", appID)
 	q.Set("expires", strconv.FormatInt(exp, 10))
-	q.Set("signature", signPayload(h.Secret, op, appID, id, exp))
+	q.Set("signature", signPayload(h.Secret, op, appID, id, q.Get("filename"), exp))
 	u.RawQuery = q.Encode()
 	return u.String()
 }
@@ -468,19 +468,19 @@ func dbEnv(t *testing.T) (*httptest.Server, *Handler, *pgxpool.Pool, [16]byte) {
 // $files.path that already exists must answer 409 Conflict, not leak a raw
 // Postgres unique-violation as 500.
 func TestDuplicateFilename409(t *testing.T) {
-	srv, _, _, appUUID := dbEnv(t)
+	srv, h, _, appUUID := dbEnv(t)
 	appID := platform.UUIDToStr(appUUID)
 
 	uploadURL1, _, _ := presignUpload(t, srv, appID, "dup.txt")
-	req1, _ := http.NewRequest(http.MethodPut, uploadURL1+"&filename=dup.txt", bytes.NewReader([]byte("first")))
+	req1, _ := http.NewRequest(http.MethodPut, uploadURL1, bytes.NewReader([]byte("first")))
 	resp1, err := http.DefaultClient.Do(req1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	mustStatus(t, resp1, 200)
 
-	uploadURL2, _, _ := presignUpload(t, srv, appID, "other.bin")
-	req2, _ := http.NewRequest(http.MethodPut, uploadURL2+"&filename=dup.txt", bytes.NewReader([]byte("second")))
+	uploadURL2, id2, _ := presignUpload(t, srv, appID, "dup.txt")
+	req2, _ := http.NewRequest(http.MethodPut, uploadURL2, bytes.NewReader([]byte("second")))
 	resp2, err := http.DefaultClient.Do(req2)
 	if err != nil {
 		t.Fatal(err)
@@ -489,6 +489,10 @@ func TestDuplicateFilename409(t *testing.T) {
 	b, _ := io.ReadAll(resp2.Body)
 	if resp2.StatusCode != http.StatusConflict {
 		t.Fatalf("duplicate filename must be 409, got %d (%s)", resp2.StatusCode, b)
+	}
+	if obj, err := h.Store.Open(appID + "/" + id2); err == nil {
+		_ = obj.Body.Close()
+		t.Fatal("failed metadata link left the newly written duplicate object behind")
 	}
 }
 
@@ -500,7 +504,7 @@ func TestFilesTriples(t *testing.T) {
 	uploadURL, id, _ := presignUpload(t, srv, appID, "report.txt")
 	body := []byte("file contents here")
 	// Attach advisory metadata like a real client would.
-	req, _ := http.NewRequest(http.MethodPut, uploadURL+"&filename=report.txt", bytes.NewReader(body))
+	req, _ := http.NewRequest(http.MethodPut, uploadURL, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "text/plain; charset=utf-8") // Go's client does not sniff PUT bodies
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

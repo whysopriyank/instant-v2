@@ -66,6 +66,14 @@ type Config struct {
 	// to a temp default. The backend validates the root at construction.
 	StorageRoot string // INSTANT_V2_STORAGE_ROOT
 
+	// DEC-001 OAuth providers. A database-backed daemon exposes both provider
+	// routes, so startup rejects missing credentials instead of deferring a
+	// configuration failure until the first authorization request.
+	OAuthGoogleClientID     string // INSTANT_OAUTH_GOOGLE_CLIENT_ID
+	OAuthGoogleClientSecret string // INSTANT_OAUTH_GOOGLE_CLIENT_SECRET
+	OAuthGitHubClientID     string // INSTANT_OAUTH_GITHUB_CLIENT_ID
+	OAuthGitHubClientSecret string // INSTANT_OAUTH_GITHUB_CLIENT_SECRET
+
 	// Resource bounds. Zero values below fall back to the documented defaults.
 	MaxSubsPerApp int // INSTANT_V2_MAX_SUBS_PER_APP, default 2000
 	MaxWSConns    int // INSTANT_V2_MAX_WS_CONNS, default 20000
@@ -175,6 +183,22 @@ func Load() (Config, error) {
 			return cfg, fmt.Errorf("resolving dev storage root: %w", aerr)
 		}
 		cfg.StorageRoot = abs
+	}
+	cfg.OAuthGoogleClientID = os.Getenv("INSTANT_OAUTH_GOOGLE_CLIENT_ID")
+	cfg.OAuthGoogleClientSecret = os.Getenv("INSTANT_OAUTH_GOOGLE_CLIENT_SECRET")
+	cfg.OAuthGitHubClientID = os.Getenv("INSTANT_OAUTH_GITHUB_CLIENT_ID")
+	cfg.OAuthGitHubClientSecret = os.Getenv("INSTANT_OAUTH_GITHUB_CLIENT_SECRET")
+	if cfg.DatabaseURL != "" {
+		for key, value := range map[string]string{
+			"INSTANT_OAUTH_GOOGLE_CLIENT_ID":     cfg.OAuthGoogleClientID,
+			"INSTANT_OAUTH_GOOGLE_CLIENT_SECRET": cfg.OAuthGoogleClientSecret,
+			"INSTANT_OAUTH_GITHUB_CLIENT_ID":     cfg.OAuthGitHubClientID,
+			"INSTANT_OAUTH_GITHUB_CLIENT_SECRET": cfg.OAuthGitHubClientSecret,
+		} {
+			if value == "" {
+				return cfg, fmt.Errorf("%s is required when DATABASE_URL is set", key)
+			}
+		}
 	}
 	if cfg.MaxSubsPerApp, err = envInt("INSTANT_V2_MAX_SUBS_PER_APP", 2000); err != nil {
 		return cfg, err

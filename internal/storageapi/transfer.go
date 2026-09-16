@@ -4,11 +4,71 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/instant-v2/instant-v2/internal/platform"
 )
+
+func (h *Handler) lockUploadKey(key string) func() {
+	h.uploadLocksMu.Lock()
+	if h.uploadLocks == nil {
+		h.uploadLocks = make(map[string]*uploadKeyLock)
+	}
+	lock := h.uploadLocks[key]
+	if lock == nil {
+		lock = &uploadKeyLock{}
+		h.uploadLocks[key] = lock
+	}
+	lock.refs++
+	h.uploadLocksMu.Unlock()
+
+	lock.mu.Lock()
+	return func() {
+		lock.mu.Unlock()
+		h.uploadLocksMu.Lock()
+		lock.refs--
+		if lock.refs == 0 {
+			delete(h.uploadLocks, key)
+		}
+		h.uploadLocksMu.Unlock()
+	}
+}
+
+func (h *Handler) lockUploadKeys(keys []string) func() {
+	ordered := append([]string(nil), keys...)
+	sort.Strings(ordered)
+	locks := make([]func(), 0, len(ordered))
+	var previous string
+	for _, key := range ordered {
+		if key == previous {
+			continue
+		}
+		locks = append(locks, h.lockUploadKey(key))
+		previous = key
+	}
+	return func() {
+		for i := len(locks) - 1; i >= 0; i-- {
+			locks[i]()
+		}
+	}
+}
+
+var errUploadCleanup = errors.New("storageapi: upload cleanup failed")
+
+// cleanupAfterMetadataFailure removes only an object created by this upload.
+// A retry that found an existing object leaves it untouched; a delete failure
+// is joined with the link error so the caller can reconcile the object.
+func cleanupAfterMetadataFailure(store ObjectStore, key string, created bool, linkErr error) error {
+	if !created {
+		return linkErr
+	}
+	if cleanupErr := store.Delete([]string{key}); cleanupErr != nil {
+		return errors.Join(linkErr, errUploadCleanup, cleanupErr)
+	}
+	return linkErr
+}
 
 // uploadPut ports consume-upload-url-put: stream the body into the backing
 // store at the signed location, then link $files triples if wired (v1 defers
@@ -24,19 +84,38 @@ func (h *Handler) uploadPut(w http.ResponseWriter, r *http.Request, id string) {
 		httpError(w, http.StatusForbidden, err)
 		return
 	}
+	key := appIDStr + "/" + id
+	unlock := h.lockUploadKey(key)
+	defer unlock()
 	// Hard cap on one upload. The countingReader tracks exact bytes so an
 	// over-cap body is REJECTED (never silently truncated), and the partial
 	// object is removed.
 	limit := h.uploadLimit()
 	cr := &countingReader{r: r.Body}
-	putErr := h.Store.Put(appIDStr+"/"+id, cr)
+	created := true
+	putErr := h.Store.PutIfAbsent(key, cr)
+	if errors.Is(putErr, ErrObjectExists) {
+		// A retry of a previously completed signed upload must not replace
+		// or later delete the object owned by that earlier request.
+		putErr = nil
+		created = false
+		obj, openErr := h.Store.Open(key)
+		if openErr != nil {
+			putErr = openErr
+		} else {
+			cr.n = obj.Size
+			_ = obj.Body.Close()
+		}
+	}
 	if putErr == nil && cr.n > limit {
 		putErr = ErrTooLarge
 		// Roll back the bytes that landed before the cap tripped.
-		_ = h.Store.Delete([]string{appIDStr + "/" + id})
+		if created {
+			putErr = cleanupAfterMetadataFailure(h.Store, key, true, putErr)
+		}
 	}
 	if putErr != nil {
-		if errors.Is(putErr, ErrTooLarge) {
+		if errors.Is(putErr, ErrTooLarge) && !errors.Is(putErr, errUploadCleanup) {
 			httpError(w, http.StatusRequestEntityTooLarge, putErr)
 			return
 		}
@@ -48,11 +127,16 @@ func (h *Handler) uploadPut(w http.ResponseWriter, r *http.Request, id string) {
 	filename := r.URL.Query().Get("filename")
 	if h.Triples != nil && h.Catalogs != nil {
 		if err := h.linkFileTriple(r.Context(), appID, id, filename, r.Header.Get("Content-Type"), cr.n); err != nil {
-			if errors.Is(err, ErrFilenameTaken) {
+			finalErr := cleanupAfterMetadataFailure(h.Store, key, created, err)
+			if errors.Is(finalErr, errUploadCleanup) {
+				httpError(w, http.StatusInternalServerError, finalErr)
+				return
+			}
+			if errors.Is(finalErr, ErrFilenameTaken) {
 				httpError(w, http.StatusConflict, err)
 				return
 			}
-			httpError(w, http.StatusInternalServerError, err)
+			httpError(w, http.StatusInternalServerError, finalErr)
 			return
 		}
 	}

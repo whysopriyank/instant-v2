@@ -188,12 +188,22 @@ func TestMountRoutesRejectsEmptyStorageRoot(t *testing.T) {
 		StorageSecret: "storage-root-required-test-only", HTTPAddr: "127.0.0.1:0",
 	}
 	a := newAppRuntime(pool, pool, cfg, slog.Default())
-	ws, sse, err := a.mountRoutes(ctx, db, http.NewServeMux(), cfg, ratelimit.New(ratelimit.Config{}))
+	mux := http.NewServeMux()
+	ws, sse, err := a.mountRoutes(ctx, db, mux, cfg, ratelimit.New(ratelimit.Config{}))
 	if err == nil {
 		t.Fatal("empty storage root must return an error, not assemble routes")
 	}
 	if ws != nil || sse != nil {
 		t.Fatal("rejected assembly must not return handlers")
+	}
+	if a.notifier.Revalidate != nil || a.notifier.Publish != nil {
+		t.Fatal("rejected assembly must not rebind notifier side effects")
+	}
+	for _, tc := range assemblyRouteCases {
+		_, pattern := mux.Handler(httptest.NewRequest(tc.method, tc.path, nil))
+		if pattern != "" {
+			t.Errorf("rejected assembly registered %s %s as %q", tc.method, tc.path, pattern)
+		}
 	}
 }
 

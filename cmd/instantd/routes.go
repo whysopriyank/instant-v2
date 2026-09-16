@@ -26,11 +26,44 @@ import (
 )
 
 func (a *appRuntime) mountRoutes(ctx context.Context, db *sql.DB, mux *http.ServeMux, cfg config.Config, limiter *ratelimit.Limiter) (*syncpkg.WSHandler, *syncpkg.SSEHandler, error) {
+	// Assemble and validate durable file storage before starting maintenance,
+	// constructing transports, or registering any routes. A bad mount must
+	// fail before route assembly has observable side effects.
+	storeSecret := []byte(cfg.StorageSecret)
+	if len(storeSecret) == 0 && cfg.InsecureDevMode {
+		// Audit M2: the deterministic dev fallback signs with the DSN
+		// itself — which usually contains the DB password. Refuse it
+		// on any non-loopback listener so prod can't slide into it.
+		if !loopbackAddr(cfg.HTTPAddr) {
+			a.logger.Error("refusing to start: INSTANT_V2_STORAGE_SECRET is required when " +
+				"listening on a non-loopback address (insecure dev-secret fallback is loopback-only)")
+			os.Exit(1)
+		}
+		a.logger.Warn("INSECURE dev mode: storage signatures derive from DATABASE_URL; never expose beyond loopback")
+		storeSecret = []byte(cfg.DatabaseURL) // deterministic dev fallback (insecure; dev only)
+	}
+	if cfg.InsecureDevMode && os.Getenv("INSTANT_V2_STORAGE_ROOT") == "" {
+		a.logger.Warn("INSECURE dev mode: file storage rooted at explicit dev directory, not durable storage", "root", cfg.StorageRoot)
+	}
+	// DA-001: the file backend assembles only on the configured durable
+	// root. A malformed or unwritable root refuses startup here — never a
+	// temp fallback, never first-upload failure.
+	store, serr := storageapi.NewDiskBackend(cfg.StorageRoot, storeSecret)
+	if serr != nil {
+		return nil, nil, fmt.Errorf("refusing to start: invalid file storage root: %w", serr)
+	}
+	a.logger.Info("file storage assembled",
+		"root", cfg.StorageRoot, "fingerprint", cfg.StorageFingerprint())
+
 	authSvc := &authn.Service{
-		DB:       a.st,
-		Pool:     a.pool,
-		Catalogs: a.cats,
-		Logger:   a.logger,
+		DB:                 a.st,
+		Pool:               a.pool,
+		Catalogs:           a.cats,
+		Logger:             a.logger,
+		GoogleClientID:     cfg.OAuthGoogleClientID,
+		GoogleClientSecret: cfg.OAuthGoogleClientSecret,
+		GitHubClientID:     cfg.OAuthGitHubClientID,
+		GitHubClientSecret: cfg.OAuthGitHubClientSecret,
 		// Signup authorization must resolve the persisted per-app rules. Keep
 		// this on the same catalog cache used by queries/transacts so an
 		// invalidation cannot leave auth with a stale $users.create decision.
@@ -176,31 +209,6 @@ func (a *appRuntime) mountRoutes(ctx context.Context, db *sql.DB, mux *http.Serv
 		},
 	})
 
-	storeSecret := []byte(cfg.StorageSecret)
-	if len(storeSecret) == 0 && cfg.InsecureDevMode {
-		// Audit M2: the deterministic dev fallback signs with the DSN
-		// itself — which usually contains the DB password. Refuse it
-		// on any non-loopback listener so prod can't slide into it.
-		if !loopbackAddr(cfg.HTTPAddr) {
-			a.logger.Error("refusing to start: INSTANT_V2_STORAGE_SECRET is required when " +
-				"listening on a non-loopback address (insecure dev-secret fallback is loopback-only)")
-			os.Exit(1)
-		}
-		a.logger.Warn("INSECURE dev mode: storage signatures derive from DATABASE_URL; never expose beyond loopback")
-		storeSecret = []byte(cfg.DatabaseURL) // deterministic dev fallback (insecure; dev only)
-	}
-	if cfg.InsecureDevMode && os.Getenv("INSTANT_V2_STORAGE_ROOT") == "" {
-		a.logger.Warn("INSECURE dev mode: file storage rooted at explicit dev directory, not durable storage", "root", cfg.StorageRoot)
-	}
-	// DA-001: the file backend assembles only on the configured durable
-	// root. A malformed or unwritable root refuses startup here — never a
-	// temp fallback, never first-upload failure.
-	store, serr := storageapi.NewDiskBackend(cfg.StorageRoot, storeSecret)
-	if serr != nil {
-		return nil, nil, fmt.Errorf("refusing to start: invalid file storage root: %w", serr)
-	}
-	a.logger.Info("file storage assembled",
-		"root", cfg.StorageRoot, "fingerprint", cfg.StorageFingerprint())
 	mux.Handle("/storage/", &storageapi.Handler{
 		Store:           store,
 		Secret:          storeSecret,

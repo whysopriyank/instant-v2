@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -39,6 +40,21 @@ func newFakeS3(t *testing.T, bucket string) *fakeS3 {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		switch {
+		case r.Method == http.MethodPut && r.Header.Get("X-Amz-Copy-Source") != "":
+			source, err := url.PathUnescape(strings.TrimPrefix(r.Header.Get("X-Amz-Copy-Source"), "/"))
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			source = strings.TrimPrefix(source, bucket+"/")
+			b, ok := f.objects[source]
+			if !ok {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			f.objects[key] = append([]byte{}, b...)
+			w.Header().Set("Content-Type", "application/xml")
+			_, _ = fmt.Fprint(w, `<?xml version="1.0"?><CopyObjectResult><LastModified>1970-01-01T00:00:00.000Z</LastModified><ETag>"fake-copy"</ETag></CopyObjectResult>`)
 		case r.Method == http.MethodPost && r.URL.Query().Has("uploads"):
 			// InitiateMultipartUpload
 			w.Header().Set("Content-Type", "application/xml")
@@ -63,7 +79,7 @@ func newFakeS3(t *testing.T, bucket string) *fakeS3 {
 			w.Header().Set("ETag", `"fake-part"`)
 			w.WriteHeader(http.StatusOK)
 		}
-		if handled := r.Method == http.MethodPost || (r.Method == http.MethodPut && r.URL.Query().Get("uploadId") != ""); handled {
+		if handled := r.Method == http.MethodPost || (r.Method == http.MethodPut && (r.URL.Query().Get("uploadId") != "" || r.Header.Get("X-Amz-Copy-Source") != "")); handled {
 			return
 		}
 		switch r.Method {
@@ -76,6 +92,9 @@ func newFakeS3(t *testing.T, bucket string) *fakeS3 {
 			f.objects[key] = b
 			w.Header().Set("ETag", `"fake"`)
 			w.WriteHeader(http.StatusOK)
+		case http.MethodDelete:
+			delete(f.objects, key)
+			w.WriteHeader(http.StatusNoContent)
 		case http.MethodGet, http.MethodHead:
 			b, ok := f.objects[key]
 			if !ok {
@@ -115,8 +134,14 @@ func TestS3StoreRoundTrip(t *testing.T) {
 		t.Fatalf("new s3 store: %v", err)
 	}
 	payload := "hello-ndjson\nlines\n"
-	if err := store.Put(context.Background(), "dumps/x.ndjson", strings.NewReader(payload), int64(len(payload))); err != nil {
+	if err := store.Put(context.Background(), "staging/x.ndjson", strings.NewReader(payload), int64(len(payload))); err != nil {
 		t.Fatalf("put: %v", err)
+	}
+	if err := store.Promote(context.Background(), "staging/x.ndjson", "dumps/x.ndjson"); err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+	if err := store.Delete(context.Background(), "staging/x.ndjson"); err != nil {
+		t.Fatalf("delete staging object: %v", err)
 	}
 	rc, err := store.Get(context.Background(), "dumps/x.ndjson")
 	if err != nil {
@@ -126,6 +151,12 @@ func TestS3StoreRoundTrip(t *testing.T) {
 	got, _ := io.ReadAll(rc)
 	if string(got) != payload {
 		t.Fatalf("round trip mismatch: %q", got)
+	}
+	f.mu.Lock()
+	_, staged := f.objects["staging/x.ndjson"]
+	f.mu.Unlock()
+	if staged {
+		t.Fatal("staging object remains after delete")
 	}
 }
 

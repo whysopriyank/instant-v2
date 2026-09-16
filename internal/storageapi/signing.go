@@ -13,10 +13,10 @@ import (
 	"github.com/instant-v2/instant-v2/internal/platform"
 )
 
-// signPayload computes hex(HMAC-SHA256(secret, op|appID|id|exp)).
-func signPayload(secret []byte, op, appID, id string, exp int64) string {
+// signPayload computes hex(HMAC-SHA256(secret, op|appID|id|filename|exp)).
+func signPayload(secret []byte, op, appID, id, filename string, exp int64) string {
 	mac := hmac.New(sha256.New, secret)
-	mac.Write([]byte(op + "|" + appID + "|" + id + "|" + strconv.FormatInt(exp, 10)))
+	mac.Write([]byte(op + "|" + appID + "|" + id + "|" + filename + "|" + strconv.FormatInt(exp, 10)))
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
@@ -27,7 +27,7 @@ func verifySignature(secret []byte, op, appID, id string, q url.Values) error {
 	if err != nil || exp < 1 {
 		return errors.New("storageapi: missing or malformed expiry")
 	}
-	if !hmac.Equal([]byte(signPayload(secret, op, appID, id, exp)), []byte(q.Get("signature"))) {
+	if !hmac.Equal([]byte(signPayload(secret, op, appID, id, q.Get("filename"), exp)), []byte(q.Get("signature"))) {
 		return errors.New("storageapi: invalid signature")
 	}
 	if time.Now().Unix() > exp {

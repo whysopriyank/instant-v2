@@ -130,17 +130,21 @@ func TestLoadRequiresStorageSecret(t *testing.T) {
 
 func TestLoadTier2Knobs(t *testing.T) {
 	setEnv(t, map[string]string{
-		"DATABASE_URL":                   "postgres://w",
-		"INSTANT_V2_READ_URL":            "postgres://r",
-		"INSTANT_V2_WS_COMPRESSION":      "context-takeover",
-		"INSTANT_V2_INVALIDATION_BUS":    "postgres",
-		"INSTANT_V2_NODE_ID":             "node-7",
-		"INSTANT_V2_MAX_QUEUE_DEPTH":     "5000",
-		"INSTANT_V2_WRITE_POOL_MAXCONNS": "16",
-		"INSTANT_V2_READ_POOL_MAXCONNS":  "48",
-		"INSTANT_V2_POOL_MINCONNS":       "4",
-		"INSTANT_V2_STORAGE_SECRET":      "k1",
-		"INSTANT_V2_STORAGE_ROOT":        t.TempDir(),
+		"DATABASE_URL":                       "postgres://w",
+		"INSTANT_V2_READ_URL":                "postgres://r",
+		"INSTANT_V2_WS_COMPRESSION":          "context-takeover",
+		"INSTANT_V2_INVALIDATION_BUS":        "postgres",
+		"INSTANT_V2_NODE_ID":                 "node-7",
+		"INSTANT_V2_MAX_QUEUE_DEPTH":         "5000",
+		"INSTANT_V2_WRITE_POOL_MAXCONNS":     "16",
+		"INSTANT_V2_READ_POOL_MAXCONNS":      "48",
+		"INSTANT_V2_POOL_MINCONNS":           "4",
+		"INSTANT_V2_STORAGE_SECRET":          "k1",
+		"INSTANT_V2_STORAGE_ROOT":            t.TempDir(),
+		"INSTANT_OAUTH_GOOGLE_CLIENT_ID":     "google-id",
+		"INSTANT_OAUTH_GOOGLE_CLIENT_SECRET": "google-secret",
+		"INSTANT_OAUTH_GITHUB_CLIENT_ID":     "github-id",
+		"INSTANT_OAUTH_GITHUB_CLIENT_SECRET": "github-secret",
 	})
 	cfg, err := Load()
 	if err != nil {
@@ -243,6 +247,44 @@ func TestLoadValidation(t *testing.T) {
 				t.Fatalf("%s: expected error", name)
 			}
 		})
+	}
+}
+
+func TestLoadRequiresSelectedOAuthCredentialsWithDatabase(t *testing.T) {
+	base := map[string]string{
+		"DATABASE_URL":                       "postgres://db",
+		"INSTANT_V2_STORAGE_SECRET":          "storage-secret",
+		"INSTANT_V2_STORAGE_ROOT":            t.TempDir(),
+		"INSTANT_OAUTH_GOOGLE_CLIENT_ID":     "google-id",
+		"INSTANT_OAUTH_GOOGLE_CLIENT_SECRET": "google-secret",
+		"INSTANT_OAUTH_GITHUB_CLIENT_ID":     "github-id",
+		"INSTANT_OAUTH_GITHUB_CLIENT_SECRET": "github-secret",
+	}
+	for _, missing := range []string{
+		"INSTANT_OAUTH_GOOGLE_CLIENT_ID",
+		"INSTANT_OAUTH_GOOGLE_CLIENT_SECRET",
+		"INSTANT_OAUTH_GITHUB_CLIENT_ID",
+		"INSTANT_OAUTH_GITHUB_CLIENT_SECRET",
+	} {
+		t.Run(missing, func(t *testing.T) {
+			env := make(map[string]string, len(base))
+			for key, value := range base {
+				env[key] = value
+			}
+			env[missing] = ""
+			setEnv(t, env)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), missing) {
+				t.Fatalf("missing %s must fail startup, got %v", missing, err)
+			}
+		})
+	}
+	setEnv(t, base)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OAuthGoogleClientID != "google-id" || cfg.OAuthGitHubClientID != "github-id" {
+		t.Fatalf("OAuth credentials not loaded into runtime config: %+v", cfg)
 	}
 }
 

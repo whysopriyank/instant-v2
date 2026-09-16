@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -19,9 +20,9 @@ import (
 // validated durable directory (DA-001). There is deliberately no default:
 // an empty root is a construction error, never a silent temp fallback.
 // Presigned URLs are plain http URLs served by Handler itself: the
-// signature is HMAC-SHA256 over op|app-id|id|expiry using the shared server
-// secret, so presigning needs no external service and the whole flow is
-// testable without S3.
+// signature is HMAC-SHA256 over op|app-id|id|filename|expiry using the shared
+// server secret, so presigning needs no external service and the whole flow
+// is testable without S3.
 type DiskBackend struct {
 	root   string
 	secret []byte
@@ -37,6 +38,9 @@ type DiskBackend struct {
 	// syncRoot persists directory entries; syncDir in production,
 	// overridden by tests to inject a root-sync failure.
 	syncRoot func(string) error
+	// syncObject persists an object directory after an exclusive write;
+	// overridden by tests to inject the post-write durability failure.
+	syncObject func(string) error
 }
 
 // NewDiskBackend validates root and builds a DiskBackend. Validation
@@ -56,7 +60,7 @@ func NewDiskBackend(root string, secret []byte) (*DiskBackend, error) {
 	if err := probeWritable(root); err != nil {
 		return nil, fmt.Errorf("storageapi: storage root %q: %w", root, err)
 	}
-	return &DiskBackend{root: root, secret: secret, syncRoot: syncDir}, nil
+	return &DiskBackend{root: root, secret: secret, syncRoot: syncDir, syncObject: syncDir}, nil
 }
 
 // probeWritable creates, syncs, closes, and removes a probe file, then
@@ -97,6 +101,13 @@ func syncDir(dir string) error {
 	return d.Sync()
 }
 
+func (d *DiskBackend) syncObjectDir(dir string) error {
+	if d.syncObject != nil {
+		return d.syncObject(dir)
+	}
+	return syncDir(dir)
+}
+
 // splitKey validates "<uuid>/<uuid>" keys and returns their parts.
 func splitKey(key string) (appID, id string, err error) {
 	appID, id, ok := strings.Cut(key, "/")
@@ -123,22 +134,28 @@ func (d *DiskBackend) file(key string) (string, string, string, error) {
 
 // presign builds the signed URL path for op ("upload" or "download") routed
 // through Handler's passthrough endpoints.
-func (d *DiskBackend) presign(op, route, key string, ttl time.Duration) (string, error) {
+func (d *DiskBackend) presign(op, route, key, filename string, ttl time.Duration) (string, error) {
 	appID, id, _, err := d.file(key)
 	if err != nil {
 		return "", err
 	}
 	exp := time.Now().Add(ttl).Unix()
-	return fmt.Sprintf("/storage/%s/%s?app-id=%s&expires=%d&signature=%s",
-		route, id, appID, exp, signPayload(d.secret, op, appID, id, exp)), nil
+	q := url.Values{}
+	q.Set("app-id", appID)
+	if filename != "" {
+		q.Set("filename", filename)
+	}
+	q.Set("expires", fmt.Sprintf("%d", exp))
+	q.Set("signature", signPayload(d.secret, op, appID, id, filename, exp))
+	return fmt.Sprintf("/storage/%s/%s?%s", route, id, q.Encode()), nil
 }
 
-func (d *DiskBackend) PresignUpload(key string, ttl time.Duration) (string, error) {
-	return d.presign("upload", "upload", key, ttl)
+func (d *DiskBackend) PresignUpload(key, filename string, ttl time.Duration) (string, error) {
+	return d.presign("upload", "upload", key, filename, ttl)
 }
 
 func (d *DiskBackend) PresignDownload(key string, ttl time.Duration) (string, error) {
-	return d.presign("download", "files", key, ttl)
+	return d.presign("download", "files", key, "", ttl)
 }
 
 // confirmAppDir ensures appDir exists with its root entry persisted.
@@ -228,6 +245,56 @@ func (d *DiskBackend) Put(key string, r io.Reader) error {
 		return err
 	}
 	return syncDir(filepath.Dir(p))
+}
+
+// PutIfAbsent streams a new object directly into an O_EXCL target. A failed
+// upload removes only the file created by this call; an existing target is
+// never opened, truncated, or removed.
+func (d *DiskBackend) PutIfAbsent(key string, r io.Reader) (err error) {
+	_, _, p, err := d.file(key)
+	if err != nil {
+		return err
+	}
+	if err := d.confirmAppDir(filepath.Dir(p)); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if errors.Is(err, fs.ErrExist) {
+		// An existing object is retry-safe only after the directory's
+		// durability boundary is confirmed. This also prevents a prior
+		// syncDir failure from becoming false success on retry.
+		if syncErr := d.syncObjectDir(filepath.Dir(p)); syncErr != nil {
+			return syncErr
+		}
+		return ErrObjectExists
+	}
+	if err != nil {
+		return err
+	}
+	removeOnError := true
+	defer func() {
+		if removeOnError {
+			if cleanupErr := os.Remove(p); cleanupErr != nil && !errors.Is(cleanupErr, fs.ErrNotExist) {
+				err = errors.Join(err, errUploadCleanup, cleanupErr)
+			}
+		}
+	}()
+	if _, err := io.Copy(f, r); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := d.syncObjectDir(filepath.Dir(p)); err != nil {
+		return err
+	}
+	removeOnError = false
+	return nil
 }
 
 func (d *DiskBackend) Open(key string) (*Object, error) {

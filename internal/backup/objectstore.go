@@ -11,11 +11,15 @@ import (
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
-// ObjectStore is the minimal object-storage surface the backup pipeline
-// needs: put a full object from a reader of known size, get it back.
+// ObjectStore is the minimal object-storage surface the backup pipeline needs.
+// Promote atomically publishes a completed temporary object when the backend
+// supports atomic server-side copy; an error may be returned after the copy
+// committed, so callers must treat publication status as unknown.
 type ObjectStore interface {
 	Put(ctx context.Context, key string, r io.Reader, size int64) error
 	Get(ctx context.Context, key string) (io.ReadCloser, error)
+	Promote(ctx context.Context, tempKey, finalKey string) error
+	Delete(ctx context.Context, key string) error
 }
 
 // S3Config configures an S3-compatible ObjectStore (AWS S3, MinIO,
@@ -69,6 +73,23 @@ func NewS3Store(ctx context.Context, cfg S3Config) (*S3Store, error) {
 func (s *S3Store) Put(ctx context.Context, key string, r io.Reader, size int64) error {
 	_, err := s.cli.PutObject(ctx, s.bucket, key, r, size, minio.PutObjectOptions{ContentType: "application/x-ndjson"})
 	return err
+}
+
+// Promote publishes tempKey at finalKey with an S3 server-side copy. S3 may
+// commit the copy before reporting a transport error, so an error does not
+// guarantee that finalKey retained its previous value.
+func (s *S3Store) Promote(ctx context.Context, tempKey, finalKey string) error {
+	_, err := s.cli.CopyObject(ctx,
+		minio.CopyDestOptions{Bucket: s.bucket, Object: finalKey},
+		minio.CopySrcOptions{Bucket: s.bucket, Object: tempKey},
+	)
+	return err
+}
+
+// Delete removes one object. Removing a missing object is successful under S3
+// semantics, which makes staging cleanup idempotent.
+func (s *S3Store) Delete(ctx context.Context, key string) error {
+	return s.cli.RemoveObject(ctx, s.bucket, key, minio.RemoveObjectOptions{})
 }
 
 // Get streams one object; the caller must close the reader. A missing key

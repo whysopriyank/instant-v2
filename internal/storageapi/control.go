@@ -23,7 +23,7 @@ func (h *Handler) signedUploadURL(w http.ResponseWriter, r *http.Request, author
 	}
 	id := newFileID()
 	appIDStr := platform.UUIDToStr(req.AppID)
-	urlPath, err := h.Store.PresignUpload(appIDStr+"/"+id, UploadTTL)
+	urlPath, err := h.Store.PresignUpload(appIDStr+"/"+id, req.Filename, UploadTTL)
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, err)
 		return
@@ -76,7 +76,10 @@ func (h *Handler) filesDelete(w http.ResponseWriter, r *http.Request, authorized
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"message": "invalid admin credentials"})
 			return
 		}
-		if err := h.Store.Delete([]string{platform.UUIDToStr(appID) + "/" + id}); err != nil {
+		key := platform.UUIDToStr(appID) + "/" + id
+		unlock := h.lockUploadKey(key)
+		defer unlock()
+		if err := h.Store.Delete([]string{key}); err != nil {
 			httpError(w, http.StatusInternalServerError, err)
 			return
 		}
@@ -97,6 +100,8 @@ func (h *Handler) filesDelete(w http.ResponseWriter, r *http.Request, authorized
 	for _, id := range req.IDs {
 		keys = append(keys, prefix+id)
 	}
+	unlock := h.lockUploadKeys(keys)
+	defer unlock()
 	if err := h.Store.Delete(keys); err != nil {
 		httpError(w, http.StatusInternalServerError, err)
 		return
