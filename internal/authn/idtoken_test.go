@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"github.com/instant-v2/instant-v2/internal/authn"
-	"github.com/instant-v2/instant-v2/internal/platform"
 )
 
 // b64url encodes without padding.
@@ -35,143 +34,16 @@ func mustJSON(t *testing.T, v any) []byte {
 	return b
 }
 
-// TestIDTokenVerification spins a stub JWKS + issuer, signs an RS256
-// id_token, and proves the full verify → sign-in path — plus rejection of a
-// tampered token.
+// Direct id_token exchange stays disabled until the server owns a one-time
+// nonce lifecycle; provider callback tests cover ID-token verification.
 func TestIDTokenVerification(t *testing.T) {
-	svc, h, appID, cleanup := env(t)
+	_, h, _, cleanup := env(t)
 	defer cleanup()
-	appStr := platform.UUIDToStr(appID)
-
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatal(err)
-	}
-	kid := "test-key-1"
-
-	// Stub JWKS endpoint serving the public key.
-	jwksSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		nB64 := b64url(key.N.Bytes())
-		eBig := big.NewInt(int64(key.E))
-		eB64 := b64url(eBig.Bytes())
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"keys": []map[string]any{{
-				"kty": "RSA", "kid": kid, "alg": "RS256",
-				"n": nB64, "e": eB64,
-			}},
-		})
-	}))
-	defer jwksSrv.Close()
-
-	svc.Providers = map[string]*authn.ResolvedProvider{
-		"google": {
-			ClientID: "cid", Issuer: jwksSrv.URL,
-			JWKSURL:  jwksSrv.URL + "/certs",
-			TokenURL: "http://unused/token",
-			UserInfo: "",
-		},
-	}
-
-	signToken := func(claims map[string]any, mutateSig bool) string {
-		header := map[string]any{"alg": "RS256", "kid": kid}
-		si := b64url(mustJSON(t, header)) + "." + b64url(mustJSON(t, claims))
-		digest := sha256.Sum256([]byte(si))
-		sig, err := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, digest[:])
-		if err != nil {
-			t.Fatal(err)
-		}
-		if mutateSig {
-			sig[0] ^= 0xFF
-		}
-		return si + "." + b64url(sig)
-	}
-
-	goodClaims := map[string]any{
-		"iss": jwksSrv.URL, "aud": "cid", "sub": "sub-7",
-		"email": "idtok@user", "email_verified": true,
-		"exp": float64(time.Now().Add(time.Hour).Unix()),
-	}
-	good := signToken(goodClaims, false)
-
-	// Happy path.
-	code, resp := post(t, h, "/runtime/oauth/id_token",
-		map[string]any{"app-id": appStr, "client_name": "google", "id_token": good})
-	if code != 200 {
-		t.Fatalf("id_token: %d %v", code, resp)
-	}
-	userObj := resp["user"].(map[string]any)
-	if userObj["email"] != "idtok@user" {
-		t.Fatalf("email = %v", userObj["email"])
-	}
-	rt := userObj["refresh_token"].(string)
-	u, err := svc.VerifyRefreshToken(context.Background(), appID, rt)
-	if err != nil || u.Email != "idtok@user" {
-		t.Fatalf("refresh after id_token: %v %+v", err, u)
-	}
-
-	// Tampered signature rejected.
-	code, _ = post(t, h, "/runtime/oauth/id_token",
-		map[string]any{"app-id": appStr, "client_name": "google",
-			"id_token": signToken(goodClaims, true)})
-	if code != http.StatusUnauthorized {
-		t.Fatalf("tampered token must be rejected, got %d", code)
-	}
-
-	// Wrong issuer rejected.
-	badIss := map[string]any{}
-	for k, v := range goodClaims {
-		badIss[k] = v
-	}
-	badIss["iss"] = "https://evil.example"
-	code, _ = post(t, h, "/runtime/oauth/id_token",
-		map[string]any{"app-id": appStr, "client_name": "google", "id_token": signToken(badIss, false)})
-	if code != http.StatusUnauthorized {
-		t.Fatalf("issuer mismatch must be rejected, got %d", code)
-	}
-
-	// Expired rejected.
-	expired := map[string]any{}
-	for k, v := range goodClaims {
-		expired[k] = v
-	}
-	expired["exp"] = float64(time.Now().Add(-time.Hour).Unix())
-	code, _ = post(t, h, "/runtime/oauth/id_token",
-		map[string]any{"app-id": appStr, "client_name": "google", "id_token": signToken(expired, false)})
-	if code != http.StatusUnauthorized {
-		t.Fatalf("expired token must be rejected, got %d", code)
-	}
-
-	// Missing exp rejected — exp is mandatory now (previously optional).
-	noExp := map[string]any{}
-	for k, v := range goodClaims {
-		if k != "exp" {
-			noExp[k] = v
-		}
-	}
-	code, _ = post(t, h, "/runtime/oauth/id_token",
-		map[string]any{"app-id": appStr, "client_name": "google", "id_token": signToken(noExp, false)})
-	if code != http.StatusUnauthorized {
-		t.Fatalf("missing exp must be rejected, got %d", code)
-	}
-
-	// Array-form aud containing the client id → accepted (OIDC §3.1.3.7).
-	arrayAud := map[string]any{}
-	for k, v := range goodClaims {
-		arrayAud[k] = v
-	}
-	arrayAud["aud"] = []any{"other-party", "cid"}
-	code, respArr := post(t, h, "/runtime/oauth/id_token",
-		map[string]any{"app-id": appStr, "client_name": "google", "id_token": signToken(arrayAud, false)})
-	if code != 200 {
-		t.Fatalf("array aud containing cid must be accepted, got %d %v", code, respArr)
-	}
-
-	// Array-form aud WITHOUT the client id → rejected.
-	arrayAud["aud"] = []any{"other-party"}
-	code, _ = post(t, h, "/runtime/oauth/id_token",
-		map[string]any{"app-id": appStr, "client_name": "google", "id_token": signToken(arrayAud, false)})
-	if code != http.StatusUnauthorized {
-		t.Fatalf("array aud without cid must be rejected, got %d", code)
+	code, resp := post(t, h, "/runtime/oauth/id_token", map[string]any{
+		"app-id": "11111111-1111-4111-8111-111111111111", "id_token": "anything",
+	})
+	if code != http.StatusNotImplemented || !strings.Contains(resp["message"].(string), "unsupported") {
+		t.Fatalf("direct id_token response = %d %v, want explicit unsupported", code, resp)
 	}
 }
 
@@ -225,9 +97,8 @@ func TestAppleSignerMint(t *testing.T) {
 // claim must be rejected (previously it silently passed — a stolen token
 // replayed without knowledge of the nonce still minted a refresh token).
 func TestIDTokenNonceRequiredWhenBound(t *testing.T) {
-	svc, h, appID, cleanup := env(t)
+	svc, _, _, cleanup := env(t)
 	defer cleanup()
-	appStr := platform.UUIDToStr(appID)
 
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -262,16 +133,11 @@ func TestIDTokenNonceRequiredWhenBound(t *testing.T) {
 		"exp": float64(time.Now().Add(time.Hour).Unix()),
 	})
 
-	code, resp := post(t, h, "/runtime/oauth/id_token",
-		map[string]any{"app-id": appStr, "client_name": "google", "id_token": noNonce, "nonce": "bound-value"})
-	if code != http.StatusUnauthorized {
-		t.Fatalf("nonce-bound request with nonce-less token must be 401, got %d %v", code, resp)
+	if _, err := svc.VerifyIDToken(context.Background(), svc.Providers["google"], noNonce, "bound-value"); err == nil {
+		t.Fatal("nonce-bound verification accepted a nonce-less token")
 	}
 
-	// Sanity: same token WITHOUT a nonce binding is accepted.
-	code, resp = post(t, h, "/runtime/oauth/id_token",
-		map[string]any{"app-id": appStr, "client_name": "google", "id_token": noNonce})
-	if code != 200 {
-		t.Fatalf("unbound flow must keep working, got %d %v", code, resp)
+	if _, err := svc.VerifyIDToken(context.Background(), svc.Providers["google"], noNonce, ""); err != nil {
+		t.Fatalf("unbound verifier rejected the otherwise valid token: %v", err)
 	}
 }

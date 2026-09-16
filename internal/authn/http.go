@@ -23,6 +23,8 @@ type Handler struct {
 	Service *Service
 }
 
+var ErrDirectIDTokenUnsupported = errors.New("authn: direct id_token sign-in unsupported until a server-issued one-time nonce lifecycle exists")
+
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/runtime/auth/send_magic_code":
@@ -98,6 +100,10 @@ func (h *Handler) sendMagicCode(w http.ResponseWriter, r *http.Request) {
 	if err := h.Service.SendMagicCode(r.Context(), appID, email); err != nil {
 		if errors.Is(err, ErrMagicCodeDeliveryUnavailable) {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"message": "magic code delivery unavailable"})
+			return
+		}
+		if errors.Is(err, ErrMagicCodeThrottleUnavailable) {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"message": "magic code throttle unavailable"})
 			return
 		}
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"message": platform.ClientMessage(err)})
@@ -300,27 +306,9 @@ func (h *Handler) oauthToken(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
-// oauthIDToken ports oauth-id-token-callback: the client presents a
-// third-party id_token directly; we verify it against the provider JWKS.
+// oauthIDToken is intentionally not a credential acceptance path. The
+// authorization-code flow owns nonce issuance and one-time state; accepting a
+// client-presented token here would bypass that lifecycle.
 func (h *Handler) oauthIDToken(w http.ResponseWriter, r *http.Request) {
-	m, ok := readBody(w, r)
-	if !ok {
-		return
-	}
-	appID, err := h.parseAppID(m)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"message": err.Error()})
-		return
-	}
-	clientName := str(m, "client_name")
-	if clientName == "" {
-		clientName = "google"
-	}
-	res, err := h.Service.IDTokenSignIn(r.Context(), appID,
-		clientName, str(m, "id_token"), str(m, "nonce"))
-	if err != nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"message": err.Error()})
-		return
-	}
-	writeJSON(w, http.StatusOK, res)
+	writeJSON(w, http.StatusNotImplemented, map[string]any{"message": ErrDirectIDTokenUnsupported.Error()})
 }

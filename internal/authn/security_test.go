@@ -65,8 +65,8 @@ func TestMagicCodeAtomicBurn(t *testing.T) {
 		}
 		close(start)
 		wg.Wait()
-		if wins > 1 {
-			t.Fatalf("round %d: %d concurrent verifications consumed one code", round, wins)
+		if wins != 1 {
+			t.Fatalf("round %d: %d concurrent verifications succeeded, want exactly one", round, wins)
 		}
 	}
 }

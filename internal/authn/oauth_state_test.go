@@ -70,7 +70,7 @@ func TestOAuthPKCECompatibility(t *testing.T) {
 		method, challenge, verifier string
 		want                        bool
 	}{
-		{"plain", "abc", "abc", true}, {"plain", "", "", true},
+		{"plain", "abc", "abc", true}, {"plain", "", "", false},
 		{"S256", challenge, "abc", true}, {"", challenge, "abc", true},
 		{"plain", "abc", "wrong", false}, {"S256", challenge, "wrong", false},
 		{"unknown", "abc", "abc", false},

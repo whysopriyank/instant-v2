@@ -13,10 +13,10 @@ import (
 	"context"
 	"crypto"
 	"crypto/ecdsa"
-	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -84,25 +84,18 @@ func fetchJWKS(ctx context.Context, url string) ([]jwksKey, error) {
 	}
 	out := make([]jwksKey, 0, len(doc.Keys))
 	for _, k := range doc.Keys {
-		jk := jwksKey{KID: k.KID, Alg: k.Alg}
-		switch k.Kty {
-		case "RSA":
-			nb, err1 := base64.RawURLEncoding.DecodeString(k.N)
-			eb, err2 := base64.RawURLEncoding.DecodeString(k.E)
-			if err1 != nil || err2 != nil || len(nb) == 0 || len(eb) == 0 {
-				continue
-			}
-			jk.RSA = &rsa.PublicKey{N: new(big.Int).SetBytes(nb), E: int(new(big.Int).SetBytes(eb).Int64())}
-		case "EC":
-			if k.Crv != "P-256" {
-				continue
-			}
-			xb, _ := base64.RawURLEncoding.DecodeString(k.X)
-			yb, _ := base64.RawURLEncoding.DecodeString(k.Y)
-			jk.EC = &ecdsa.PublicKey{Curve: elliptic.P256(), X: new(big.Int).SetBytes(xb), Y: new(big.Int).SetBytes(yb)}
-		default:
+		// DA-006A selects Google's RS256 OIDC path only. Do not retain keys
+		// whose advertised type or algorithm could be used for downgrade.
+		if k.Kty != "RSA" || k.Alg != "RS256" {
 			continue
 		}
+		jk := jwksKey{KID: k.KID, Alg: k.Alg}
+		nb, err1 := base64.RawURLEncoding.DecodeString(k.N)
+		eb, err2 := base64.RawURLEncoding.DecodeString(k.E)
+		if err1 != nil || err2 != nil || len(nb) == 0 || len(eb) == 0 {
+			continue
+		}
+		jk.RSA = &rsa.PublicKey{N: new(big.Int).SetBytes(nb), E: int(new(big.Int).SetBytes(eb).Int64())}
 		out = append(out, jk)
 	}
 	return out, nil
@@ -121,13 +114,15 @@ func (c *jwksCache) get(ctx context.Context, url string, force bool) ([]jwksKey,
 	c.mu.Unlock()
 
 	keys, err := fetchJWKS(ctx, url)
-	if err != nil && !force && c.keys != nil {
+	if err != nil && !force {
 		// Serve stale keys on transient refresh failures; only a cold cache
 		// propagates the error (verification fails closed without keys).
 		c.mu.Lock()
 		stale := c.keys
 		c.mu.Unlock()
-		return stale, nil
+		if stale != nil {
+			return stale, nil
+		}
 	}
 	if err != nil {
 		return nil, err
@@ -147,15 +142,20 @@ func b64(s string) ([]byte, error) {
 	return base64.RawURLEncoding.DecodeString(s)
 }
 
-// VerifyIDToken validates a third-party OIDC id_token against the issuer's
+// VerifyIDToken validates a Google RS256 OIDC id_token against the issuer's
 // JWKS and returns its claims. Signature + kid + exp + iss + aud are ALL
-// mandatory: a JWKS fetch failure fails closed (there is no unsigned
-// acceptance path), exp must be present and live (60s leeway), the issuer is
-// compared against the configured provider issuer, and the audience must
-// contain the provider client id (string or array form).
+// mandatory; a JWKS fetch failure fails closed, exp must be live, the issuer
+// must be an accepted Google issuer, and the audience must contain the
+// provider client id.
 func (s *Service) VerifyIDToken(ctx context.Context, p *ResolvedProvider, idToken, nonce string) (map[string]any, error) {
-	if p.Issuer == "" || p.ClientID == "" {
-		return nil, errors.New("authn: provider lacks issuer/client-id; refusing unverifiable tokens")
+	return verifyIDTokenWithCache(ctx, p, idToken, nonce, &s.jwks, s.now)
+}
+
+func verifyIDTokenWithCache(ctx context.Context, p *ResolvedProvider, idToken, nonce string,
+	c *jwksCache, nowFn func() time.Time,
+) (map[string]any, error) {
+	if p == nil || p.Issuer == "" || p.ClientID == "" || p.JWKSURL == "" {
+		return nil, errors.New("authn: provider lacks issuer/jwks/client-id; refusing unverifiable tokens")
 	}
 	parts := strings.Split(idToken, ".")
 	if len(parts) != 3 {
@@ -172,29 +172,37 @@ func (s *Service) VerifyIDToken(ctx context.Context, p *ResolvedProvider, idToke
 	if err := json.Unmarshal(headerRaw, &header); err != nil {
 		return nil, err
 	}
-	switch header.Alg {
-	case "RS256", "ES256":
-	default:
+	if header.Alg != "RS256" {
 		return nil, fmt.Errorf("authn: unsupported alg %q", header.Alg)
 	}
-
-	keys, kerr := s.jwks.get(ctx, p.JWKSURL, false)
-	if kerr != nil && header.KID != "" {
-		// Unknown-kid / cold-cache rotation retry.
-		keys, kerr = s.jwks.get(ctx, p.JWKSURL, true)
+	if header.KID == "" {
+		return nil, errors.New("authn: id_token header missing kid")
 	}
+
+	keys, kerr := c.get(ctx, p.JWKSURL, false)
 	if kerr != nil {
 		return nil, fmt.Errorf("authn: jwks fetch: %w", kerr)
 	}
-	var match *jwksKey
-	for i := range keys {
-		if keys[i].KID == header.KID {
-			match = &keys[i]
-			break
+	findKey := func(keys []jwksKey) *jwksKey {
+		for i := range keys {
+			if keys[i].KID == header.KID {
+				return &keys[i]
+			}
 		}
+		return nil
 	}
+	match := findKey(keys)
 	if match == nil {
-		return nil, errors.New("authn: no JWKS key for kid")
+		// A known cache with an unknown kid is the rotation case. Allow
+		// exactly one forced refresh before failing closed.
+		keys, kerr = c.get(ctx, p.JWKSURL, true)
+		if kerr != nil {
+			return nil, fmt.Errorf("authn: jwks refresh: %w", kerr)
+		}
+		match = findKey(keys)
+		if match == nil {
+			return nil, errors.New("authn: no JWKS key for kid")
+		}
 	}
 	sig, serr := b64(parts[2])
 	if serr != nil {
@@ -203,16 +211,9 @@ func (s *Service) VerifyIDToken(ctx context.Context, p *ResolvedProvider, idToke
 	signingInput := idToken[:len(parts[0])+1+len(parts[1])]
 	digest := sha256.Sum256([]byte(signingInput))
 	ok := false
-	switch {
-	case header.Alg == "RS256" && match.RSA != nil:
+	if match.RSA != nil {
 		err = rsa.VerifyPKCS1v15(match.RSA, crypto.SHA256, digest[:], sig)
 		ok = err == nil
-	case header.Alg == "ES256" && match.EC != nil:
-		if len(sig) == 64 {
-			r := new(big.Int).SetBytes(sig[:32])
-			sv := new(big.Int).SetBytes(sig[32:])
-			ok = ecdsa.Verify(match.EC, digest[:], r, sv)
-		}
 	}
 	if !ok {
 		if err != nil {
@@ -235,12 +236,17 @@ func (s *Service) VerifyIDToken(ctx context.Context, p *ResolvedProvider, idToke
 	if !ok {
 		return nil, errors.New("authn: id_token missing exp")
 	}
-	if time.Now().Add(-60 * time.Second).After(time.Unix(int64(exp), 0)) {
+	now := time.Now()
+	if nowFn != nil {
+		now = nowFn()
+	}
+	if !now.Before(time.Unix(int64(exp), 0)) {
 		return nil, errors.New("authn: id_token expired")
 	}
 
-	// iss: REQUIRED and must equal the configured provider issuer.
-	if iss, _ := claims["iss"].(string); iss == "" || iss != p.Issuer {
+	// iss: REQUIRED and must be one of the configured Google issuer forms.
+	iss, _ := claims["iss"].(string)
+	if !acceptedIssuer(p, iss) {
 		return nil, fmt.Errorf("authn: issuer mismatch %q", claims["iss"])
 	}
 
@@ -258,7 +264,8 @@ func (s *Service) VerifyIDToken(ctx context.Context, p *ResolvedProvider, idToke
 		if got == "" {
 			return nil, errors.New("authn: id_token missing required nonce claim")
 		}
-		if got != nonce && hashHex(got) != nonce {
+		if subtle.ConstantTimeCompare([]byte(got), []byte(nonce)) != 1 &&
+			subtle.ConstantTimeCompare([]byte(hashHex(got)), []byte(nonce)) != 1 {
 			return nil, errors.New("authn: nonce mismatch")
 		}
 	}
@@ -268,6 +275,24 @@ func (s *Service) VerifyIDToken(ctx context.Context, p *ResolvedProvider, idToke
 		}
 	}
 	return claims, nil
+}
+
+func acceptedIssuer(p *ResolvedProvider, got string) bool {
+	if got == "" {
+		return false
+	}
+	if got == p.Issuer {
+		return true
+	}
+	for _, accepted := range p.AcceptedIssuers {
+		if got == accepted {
+			return true
+		}
+	}
+	// Google documents both forms; accept the alternate spelling when the
+	// configured issuer is one of those canonical values.
+	return (p.Issuer == "https://accounts.google.com" && got == "accounts.google.com") ||
+		(p.Issuer == "accounts.google.com" && got == "https://accounts.google.com")
 }
 
 // audContains reports whether the aud claim (string, [string], or mixed

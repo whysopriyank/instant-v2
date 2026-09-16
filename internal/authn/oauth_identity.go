@@ -10,6 +10,7 @@ import (
 func (s *Service) VerifyMagicCodeTrusted(ctx context.Context, appID [16]byte,
 	email string, extra map[string]any,
 ) (map[string]any, error) {
+	email = emailKey(email)
 	a, err := s.attrs(ctx, appID)
 	if err != nil {
 		return nil, err

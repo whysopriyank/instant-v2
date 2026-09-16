@@ -24,7 +24,7 @@ var ErrOAuthCode = errors.New("authn: invalid or expired oauth code")
 // strings remain valid representations (including the legacy PKCE method);
 // missing or incorrectly typed fields must not become those empty values.
 type oauthRedirectRecord struct {
-	state, cookieHash, clientName, redirectURI, challenge, method string
+	state, cookieHash, clientName, redirectURI, challenge, method, nonceHash string
 }
 
 type oauthCodeRecord struct {
@@ -34,15 +34,26 @@ type oauthCodeRecord struct {
 
 func decodeOAuthRedirect(values map[[16]byte]any, a oauthAttrs) (oauthRedirectRecord, error) {
 	var record oauthRedirectRecord
-	err := decodeOAuthStrings(values, ErrOAuthState,
+	if err := decodeOAuthStrings(values, ErrOAuthState,
 		oauthStringField{a.state, "state", &record.state},
 		oauthStringField{a.cookieHash, "cookieHash", &record.cookieHash},
 		oauthStringField{a.clientID, "clientId", &record.clientName},
 		oauthStringField{a.redirectURL, "redirectUrl", &record.redirectURI},
 		oauthStringField{a.codeChallenge, "codeChallenge", &record.challenge},
 		oauthStringField{a.ccMethod, "codeChallengeMethod", &record.method},
-	)
-	return record, err
+	); err != nil {
+		return record, err
+	}
+	// The nonce binding is required only for newly-created Google records;
+	// leaving it optional here preserves decoding of older GitHub records.
+	if value, ok := values[a.nonceHash]; ok {
+		text, ok := value.(string)
+		if !ok {
+			return record, fmt.Errorf("%w: nonceHash must be a string", ErrOAuthState)
+		}
+		record.nonceHash = text
+	}
+	return record, nil
 }
 
 func decodeOAuthCode(values map[[16]byte]any, a oauthAttrs) (oauthCodeRecord, error) {
@@ -99,6 +110,9 @@ func hashHex(s string) string {
 }
 
 func verifyPKCE(method, challenge, verifier string) bool {
+	if challenge == "" || verifier == "" {
+		return false
+	}
 	switch method {
 	case "plain":
 		return challenge == verifier

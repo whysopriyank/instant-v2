@@ -1,7 +1,6 @@
 package authn_test
 
 import (
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -12,9 +11,7 @@ import (
 	"github.com/instant-v2/instant-v2/internal/authn"
 )
 
-// A valid first object must not hide unread trailing input. The id-token path
-// reaches ordinary credential validation without any database/provider I/O.
-func TestAuthHTTPRejectsMalformedBody(t *testing.T) {
+func TestAuthHTTPDirectIDTokenIsUnsupportedBeforeBodyParsing(t *testing.T) {
 	h := &authn.Handler{Service: &authn.Service{}}
 	valid := `{"app-id":"11111111-1111-4111-8111-111111111111","id_token":"invalid"}`
 	for name, body := range map[string]string{
@@ -29,12 +26,8 @@ func TestAuthHTTPRejectsMalformedBody(t *testing.T) {
 			r := httptest.NewRequest(http.MethodPost, "/runtime/oauth/id_token", strings.NewReader(body))
 			w := httptest.NewRecorder()
 			h.ServeHTTP(w, r)
-			if w.Code != http.StatusBadRequest {
-				t.Fatalf("malformed body must be rejected before credential validation: status=%d body=%s", w.Code, w.Body.String())
-			}
-			var out map[string]any
-			if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil || out["message"] == "" {
-				t.Fatalf("expected JSON message envelope: body=%s err=%v", w.Body.String(), err)
+			if w.Code != http.StatusNotImplemented || !strings.Contains(w.Body.String(), "unsupported") {
+				t.Fatalf("direct id_token must remain explicitly unsupported: status=%d body=%s", w.Code, w.Body.String())
 			}
 		})
 	}
@@ -47,7 +40,7 @@ func TestAuthHTTPRejectsBodyFailuresBeforeDispatch(t *testing.T) {
 	for _, path := range []string{
 		"/runtime/auth/send_magic_code", "/runtime/auth/verify_magic_code",
 		"/runtime/auth/sign_in_guest", "/runtime/auth/verify_refresh_token",
-		"/runtime/auth/sign_out", "/runtime/oauth/token", "/runtime/oauth/id_token",
+		"/runtime/auth/sign_out", "/runtime/oauth/token",
 	} {
 		t.Run(path, func(t *testing.T) {
 			for _, failure := range []string{"trailing JSON", "read error"} {
@@ -80,9 +73,22 @@ func TestAuthHTTPPreservesValidBodyAliases(t *testing.T) {
 			body := `{"` + appKey + `":"11111111-1111-4111-8111-111111111111","id_token":"invalid","unknown":true}  `
 			w := httptest.NewRecorder()
 			h.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/runtime/oauth/id_token", strings.NewReader(body)))
-			if w.Code != http.StatusUnauthorized {
-				t.Fatalf("valid body must retain credential-validation status: %d %s", w.Code, w.Body.String())
+			if w.Code != http.StatusNotImplemented {
+				t.Fatalf("valid body must retain explicit unsupported status: %d %s", w.Code, w.Body.String())
 			}
 		})
+	}
+}
+
+func TestAuthHTTPDirectIDTokenIsExplicitlyUnsupported(t *testing.T) {
+	h := &authn.Handler{Service: &authn.Service{}}
+	body := `{"app-id":"11111111-1111-4111-8111-111111111111","id_token":"anything"}`
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/runtime/oauth/id_token", strings.NewReader(body)))
+	if w.Code != http.StatusNotImplemented {
+		t.Fatalf("direct id_token status = %d body=%s, want 501", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "unsupported") {
+		t.Fatalf("direct id_token body = %s, want explicit unsupported message", w.Body.String())
 	}
 }

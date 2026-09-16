@@ -4,13 +4,13 @@ package authn
 // collapsed onto the triples store (same choice v1 made for $oauthRedirects /
 // $oauthCodes / $oauthLinks).
 //
-// Supported now: Google, GitHub, and any custom OIDC provider configured on an
-// app client — the full authorization-code dance with PKCE (S256/plain),
-// one-time $oauthCodes burn, http-only state cookie, and refresh-token minting.
+// Supported now: Google OIDC and GitHub OAuth authorization-code flows with
+// PKCE (S256/plain), one-time $oauthCodes burn, http-only state cookie, and
+// refresh-token minting. Apple and custom providers are explicit exclusions.
 //
 // Former deviations, corrected as of the 2026-08-27 drift pass:
-//   - JWKS id_token verification (POST /runtime/oauth/id_token) IS implemented
-//     in idtoken.go: hand-rolled RS256/ES256 against provider JWKS, alg-pinned,
+//   - JWKS id_token verification for Google's authorization-code response is
+//     implemented in idtoken.go: hand-rolled RS256 against provider JWKS,
 //     sig-before-claims, mandatory iss/aud/exp/nonce handling.
 //   - Apple ES256 assertion signing material ships (AppleSigner/.p8 loading in
 //     idtoken.go), but end-to-end Apple token-exchange wiring remains deferred
@@ -33,7 +33,7 @@ import (
 // OAuthStartParams mirror GET /runtime/oauth/start query params.
 type OAuthStartParams struct {
 	AppID               [16]byte
-	ClientName          string // "google" | "github" | ... | custom OIDC name
+	ClientName          string // "google" | "github"
 	RedirectURI         string
 	CodeChallenge       string
 	CodeChallengeMethod string // S256 | plain
@@ -77,6 +77,9 @@ func (s *Service) OAuthStart(ctx context.Context, p OAuthStartParams) (authorize
 	if p.CodeChallengeMethod == "" {
 		p.CodeChallengeMethod = "S256"
 	}
+	if p.CodeChallenge == "" || (p.CodeChallengeMethod != "S256" && p.CodeChallengeMethod != "plain") {
+		return "", "", errors.New("authn: PKCE requires a non-empty challenge and S256 or plain method")
+	}
 	prov, err := s.resolveProvider(ctx, p.AppID, p.ClientName)
 	if err != nil {
 		return "", "", err
@@ -86,19 +89,30 @@ func (s *Service) OAuthStart(ctx context.Context, p OAuthStartParams) (authorize
 		return "", "", err
 	}
 	cookieValue = oauthCookiePrefix + randToken()
+	nonceHash := ""
+	if p.ClientName == "google" {
+		// Keep only the hash in local state. The hash itself is sent as the
+		// provider nonce, so a returned claim can be checked without storing
+		// the raw nonce in the database.
+		nonceHash = hashHex(randToken())
+	}
 	cat, err := s.catalog(ctx, p.AppID)
 	if err != nil {
 		return "", "", err
 	}
 	stateEntity := newRandUUID()
-	if _, err := s.DB.InsertTriples(ctx, p.AppID, cat, []triple.Triple{
+	stateTriples := []triple.Triple{
 		{E: stateEntity, A: a.state, V: p.State},
 		{E: stateEntity, A: a.cookieHash, V: hashHex(cookieValue)},
 		{E: stateEntity, A: a.clientID, V: p.ClientName},
 		{E: stateEntity, A: a.redirectURL, V: p.RedirectURI},
 		{E: stateEntity, A: a.codeChallenge, V: p.CodeChallenge},
 		{E: stateEntity, A: a.ccMethod, V: p.CodeChallengeMethod},
-	}, false); err != nil {
+	}
+	if nonceHash != "" {
+		stateTriples = append(stateTriples, triple.Triple{E: stateEntity, A: a.nonceHash, V: nonceHash})
+	}
+	if _, err := s.DB.InsertTriples(ctx, p.AppID, cat, stateTriples, false); err != nil {
 		return "", "", err
 	}
 	q := url.Values{}
@@ -107,6 +121,9 @@ func (s *Service) OAuthStart(ctx context.Context, p OAuthStartParams) (authorize
 	q.Set("response_type", "code")
 	q.Set("scope", prov.scope)
 	q.Set("state", p.State)
+	if nonceHash != "" {
+		q.Set("nonce", nonceHash)
+	}
 	for k, vs := range prov.extraAuth {
 		for _, v := range vs {
 			q.Set(k, v)
@@ -115,9 +132,10 @@ func (s *Service) OAuthStart(ctx context.Context, p OAuthStartParams) (authorize
 	return prov.authURL + "?" + q.Encode(), cookieValue, nil
 }
 
-// OAuthCallback runs callback: validates state+cookie, exchanges the provider
-// code for userinfo, mints a one-time instant code, returns the app redirect
-// target (`redirect_uri?code=...&_instant_oauth_redirect=true`).
+// OAuthCallback runs callback: validates and burns state in a short local
+// transaction, then exchanges the provider code outside that transaction and
+// mints a one-time instant code. Provider failure therefore requires a fresh
+// authorization start.
 func (s *Service) OAuthCallback(ctx context.Context, appID [16]byte,
 	state, cookieValue, providerCode string,
 ) (redirectTarget string, err error) {
@@ -129,8 +147,8 @@ func (s *Service) OAuthCallback(ctx context.Context, appID [16]byte,
 	if err != nil {
 		return "", err
 	}
-	instantCode := randToken()
 	var record oauthRedirectRecord
+	var prov *ResolvedProvider
 	err = s.DB.WithTx(ctx, func(tx pgx.Tx) error {
 		eid, values, created, err := lockOAuthRecord(ctx, tx, appID, a.state, state, ErrOAuthState)
 		if err != nil {
@@ -143,25 +161,15 @@ func (s *Service) OAuthCallback(ctx context.Context, appID [16]byte,
 		if record.cookieHash != hashHex(cookieValue) || !s.now().Before(created.Add(oauthStateTTL)) {
 			return ErrOAuthState
 		}
-		prov, err := s.resolveProvider(ctx, appID, record.clientName)
+		prov, err = s.resolveProvider(ctx, appID, record.clientName)
 		if err != nil {
 			return err
+		}
+		if record.clientName == "google" && record.nonceHash == "" {
+			return fmt.Errorf("%w: missing Google nonce binding", ErrOAuthState)
 		}
 		if err := validateRedirectOrigin(ctx, tx, appID, record.redirectURI); err != nil {
 			return err
-		}
-		// Hold the state lock through the bounded provider exchange. Failures
-		// leave local state retryable, though a provider may burn its own code.
-		userInfo, err := exchangeUserInfo(ctx, prov, providerCode, record.redirectURI)
-		if err != nil {
-			return err
-		}
-		if !s.now().Before(created.Add(oauthStateTTL)) {
-			return ErrOAuthState
-		}
-		uiJSON, err := json.Marshal(userInfo)
-		if err != nil {
-			return fmt.Errorf("authn: encode oauth userInfo: %w", err)
 		}
 		var consumed []triple.Triple
 		for aid, value := range values {
@@ -174,16 +182,30 @@ func (s *Service) OAuthCallback(ctx context.Context, appID [16]byte,
 		if n != int64(len(consumed)) {
 			return ErrOAuthState
 		}
-		codeEntity := newRandUUID()
-		// Consuming the redirect and persisting its code share one commit.
-		return s.DB.SetTx(ctx, tx, appID, cat, []triple.Triple{
-			{E: codeEntity, A: a.oauthCodeHash, V: hashHex(instantCode)},
-			{E: codeEntity, A: a.oauthCC, V: record.challenge},
-			{E: codeEntity, A: a.oauthCCM, V: record.method},
-			{E: codeEntity, A: a.oauthUserInfo, V: string(uiJSON)},
-		}, false)
+		return nil
 	})
 	if err != nil {
+		return "", err
+	}
+	providerCtx, cancel := context.WithTimeout(ctx, oauthProviderDeadline)
+	userInfo, err := exchangeUserInfoWithNonce(providerCtx, prov, providerCode, record.redirectURI,
+		record.nonceHash, &s.jwks, s.now)
+	cancel()
+	if err != nil {
+		return "", err
+	}
+	uiJSON, err := json.Marshal(userInfo)
+	if err != nil {
+		return "", fmt.Errorf("authn: encode oauth userInfo: %w", err)
+	}
+	instantCode := randToken()
+	codeEntity := newRandUUID()
+	if _, err := s.DB.InsertTriples(ctx, appID, cat, []triple.Triple{
+		{E: codeEntity, A: a.oauthCodeHash, V: hashHex(instantCode)},
+		{E: codeEntity, A: a.oauthCC, V: record.challenge},
+		{E: codeEntity, A: a.oauthCCM, V: record.method},
+		{E: codeEntity, A: a.oauthUserInfo, V: string(uiJSON)},
+	}, false); err != nil {
 		return "", err
 	}
 	sep := "?"

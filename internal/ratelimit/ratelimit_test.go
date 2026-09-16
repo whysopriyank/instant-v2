@@ -232,11 +232,10 @@ func TestUnknownClassFallsBack(t *testing.T) {
 	}
 }
 
-// Audit H4: the bucket map must be bounded. Distinct client-chosen keys used
-// to allocate forever; now idle buckets evict (lazily at cap and via
-// SweepLoop) and over-cap admits untracked rather than locking new callers
-// out.
-func TestBucketMapBoundedAndFailOpen(t *testing.T) {
+// Audit H4 / DA-007: the bucket map must be bounded. Idle buckets evict
+// lazily at cap and via SweepLoop. Under DEC-001, over-cap requests fail closed
+// with bounded retry duration rather than admitting untracked.
+func TestBucketMapBoundedAndFailClosed(t *testing.T) {
 	base := time.Unix(0, 0)
 	clock := base
 	l := New(Config{Classes: map[Class]ClassConfig{
@@ -253,10 +252,15 @@ func TestBucketMapBoundedAndFailOpen(t *testing.T) {
 	if l.lenBuckets() != 3 {
 		t.Fatalf("want 3 buckets, got %d", l.lenBuckets())
 	}
-	// Over cap with nothing evictable: still allowed, not tracked.
+	// Over cap with nothing evictable: fail-closed denial with bounded retry.
 	for i := 10; i < 20; i++ {
-		if ok, _ := l.Allow(fmt.Sprintf("app-%d", i), ClassWS); !ok {
-			t.Fatalf("over-cap request must fail open (allowed), key app-%d denied", i)
+		key := fmt.Sprintf("app-%d", i)
+		ok, retryAfter := l.Allow(key, ClassWS)
+		if ok {
+			t.Fatalf("over-cap request must fail closed (denied), key %s allowed", key)
+		}
+		if retryAfter <= 0 || retryAfter > time.Minute {
+			t.Fatalf("key %s retryAfter = %s, want bounded (0, 1m]", key, retryAfter)
 		}
 		if l.lenBuckets() > 3 {
 			t.Fatalf("bucket map grew past cap: %d", l.lenBuckets())
@@ -352,8 +356,9 @@ func TestShardedConcurrency(t *testing.T) {
 // TestConcurrentAdmissionsBoundedAndNonBlocking forces many distinct keys to
 // contend for a tiny global bucket cap. New keys must not deadlock while
 // sweeping other shards, and the tracked bucket count must never exceed the
-// configured cap. Requests that arrive at a full, non-idle cap are fail-open
-// and therefore still admitted without creating another tracked bucket.
+// configured cap. Under DEC-001 (fail-closed overflow), exactly maxBuckets
+// are admitted and the remaining concurrent admissions are denied with a
+// bounded retry duration without blocking or exceeding the cap.
 func TestConcurrentAdmissionsBoundedAndNonBlocking(t *testing.T) {
 	const (
 		maxBuckets = 2
@@ -386,13 +391,21 @@ func TestConcurrentAdmissionsBoundedAndNonBlocking(t *testing.T) {
 
 		start := make(chan struct{})
 		var wg sync.WaitGroup
+		var admits atomic.Int32
+		var denials atomic.Int32
 		for i := range keys {
 			wg.Add(1)
 			go func(appID string) {
 				defer wg.Done()
 				<-start
-				if ok, _ := l.Allow(appID, ClassTransact); !ok {
-					t.Errorf("round %d: %s was denied under cap pressure", round, appID)
+				ok, retryAfter := l.Allow(appID, ClassTransact)
+				if ok {
+					admits.Add(1)
+				} else {
+					denials.Add(1)
+					if retryAfter <= 0 || retryAfter > time.Minute {
+						t.Errorf("round %d: %s retryAfter = %s, want bounded (0, 1m]", round, appID, retryAfter)
+					}
 				}
 			}(keys[i])
 		}
@@ -409,6 +422,12 @@ func TestConcurrentAdmissionsBoundedAndNonBlocking(t *testing.T) {
 			t.Fatalf("round %d: concurrent admissions did not finish", round)
 		}
 
+		if got := admits.Load(); got != maxBuckets {
+			t.Fatalf("round %d: admits = %d, want cap %d", round, got, maxBuckets)
+		}
+		if got := denials.Load(); got != int32(workers-maxBuckets) {
+			t.Fatalf("round %d: denials = %d, want %d", round, got, workers-maxBuckets)
+		}
 		if got := l.total.Load(); got > maxBuckets {
 			t.Fatalf("round %d: tracked bucket counter %d exceeds cap %d", round, got, maxBuckets)
 		}
@@ -419,5 +438,248 @@ func TestConcurrentAdmissionsBoundedAndNonBlocking(t *testing.T) {
 		if got != maxBuckets {
 			t.Fatalf("round %d: tracked bucket map size %d, want cap %d after initial admissions", round, got, maxBuckets)
 		}
+	}
+}
+
+// DA-007 / DEC-001: saturated bucket cap must fail closed for rotating identities.
+func TestRotatingIdentitiesSaturationFailClosed(t *testing.T) {
+	const cap = 3
+	l := New(Config{
+		Classes: map[Class]ClassConfig{
+			ClassTransact: {Rate: 50, Burst: 5},
+		},
+		MaxBuckets: cap,
+		IdleTTL:    time.Hour,
+	})
+
+	// Fill to cap with known identities.
+	for i := 0; i < cap; i++ {
+		key := fmt.Sprintf("legit-app-%d", i)
+		if err := l.Acquire(context.Background(), key, ClassTransact); err != nil {
+			t.Fatalf("initial bucket %d must be admitted, got: %v", i, err)
+		}
+	}
+	if got := l.lenBuckets(); got != cap {
+		t.Fatalf("want %d buckets, got %d", cap, got)
+	}
+
+	// Saturated: rotating identities must be denied with bounded retryAfter and Error.
+	for i := 0; i < 10; i++ {
+		rotKey := fmt.Sprintf("rotating-app-%d", i)
+		ok, retryAfter := l.Allow(rotKey, ClassTransact)
+		if ok {
+			t.Fatalf("rotating key %s admitted under saturated cap; want fail-closed denial", rotKey)
+		}
+		if retryAfter <= 0 || retryAfter > time.Minute {
+			t.Fatalf("rotating key %s retryAfter = %s, want bounded (0, 1m]", rotKey, retryAfter)
+		}
+
+		err := l.Acquire(context.Background(), rotKey, ClassTransact)
+		if err == nil {
+			t.Fatalf("Acquire for rotating key %s succeeded under saturated cap; want denial error", rotKey)
+		}
+		var rlErr *Error
+		if !errors.As(err, &rlErr) {
+			t.Fatalf("want *Error, got %T: %v", err, err)
+		}
+		if rlErr.AppID != rotKey {
+			t.Fatalf("rlErr.AppID = %q, want %q", rlErr.AppID, rotKey)
+		}
+		if rlErr.Class != ClassTransact {
+			t.Fatalf("rlErr.Class = %q, want %q", rlErr.Class, ClassTransact)
+		}
+		if rlErr.RetryAfter <= 0 || rlErr.RetryAfter > time.Minute {
+			t.Fatalf("rlErr.RetryAfter = %s, want bounded (0, 1m]", rlErr.RetryAfter)
+		}
+	}
+
+	// Ensure bucket count did not grow past cap.
+	if got := l.lenBuckets(); got != cap {
+		t.Fatalf("bucket map grew past cap under rotating identity abuse: got %d, want %d", got, cap)
+	}
+}
+
+// TestOldKeyFairnessUnderSaturation proves that existing tracked buckets
+// continue to refill and serve requests fairly even when the bucket cap is
+// saturated and new identities are being aggressively rejected.
+func TestOldKeyFairnessUnderSaturation(t *testing.T) {
+	fc := newFakeClock()
+	const cap = 2
+	l := New(Config{
+		Classes: map[Class]ClassConfig{
+			ClassTransact: {Rate: 10, Burst: 3},
+		},
+		MaxBuckets: cap,
+		IdleTTL:    time.Hour,
+	})
+	l.now = fc.Now
+
+	// Track two legitimate keys.
+	if ok, _ := l.Allow("tenant-alpha", ClassTransact); !ok {
+		t.Fatal("tenant-alpha must be admitted")
+	}
+	if ok, _ := l.Allow("tenant-beta", ClassTransact); !ok {
+		t.Fatal("tenant-beta must be admitted")
+	}
+	if l.lenBuckets() != cap {
+		t.Fatalf("want %d buckets, got %d", cap, l.lenBuckets())
+	}
+
+	// Saturated: new identity flood is rejected fail-closed.
+	for i := 0; i < 50; i++ {
+		attacker := fmt.Sprintf("attacker-%d", i)
+		if ok, retry := l.Allow(attacker, ClassTransact); ok || retry <= 0 {
+			t.Fatalf("attacker %s was admitted or got non-positive retry (%v)", attacker, retry)
+		}
+	}
+
+	// tenant-alpha still had 2 tokens remaining from burst 3:
+	if ok, _ := l.Allow("tenant-alpha", ClassTransact); !ok {
+		t.Fatal("tenant-alpha second request denied; want old-key fairness")
+	}
+	if ok, _ := l.Allow("tenant-alpha", ClassTransact); !ok {
+		t.Fatal("tenant-alpha third request denied; want old-key fairness")
+	}
+	// Drained: now tenant-alpha is rate-limited according to its own bucket, not cap exhaustion.
+	if ok, retry := l.Allow("tenant-alpha", ClassTransact); ok {
+		t.Fatal("tenant-alpha admitted over burst")
+	} else if retry <= 0 || retry > 150*time.Millisecond {
+		t.Fatalf("tenant-alpha retry = %s, want rate-limited ~100ms", retry)
+	}
+
+	// Advance clock by 100ms: tenant-alpha refills 1 token.
+	fc.Advance(100 * time.Millisecond)
+	if ok, _ := l.Allow("tenant-alpha", ClassTransact); !ok {
+		t.Fatal("tenant-alpha refilled token not granted")
+	}
+
+	// Attacker flood still fails closed:
+	for i := 50; i < 70; i++ {
+		attacker := fmt.Sprintf("attacker-%d", i)
+		if ok, _ := l.Allow(attacker, ClassTransact); ok {
+			t.Fatalf("attacker %s admitted while tenants remain active", attacker)
+		}
+	}
+
+	// Tracked bucket count remains strictly capped at 2.
+	if got := l.lenBuckets(); got != cap {
+		t.Fatalf("bucket map size = %d, want %d", got, cap)
+	}
+}
+
+// TestAcquireCancellationAndSaturatedErrorSemantics verifies:
+// 1. Acquire honors pre-canceled and deadline-exceeded contexts.
+// 2. Denied saturated new keys return structured *Error with bounded RetryAfter.
+// 3. HTTPMiddleware maps saturated new-key denials to HTTP 429 with integer Retry-After >= 1.
+func TestAcquireCancellationAndSaturatedErrorSemantics(t *testing.T) {
+	fc := newFakeClock()
+	l := New(Config{
+		Classes: map[Class]ClassConfig{
+			ClassWS: {Rate: 100, Burst: 2},
+		},
+		MaxBuckets: 1,
+		IdleTTL:    time.Hour,
+	})
+	l.now = fc.Now
+
+	// Fill the single bucket.
+	if err := l.Acquire(context.Background(), "app-sole", ClassWS); err != nil {
+		t.Fatalf("initial acquire failed: %v", err)
+	}
+
+	// 1. Canceled context returns context.Canceled without creating bucket.
+	ctxCancel, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := l.Acquire(ctxCancel, "app-new", ClassWS); !errors.Is(err, context.Canceled) {
+		t.Fatalf("want context.Canceled, got: %v", err)
+	}
+	ctxExpired, cancelExpired := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelExpired()
+	if err := l.Acquire(ctxExpired, "app-expired", ClassWS); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("want context.DeadlineExceeded, got: %v", err)
+	}
+
+	// 2. Saturated Acquire returns structured *Error.
+	err := l.Acquire(context.Background(), "app-new", ClassWS)
+	if err == nil {
+		t.Fatal("saturated new key acquire succeeded; want denial")
+	}
+	var rlErr *Error
+	if !errors.As(err, &rlErr) {
+		t.Fatalf("want *Error, got %T: %v", err, err)
+	}
+	if rlErr.AppID != "app-new" || rlErr.Class != ClassWS {
+		t.Fatalf("unexpected *Error fields: %#v", rlErr)
+	}
+	if rlErr.RetryAfter <= 0 || rlErr.RetryAfter > time.Minute {
+		t.Fatalf("RetryAfter = %s, want bounded (0, 1m]", rlErr.RetryAfter)
+	}
+	expectedMsg := fmt.Sprintf("ratelimit: app app-new class ws limited; retry after %s",
+		rlErr.RetryAfter.Round(time.Millisecond))
+	if rlErr.Error() != expectedMsg {
+		t.Fatalf("Error() = %q, want %q", rlErr.Error(), expectedMsg)
+	}
+
+	// 3. HTTPMiddleware surfaces 429 with Retry-After header.
+	hits := 0
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits++ })
+	classify := func(r *http.Request) (string, Class) { return r.Header.Get("X-App-ID"), ClassWS }
+	h := HTTPMiddleware(next, l, classify)
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.Header.Set("X-App-ID", "app-blocked-http")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("HTTP code = %d, want 429", rec.Code)
+	}
+	ra := rec.Header().Get("Retry-After")
+	if ra == "" {
+		t.Fatal("missing Retry-After header on 429")
+	}
+	if n, err := strconv.Atoi(ra); err != nil || n < 1 {
+		t.Fatalf("invalid Retry-After header value: %q (err: %v)", ra, err)
+	}
+	if hits != 0 {
+		t.Fatalf("next handler was invoked %d times, want 0", hits)
+	}
+}
+
+// TestSaturatedOverflowRetryTracksEviction proves the overflow retry is tied
+// to the first bucket that can actually be evicted, not to token refill for
+// the denied identity.
+func TestSaturatedOverflowRetryTracksEviction(t *testing.T) {
+	base := time.Unix(1_700_000_000, 0)
+	now := base
+	l := New(Config{
+		Classes:    map[Class]ClassConfig{ClassWS: {Rate: 1000, Burst: 2}},
+		MaxBuckets: 2,
+		IdleTTL:    10 * time.Second,
+	})
+	l.now = func() time.Time { return now }
+
+	if ok, _ := l.Allow("oldest", ClassWS); !ok {
+		t.Fatal("oldest bucket admission failed")
+	}
+	now = now.Add(3 * time.Second)
+	if ok, _ := l.Allow("newer", ClassWS); !ok {
+		t.Fatal("newer bucket admission failed")
+	}
+
+	ok, retry := l.Allow("overflow", ClassWS)
+	if ok {
+		t.Fatal("saturated overflow admitted")
+	}
+	if retry != 7*time.Second {
+		t.Fatalf("overflow retry = %s, want 7s until oldest eviction", retry)
+	}
+
+	now = now.Add(7*time.Second + time.Nanosecond)
+	if ok, _ := l.Allow("overflow", ClassWS); !ok {
+		t.Fatal("overflow key not admitted after idle eviction became eligible")
+	}
+	if got := l.lenBuckets(); got != 2 {
+		t.Fatalf("bucket count = %d, want capped at 2", got)
 	}
 }

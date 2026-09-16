@@ -32,7 +32,7 @@ func TestOAuthRejectsCorruptRedirectRecords(t *testing.T) {
 	}))
 	defer provider.Close()
 	svc.Providers = map[string]*authn.ResolvedProvider{
-		"test": {TokenURL: provider.URL + "/token", UserInfo: provider.URL + "/userinfo"},
+		"github": {ClientID: "client", ClientSecret: "secret", TokenURL: provider.URL + "/token", UserInfo: provider.URL + "/userinfo"},
 	}
 	for _, field := range []string{"cookieHash", "clientId", "redirectUrl", "codeChallenge", "codeChallengeMethod"} {
 		for _, missing := range []bool{false, true} {
@@ -42,7 +42,7 @@ func TestOAuthRejectsCorruptRedirectRecords(t *testing.T) {
 			}
 			t.Run(name, func(t *testing.T) {
 				_, cookie, err := svc.OAuthStart(ctx, authn.OAuthStartParams{
-					AppID: appID, ClientName: "test", RedirectURI: "http://app/cb", State: name,
+					AppID: appID, ClientName: "github", RedirectURI: "http://app/cb", State: name,
 					CodeChallenge: "verifier", CodeChallengeMethod: "plain",
 				})
 				if err != nil {
@@ -92,6 +92,7 @@ func TestOAuthRejectsCorruptCodeRecords(t *testing.T) {
 	// actual stored representation instead of testing a copied decoder.
 	if _, _, err := svc.OAuthStart(ctx, authn.OAuthStartParams{
 		AppID: appID, ClientName: "google", RedirectURI: "http://app/cb",
+		CodeChallenge: "verifier", CodeChallengeMethod: "plain",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -152,6 +153,7 @@ func TestOAuthCodeRecordCompatibility(t *testing.T) {
 	ctx := context.Background()
 	if _, _, err := svc.OAuthStart(ctx, authn.OAuthStartParams{
 		AppID: appID, ClientName: "google", RedirectURI: "http://app/cb",
+		CodeChallenge: "verifier", CodeChallengeMethod: "plain",
 	}); err != nil {
 		t.Fatal(err)
 	}

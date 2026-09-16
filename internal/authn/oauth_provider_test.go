@@ -16,9 +16,11 @@ func TestQualityBuiltinOAuthProviders(t *testing.T) {
 		{"github", "https://github.com/login/oauth/authorize", "https://github.com/login/oauth/access_token", "https://api.github.com/user", "read:user user:email"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("INSTANT_OAUTH_"+strings.ToUpper(tc.name)+"_CLIENT_ID", "client & id")
-			t.Setenv("INSTANT_OAUTH_"+strings.ToUpper(tc.name)+"_CLIENT_SECRET", "fixture & secret")
-			p, err := (&Service{}).resolveProvider(context.Background(), [16]byte{}, tc.name)
+			svc := &Service{GoogleClientID: "client & id", GoogleClientSecret: "fixture & secret"}
+			if tc.name == "github" {
+				svc = &Service{GitHubClientID: "client & id", GitHubClientSecret: "fixture & secret"}
+			}
+			p, err := svc.resolveProvider(context.Background(), [16]byte{}, tc.name)
 			if err != nil {
 				t.Fatal(err)
 			}

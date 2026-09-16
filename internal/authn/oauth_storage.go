@@ -18,6 +18,7 @@ type oauthAttrs struct {
 	redirectURL   [16]byte // $oauthRedirects.redirectUrl
 	codeChallenge [16]byte // $oauthRedirects.codeChallenge
 	ccMethod      [16]byte // $oauthRedirects.codeChallengeMethod
+	nonceHash     [16]byte // $oauthRedirects.nonceHash (Google only)
 
 	oauthCodeHash [16]byte // $oauthCodes.codeHash
 	oauthCC       [16]byte // $oauthCodes.codeChallenge
@@ -102,6 +103,9 @@ func (s *Service) oaAttrs(ctx context.Context, appID [16]byte) (oauthAttrs, erro
 		return out, e
 	}
 	if out.ccMethod, e = get("$oauthRedirects", "codeChallengeMethod", false); e != nil {
+		return out, e
+	}
+	if out.nonceHash, e = get("$oauthRedirects", "nonceHash", false); e != nil {
 		return out, e
 	}
 	if out.oauthCodeHash, e = get("$oauthCodes", "codeHash", true); e != nil {

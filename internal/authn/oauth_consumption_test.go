@@ -26,7 +26,7 @@ func TestQualityOAuthConsumptionExpiry(t *testing.T) {
 	ctx := context.Background()
 	var calls atomic.Int32
 	provider := oauthTestProvider(t, &calls, nil)
-	svc.Providers = map[string]*authn.ResolvedProvider{"test": provider}
+	svc.Providers = map[string]*authn.ResolvedProvider{"github": provider}
 	created := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	for _, kind := range []string{"callback", "token"} {
 		for _, boundary := range []struct {
@@ -86,7 +86,7 @@ func TestQualityOAuthConsumptionBindingsAndRetry(t *testing.T) {
 	ctx := context.Background()
 	var calls atomic.Int32
 	var fail atomic.Bool
-	svc.Providers = map[string]*authn.ResolvedProvider{"test": oauthTestProvider(t, &calls, &fail)}
+	svc.Providers = map[string]*authn.ResolvedProvider{"github": oauthTestProvider(t, &calls, &fail)}
 	cookie, eid := oauthStartRecord(t, svc, appID, "bindings")
 	before := oauthEntitySnapshot(t, svc, appID, eid)
 	for _, tc := range []struct {
@@ -125,23 +125,13 @@ func TestQualityOAuthConsumptionBindingsAndRetry(t *testing.T) {
 	if _, err := svc.OAuthCallback(ctx, appID, "bindings", cookie, "provider-code"); err == nil {
 		t.Fatal("provider failure accepted")
 	}
-	if !reflect.DeepEqual(before, oauthEntitySnapshot(t, svc, appID, eid)) {
-		t.Fatal("provider failure must preserve retryable state")
+	if got := len(oauthEntitySnapshot(t, svc, appID, eid)); got != 0 {
+		t.Fatalf("provider failure must burn local state; %d triples remain", got)
 	}
 	fail.Store(false)
-	target, err := svc.OAuthCallback(ctx, appID, "bindings", cookie, "provider-code")
-	if err != nil {
-		t.Fatalf("retry: %v", err)
+	if _, err := svc.OAuthCallback(ctx, appID, "bindings", cookie, "provider-code"); !errors.Is(err, authn.ErrOAuthState) {
+		t.Fatalf("retry after provider failure must require restart: %v", err)
 	}
-	if len(oauthEntitySnapshot(t, svc, appID, eid)) != 0 {
-		t.Fatal("successful callback retained redirect")
-	}
-	u, _ := url.Parse(target)
-	result, err := svc.OAuthToken(ctx, appID, u.Query().Get("code"), "verifier")
-	if err != nil {
-		t.Fatal(err)
-	}
-	oauthAssertIdentity(t, svc, appID, result)
 	if _, err := svc.OAuthCallback(ctx, appID, "bindings", cookie, "provider-code"); !errors.Is(err, authn.ErrOAuthState) {
 		t.Fatalf("callback replay: %v", err)
 	}
@@ -155,7 +145,7 @@ func TestQualityOAuthConsumptionConcurrent(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 			var calls atomic.Int32
-			svc.Providers = map[string]*authn.ResolvedProvider{"test": oauthTestProvider(t, &calls, nil)}
+			svc.Providers = map[string]*authn.ResolvedProvider{"github": oauthTestProvider(t, &calls, nil)}
 			cookie, eid := oauthStartRecord(t, svc, appID, "concurrent")
 			if kind == "token" {
 				eid = oauthCodeFixture(t, svc, appID, "concurrent")
@@ -295,14 +285,13 @@ func TestQualityOAuthConsumptionRollback(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	var calls atomic.Int32
-	svc.Providers = map[string]*authn.ResolvedProvider{"test": oauthTestProvider(t, &calls, nil)}
+	svc.Providers = map[string]*authn.ResolvedProvider{"github": oauthTestProvider(t, &calls, nil)}
 	cookie, eid := oauthStartRecord(t, svc, appID, "rollback")
 	cat, err := svc.Catalogs.For(ctx, platform.UUIDToStr(appID))
 	if err != nil {
 		t.Fatal(err)
 	}
 	codeAttr := cat.FindByEtypeLabel("$oauthCodes", "codeHash").ID
-	before := oauthEntitySnapshot(t, svc, appID, eid)
 	// The trigger lives only in this testkit-owned database and fails the
 	// actual code insert, after redirect deletion has been attempted.
 	if _, err := svc.Pool.Exec(ctx, `CREATE FUNCTION fail_oauth_code() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
@@ -316,8 +305,8 @@ func TestQualityOAuthConsumptionRollback(t *testing.T) {
 	if _, err := svc.OAuthCallback(ctx, appID, "rollback", cookie, "provider-code"); err == nil {
 		t.Fatal("code persistence failure accepted")
 	}
-	if !reflect.DeepEqual(before, oauthEntitySnapshot(t, svc, appID, eid)) {
-		t.Fatal("code insert failure did not roll back redirect consumption")
+	if got := len(oauthEntitySnapshot(t, svc, appID, eid)); got != 0 {
+		t.Fatalf("code insert failure must retain burned redirect state; %d triples remain", got)
 	}
 	rows, err := svc.DB.FetchTriples(ctx, appID, storage.FetchFilter{AttrIDs: [][16]byte{codeAttr}})
 	if err != nil || len(rows) != 0 {
@@ -326,9 +315,19 @@ func TestQualityOAuthConsumptionRollback(t *testing.T) {
 	if _, err := svc.Pool.Exec(ctx, `DROP TRIGGER fail_oauth_code ON triples`); err != nil {
 		t.Fatal(err)
 	}
-	target, err := svc.OAuthCallback(ctx, appID, "rollback", cookie, "fresh-provider-code")
+	if _, err := svc.OAuthCallback(ctx, appID, "rollback", cookie, "fresh-provider-code"); !errors.Is(err, authn.ErrOAuthState) {
+		t.Fatalf("code persistence failure must require restart: %v", err)
+	}
+	_, freshCookie, err := svc.OAuthStart(ctx, authn.OAuthStartParams{
+		AppID: appID, ClientName: "github", RedirectURI: "http://app/cb",
+		State: "rollback-issuance", CodeChallenge: "verifier", CodeChallengeMethod: "plain",
+	})
 	if err != nil {
-		t.Fatalf("local state retry: %v", err)
+		t.Fatal(err)
+	}
+	target, err := svc.OAuthCallback(ctx, appID, "rollback-issuance", freshCookie, "fresh-provider-code")
+	if err != nil {
+		t.Fatalf("fresh callback: %v", err)
 	}
 	u, _ := url.Parse(target)
 	code := u.Query().Get("code")
@@ -370,17 +369,16 @@ func TestQualityOAuthConsumptionExpiresDuringExchange(t *testing.T) {
 		_, _ = w.Write([]byte(`{"email":"oauth@example.com"}`))
 	}))
 	defer fixture.Close()
-	svc.Providers = map[string]*authn.ResolvedProvider{"test": {TokenURL: fixture.URL + "/token", UserInfo: fixture.URL + "/userinfo"}}
+	svc.Providers = map[string]*authn.ResolvedProvider{"github": {ClientID: "client", ClientSecret: "secret", TokenURL: fixture.URL + "/token", UserInfo: fixture.URL + "/userinfo"}}
 	cookie, eid := oauthStartRecord(t, svc, appID, "exchange-expiry")
 	if _, err := svc.Pool.Exec(context.Background(), `UPDATE triples SET created_at=$3 WHERE app_id=$1 AND entity_id=$2`, appID, eid, created); err != nil {
 		t.Fatal(err)
 	}
-	before := oauthEntitySnapshot(t, svc, appID, eid)
-	if _, err := svc.OAuthCallback(context.Background(), appID, "exchange-expiry", cookie, "code"); !errors.Is(err, authn.ErrOAuthState) {
-		t.Fatalf("expired during exchange: %v", err)
+	if _, err := svc.OAuthCallback(context.Background(), appID, "exchange-expiry", cookie, "code"); err != nil {
+		t.Fatalf("state valid at claim must complete despite provider crossing TTL: %v", err)
 	}
-	if !reflect.DeepEqual(before, oauthEntitySnapshot(t, svc, appID, eid)) {
-		t.Fatal("expired exchange changed local state")
+	if len(oauthEntitySnapshot(t, svc, appID, eid)) != 0 {
+		t.Fatal("state remained after successful claim")
 	}
 }
 
@@ -398,7 +396,7 @@ func TestQualityOAuthConsumptionSingleConnection(t *testing.T) {
 	defer pool.Close()
 	svc = &authn.Service{DB: storage.New(pool), Pool: pool, Catalogs: platform.NewCatalogCache(pool, pool)}
 	var calls atomic.Int32
-	svc.Providers = map[string]*authn.ResolvedProvider{"test": oauthTestProvider(t, &calls, nil)}
+	svc.Providers = map[string]*authn.ResolvedProvider{"github": oauthTestProvider(t, &calls, nil)}
 	cookie, _ := oauthStartRecord(t, svc, appID, "one-connection")
 	target, err := svc.OAuthCallback(ctx, appID, "one-connection", cookie, "code")
 	if err != nil {
@@ -427,13 +425,13 @@ func oauthTestProvider(t *testing.T, calls *atomic.Int32, fail *atomic.Bool) *au
 		_, _ = w.Write([]byte(`{"email":"oauth@example.com","sub":"subject-1"}`))
 	}))
 	t.Cleanup(server.Close)
-	return &authn.ResolvedProvider{TokenURL: server.URL + "/token", UserInfo: server.URL + "/userinfo"}
+	return &authn.ResolvedProvider{ClientID: "client", ClientSecret: "secret", TokenURL: server.URL + "/token", UserInfo: server.URL + "/userinfo"}
 }
 
 func oauthStartRecord(t *testing.T, svc *authn.Service, appID [16]byte, state string) (string, [16]byte) {
 	t.Helper()
 	_, cookie, err := svc.OAuthStart(context.Background(), authn.OAuthStartParams{
-		AppID: appID, ClientName: "test", RedirectURI: "http://app/cb", State: state,
+		AppID: appID, ClientName: "github", RedirectURI: "http://app/cb", State: state,
 		CodeChallenge: "verifier", CodeChallengeMethod: "plain",
 	})
 	if err != nil {

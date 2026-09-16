@@ -3,11 +3,11 @@ package authn
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"time"
 )
@@ -18,6 +18,8 @@ type provider struct {
 	tokenURL string
 	userInfo string
 	scope    string
+	issuer   string
+	jwksURL  string
 }
 
 var builtin = map[string]provider{
@@ -26,6 +28,8 @@ var builtin = map[string]provider{
 		tokenURL: "https://oauth2.googleapis.com/token",
 		userInfo: "https://openidconnect.googleapis.com/v1/userinfo",
 		scope:    "openid email profile",
+		issuer:   "https://accounts.google.com",
+		jwksURL:  "https://www.googleapis.com/oauth2/v3/certs",
 	},
 	"github": {
 		authURL:  "https://github.com/login/oauth/authorize",
@@ -42,15 +46,16 @@ var builtin = map[string]provider{
 	},
 }
 
-// ResolvedProvider is a concrete OAuth provider configuration (builtin or
-// injected; per-app custom OIDC rows land with Phase 5 persistence).
+// ResolvedProvider is a concrete Google or GitHub authorization-code
+// configuration (builtin or test-injected).
 type ResolvedProvider struct {
-	ClientID     string
-	ClientSecret string
-	TokenURL     string
-	UserInfo     string
-	Issuer       string // OIDC issuer for id_token verification
-	JWKSURL      string // JWKS discovery URL
+	ClientID        string
+	ClientSecret    string
+	TokenURL        string
+	UserInfo        string
+	Issuer          string // OIDC issuer for id_token verification
+	JWKSURL         string // JWKS discovery URL
+	AcceptedIssuers []string
 
 	authURL   string
 	scope     string
@@ -61,25 +66,41 @@ type ResolvedProvider struct {
 // clients arrive later with apps.rules persistence (Phase 5). Google and GitHub
 // support the userinfo flow; Apple's separate exchange path remains deferred.
 func (s *Service) resolveProvider(ctx context.Context, appID [16]byte, name string) (*ResolvedProvider, error) {
-	envClientID := envOr("INSTANT_OAUTH_"+strings.ToUpper(name)+"_CLIENT_ID", "")
-	envSecret := envOr("INSTANT_OAUTH_"+strings.ToUpper(name)+"_CLIENT_SECRET", "")
-	if p, ok := s.Providers[name]; ok {
-		return p, nil
+	if name != "google" && name != "github" {
+		return nil, fmt.Errorf("authn: oauth provider %q is unsupported; only Google and GitHub authorization-code flows are enabled", name)
 	}
-	if name == "apple" {
-		return nil, fmt.Errorf("authn: oauth provider %q is unsupported for authorization-code exchange", name)
+	clientID, secret := s.GoogleClientID, s.GoogleClientSecret
+	if name == "github" {
+		clientID, secret = s.GitHubClientID, s.GitHubClientSecret
+	}
+	if p, ok := s.Providers[name]; ok {
+		if p == nil {
+			return nil, fmt.Errorf("authn: oauth provider %q has no configuration", name)
+		}
+		if err := validateProviderCredentials(name, p.ClientID, p.ClientSecret); err != nil {
+			return nil, err
+		}
+		return p, nil
 	}
 	base, ok := builtin[name]
 	if !ok {
 		return nil, fmt.Errorf("authn: unknown oauth provider %q", name)
 	}
 	out := &ResolvedProvider{
-		ClientID:     envClientID,
-		ClientSecret: envSecret,
+		ClientID:     clientID,
+		ClientSecret: secret,
 		TokenURL:     base.tokenURL,
 		UserInfo:     base.userInfo,
 		authURL:      base.authURL,
 		scope:        base.scope,
+		Issuer:       base.issuer,
+		JWKSURL:      base.jwksURL,
+	}
+	if name == "google" {
+		out.AcceptedIssuers = []string{"https://accounts.google.com", "accounts.google.com"}
+	}
+	if err := validateProviderCredentials(name, out.ClientID, out.ClientSecret); err != nil {
+		return nil, err
 	}
 	if name == "google" {
 		out.extraAuth = url.Values{"access_type": {"offline"}, "prompt": {"consent"}}
@@ -87,8 +108,21 @@ func (s *Service) resolveProvider(ctx context.Context, appID [16]byte, name stri
 	return out, nil
 }
 
+func validateProviderCredentials(name, clientID, clientSecret string) error {
+	if strings.TrimSpace(clientID) == "" || strings.TrimSpace(clientSecret) == "" {
+		return fmt.Errorf("authn: oauth provider %q requires non-empty client id and client secret", name)
+	}
+	return nil
+}
+
 // exchangeUserInfo swaps the provider code for a normalized identity map.
 func exchangeUserInfo(ctx context.Context, p *ResolvedProvider, code, redirectURI string) (map[string]any, error) {
+	return exchangeUserInfoWithNonce(ctx, p, code, redirectURI, "", nil, time.Now)
+}
+
+func exchangeUserInfoWithNonce(ctx context.Context, p *ResolvedProvider, code, redirectURI, nonceHash string,
+	jwks *jwksCache, now func() time.Time,
+) (map[string]any, error) {
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
 	form.Set("code", code)
@@ -113,6 +147,7 @@ func exchangeUserInfo(ctx context.Context, p *ResolvedProvider, code, redirectUR
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	var tok struct {
 		AccessToken string `json:"access_token"`
+		IDToken     string `json:"id_token"`
 		Error       string `json:"error"`
 	}
 	if err := json.Unmarshal(body, &tok); err != nil {
@@ -120,6 +155,19 @@ func exchangeUserInfo(ctx context.Context, p *ResolvedProvider, code, redirectUR
 	}
 	if tok.AccessToken == "" {
 		return nil, fmt.Errorf("authn: token exchange failed: %s (%s)", tok.Error, resp.Status)
+	}
+	if nonceHash != "" {
+		if tok.IDToken == "" {
+			return nil, errors.New("authn: Google token exchange returned no id_token")
+		}
+		if jwks == nil {
+			return nil, errors.New("authn: Google token verification unavailable")
+		}
+		claims, err := verifyIDTokenWithCache(ctx, p, tok.IDToken, nonceHash, jwks, now)
+		if err != nil {
+			return nil, fmt.Errorf("authn: Google id_token: %w", err)
+		}
+		return claims, nil
 	}
 	if p.UserInfo == "" {
 		return map[string]any{}, nil
@@ -151,13 +199,10 @@ func exchangeUserInfo(ctx context.Context, p *ResolvedProvider, code, redirectUR
 	return info, nil
 }
 
-func envOr(k, def string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return def
-}
-
 // boundedHTTPClient caps IdP exchanges so a hung provider can't pin
 // callback goroutines indefinitely (audit F10). Mirrors the JWKS client.
-var boundedHTTPClient = &http.Client{Timeout: 10 * time.Second}
+const oauthProviderDeadline = 10 * time.Second
+
+// boundedHTTPClient is a transport-level safety net. OAuthCallback supplies
+// the authoritative shared deadline across token, JWKS, and user-info calls.
+var boundedHTTPClient = &http.Client{Timeout: oauthProviderDeadline}

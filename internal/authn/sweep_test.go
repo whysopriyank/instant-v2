@@ -18,6 +18,7 @@ import (
 func TestSweepExpiredAuthEntities(t *testing.T) {
 	svc, _, appID, cleanup := env(t)
 	defer cleanup()
+	svc.Mailer = &deliveryMailer{}
 	ctx := context.Background()
 
 	// A fresh app has nothing to sweep; the CTE chain must no-op cleanly.

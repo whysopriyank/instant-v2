@@ -54,9 +54,10 @@ type ClassConfig struct {
 type Config struct {
 	Classes map[Class]ClassConfig
 	// MaxBuckets caps the bucket map; zero applies DefaultMaxBuckets. When
-	// the cap is hit, idle buckets are evicted first and requests needing a
-	// brand-new key are admitted WITHOUT tracking (fail-open) so the cap
-	// itself can never become a denial lever.
+	// the cap is hit, idle buckets are evicted first. Under DEC-001 (bounded
+	// fail-closed overflow), requests needing a brand-new key when the cap
+	// is saturated and no bucket is evictable are denied with a bounded
+	// retry duration to prevent untracked rate-limit bypass.
 	MaxBuckets int
 	// IdleTTL is how long an untouched bucket survives eviction; zero
 	// applies DefaultIdleTTL.
@@ -66,6 +67,7 @@ type Config struct {
 const (
 	DefaultMaxBuckets = 100_000
 	DefaultIdleTTL    = 10 * time.Minute
+	maxOverflowRetry  = time.Minute
 )
 
 // DefaultConfig returns the documented defaults (see package comment).
@@ -232,6 +234,33 @@ func (l *Limiter) evictAllLocked(now time.Time) {
 	}
 }
 
+// nextEvictionRetry returns an advisory delay until the earliest tracked
+// bucket can become idle. Caller holds admissionMu; shard locks are acquired
+// only here, in the same direction as evictAllLocked. The result is bounded
+// because HTTP Retry-After is an advisory value, not a promise that another
+// request will arrive exactly at the eviction boundary.
+func (l *Limiter) nextEvictionRetry(now time.Time) time.Duration {
+	best := l.idleTTL
+	for i := range l.shards {
+		sh := &l.shards[i]
+		sh.mu.Lock()
+		for _, b := range sh.buckets {
+			remaining := l.idleTTL - now.Sub(b.last)
+			if remaining < best {
+				best = remaining
+			}
+		}
+		sh.mu.Unlock()
+	}
+	if best <= 0 {
+		return time.Millisecond
+	}
+	if best > maxOverflowRetry {
+		return maxOverflowRetry
+	}
+	return best
+}
+
 // lenBuckets reports tracked buckets across all shards (test helper).
 func (l *Limiter) lenBuckets() int {
 	n := 0
@@ -297,11 +326,13 @@ func (l *Limiter) Allow(appID string, class Class) (ok bool, retryAfter time.Dur
 		}
 		if !okb {
 			if l.total.Load() >= int64(l.maxBuckets) {
-				// Cap reached with nothing evictable: admit untracked so the
-				// cap stays a memory bound, not a denial-of-service lever.
+				// Cap reached with nothing evictable: fail-closed under DEC-001.
+				// Deny with bounded retry duration to prevent untracked new-key bypass.
 				sh.mu.Unlock()
+				retryAfter := l.nextEvictionRetry(now)
 				l.admissionMu.Unlock()
-				return true, 0
+				metrics.RateLimitRejections.WithLabelValues(string(class)).Inc()
+				return false, retryAfter
 			}
 			b = &bucket{tokens: float64(cc.Burst), last: now}
 			sh.buckets[key] = b
@@ -337,6 +368,9 @@ func (l *Limiter) Acquire(ctx context.Context, appID string, class Class) error 
 	ok, retryAfter := l.Allow(appID, class)
 	if ok {
 		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	return &Error{AppID: appID, Class: class, RetryAfter: retryAfter}
 }

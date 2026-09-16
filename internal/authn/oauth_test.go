@@ -26,7 +26,7 @@ func TestOAuthRedirectOriginGate(t *testing.T) {
 
 	start := func(redirect string) int {
 		req := httptest.NewRequest("GET",
-			"/runtime/oauth/start?app_id="+appStr+"&client_name=google&redirect_uri="+url.QueryEscape(redirect), nil)
+			"/runtime/oauth/start?app_id="+appStr+"&client_name=google&code_challenge=verifier&code_challenge_method=plain&redirect_uri="+url.QueryEscape(redirect), nil)
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 		return rec.Code
@@ -94,7 +94,7 @@ func TestOAuthFullFlow(t *testing.T) {
 	defer provSrv.Close()
 
 	svc.Providers = map[string]*authn.ResolvedProvider{
-		"google": {
+		"github": {
 			ClientID:     "cid",
 			ClientSecret: "secret",
 			TokenURL:     provSrv.URL + "/token",
@@ -105,7 +105,7 @@ func TestOAuthFullFlow(t *testing.T) {
 	challenge := pkceS256("verifier-xyz")
 	// 1. start
 	startReq := httptest.NewRequest("GET",
-		"/runtime/oauth/start?app_id="+appStr+"&client_name=google"+
+		"/runtime/oauth/start?app_id="+appStr+"&client_name=github"+
 			"&redirect_uri=http://app/cb&code_challenge="+challenge+
 			"&code_challenge_method=S256&state=mystate", nil)
 	startRec := httptest.NewRecorder()

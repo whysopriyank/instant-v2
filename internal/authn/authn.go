@@ -48,6 +48,9 @@ var (
 	// ErrMagicCodeDeliveryUnavailable means no delivery adapter is configured.
 	// It is returned before any code is generated or persisted.
 	ErrMagicCodeDeliveryUnavailable = errors.New("authn: magic code delivery unavailable")
+	// ErrMagicCodeThrottleUnavailable means the shared resend lease could not
+	// be checked. Delivery must not proceed without that abuse-control gate.
+	ErrMagicCodeThrottleUnavailable = errors.New("authn: magic code throttle unavailable")
 	// ErrLocked is returned while an (app,email) pair is cooling down after
 	// repeated failed magic-code verifications. Callers surface it as 429.
 	ErrLocked = errors.New("authn: too many failed attempts; try later")
@@ -113,7 +116,11 @@ type Service struct {
 
 	// Providers overrides the builtin oauth registry (tests; custom OIDC
 	// clients land with apps.rules persistence in Phase 5).
-	Providers map[string]*ResolvedProvider
+	Providers          map[string]*ResolvedProvider
+	GoogleClientID     string
+	GoogleClientSecret string
+	GitHubClientID     string
+	GitHubClientSecret string
 	// Apple signs client-secret assertions when configured (.p8 material).
 	Apple *AppleSigner
 
@@ -392,37 +399,51 @@ func (s *Service) noteFailure(ctx context.Context, appID [16]byte, email string)
 }
 
 func (s *Service) clearFailures(ctx context.Context, appID [16]byte, email string) {
-	_, _ = s.Pool.Exec(ctx,
-		`DELETE FROM auth_throttle WHERE app_id = $1 AND key = $2`,
-		appID, emailKey(email))
+	// Keep last_sent intact: a successful verification must not erase a
+	// concurrent sender's resend lease. Only reset the verification-failure
+	// state owned by this path.
+	if _, err := s.Pool.Exec(ctx, `
+		UPDATE auth_throttle
+		   SET fails = 0, locked_until = to_timestamp(0)
+		 WHERE app_id = $1 AND key = $2`, appID, emailKey(email)); err != nil {
+		s.logger().Error("authn: clear failures", "err", err)
+	}
 }
 
-// resendBlocked reports whether email is inside the silent resend cooldown;
-// it stamps last_sent as a side effect so the first request starts the
-// cooldown window. The outer SELECT reads through the statement's shared
-// snapshot, so it sees the PRE-upsert last_sent (data-modifying CTEs cannot
-// see their own effects); a first-ever send finds no row → never blocked.
-// (Adversarial-review fix: RETURNING on ON CONFLICT exposes only the new
-// tuple, which made every resends-blocked check read age≈0 forever.)
-func (s *Service) resendBlocked(ctx context.Context, appID [16]byte, email string) bool {
-	var prevAge float64
-	now := s.now()
+// resendBlocked atomically acquires the resend lease when no recent attempt
+// owns it. A blocked attempt does not refresh last_sent, allowing the owner to
+// release its exact timestamp after delivery failure without weakening the
+// concurrent-attempt guard.
+func (s *Service) resendBlocked(ctx context.Context, appID [16]byte, email string, now time.Time) (bool, error) {
+	var acquired int
 	err := s.Pool.QueryRow(ctx, `
-		WITH upsert AS (
-		  INSERT INTO auth_throttle(app_id, key, last_sent)
-		  VALUES ($1, $2, $3)
-		  ON CONFLICT (app_id, key) DO UPDATE SET last_sent = EXCLUDED.last_sent
-		  RETURNING 1
-		)
-		SELECT EXTRACT(EPOCH FROM ($3::timestamptz - t.last_sent))::float8
-		  FROM auth_throttle t
-		 WHERE t.app_id = $1 AND t.key = $2
-		   AND EXISTS (SELECT 1 FROM upsert)`,
-		appID, emailKey(email), now).Scan(&prevAge)
-	if err != nil {
-		return false // first-ever send (no prior row) or table hiccup → allow
+		INSERT INTO auth_throttle(app_id, key, last_sent)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (app_id, key) DO UPDATE SET last_sent = EXCLUDED.last_sent
+		WHERE auth_throttle.last_sent <= EXCLUDED.last_sent - make_interval(secs => $4)
+		RETURNING 1`,
+		appID, emailKey(email), now, int(minResendInterval.Seconds())).Scan(&acquired)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return true, nil
 	}
-	return prevAge >= 0 && prevAge < minResendInterval.Seconds()
+	if err != nil {
+		s.logger().Error("authn: resend throttle", "err", err)
+		return false, ErrMagicCodeThrottleUnavailable
+	}
+	return acquired != 1, nil
+}
+
+// releaseResendLease permits a retry when an attempt never delivered or
+// persisted a code. The timestamp predicate prevents a failed older request
+// from clearing the lease of a newer successful attempt.
+func (s *Service) releaseResendLease(ctx context.Context, appID [16]byte, email string, attemptAt time.Time) {
+	if _, err := s.Pool.Exec(ctx, `
+		UPDATE auth_throttle
+		   SET last_sent = to_timestamp(0)
+		 WHERE app_id = $1 AND key = $2 AND last_sent = $3`,
+		appID, emailKey(email), attemptAt); err != nil {
+		s.logger().Error("authn: release resend lease", "err", err)
+	}
 }
 
 // PruneThrottle deletes throttle rows idle beyond ttl (no sends, no active
@@ -487,19 +508,8 @@ func (s *Service) SendMagicCodeWithMailer(ctx context.Context, appID [16]byte, e
 	if mailer == nil {
 		return ErrMagicCodeDeliveryUnavailable
 	}
-	// Resend throttle: silently honor requests inside the cooldown window
-	// (the previously issued code remains valid) so clients see the same
-	// contract while mail-bombing stays impossible. No enumeration signal.
-	// State is shared across nodes via auth_throttle (audit F4/M4).
-	if s.resendBlocked(ctx, appID, email) {
-		return nil
-	}
-
+	email = emailKey(email)
 	a, err := s.attrs(ctx, appID)
-	if err != nil {
-		return err
-	}
-	code, err := randCode()
 	if err != nil {
 		return err
 	}
@@ -507,16 +517,74 @@ func (s *Service) SendMagicCodeWithMailer(ctx context.Context, appID [16]byte, e
 	if err != nil {
 		return err
 	}
-	var codeEntity [16]byte
-	_, _ = rand.Read(codeEntity[:])
-	_, err = s.DB.InsertTriples(ctx, appID, cat, []triple.Triple{
-		{E: codeEntity, A: a.magicCodeHash, V: HashToken(code)},
-		{E: codeEntity, A: a.magicCodeEmail, V: email},
-	}, false)
+	if err := validateMagicCodeCatalog(appID, a, cat); err != nil {
+		return err
+	}
+	attemptAt := s.now()
+	// Resend throttle: silently honor requests inside the cooldown window
+	// (the previously issued code remains valid) so clients see the same
+	// contract while mail-bombing stays impossible. No enumeration signal.
+	// State is shared across nodes via auth_throttle (audit F4/M4).
+	blocked, err := s.resendBlocked(ctx, appID, email, attemptAt)
 	if err != nil {
 		return err
 	}
-	return mailer.SendMagicCode(ctx, email, code)
+	if blocked {
+		return nil
+	}
+	code, err := randCode()
+	if err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		s.releaseResendLease(cleanupCtx, appID, email, attemptAt)
+		return err
+	}
+	// Do not persist or expose a usable code until delivery succeeds. Cleanup
+	// after a failed provider call is only hygiene; this ordering is the
+	// security boundary against a concurrent verifier and retry race.
+	if err := mailer.SendMagicCode(ctx, email, code); err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		s.releaseResendLease(cleanupCtx, appID, email, attemptAt)
+		return err
+	}
+	var codeEntity [16]byte
+	_, _ = rand.Read(codeEntity[:])
+	codeTriples := []triple.Triple{
+		{E: codeEntity, A: a.magicCodeHash, V: HashToken(code)},
+		{E: codeEntity, A: a.magicCodeEmail, V: email},
+	}
+	_, err = s.DB.InsertTriples(ctx, appID, cat, codeTriples, false)
+	if err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		s.releaseResendLease(cleanupCtx, appID, email, attemptAt)
+		return err
+	}
+	return nil
+}
+
+func validateMagicCodeCatalog(appID [16]byte, a systemAttrs, cat *platform.AttrCatalog) error {
+	if cat == nil || cat.AppID != appID {
+		return errors.New("authn: magic-code attribute catalog has incompatible schema")
+	}
+	checks := []struct {
+		id   [16]byte
+		spec systemAttrSpec
+	}{
+		{a.magicCodeHash, systemAttrSpec{etype: "$magicCodes", label: "codeHash", valueType: "blob", cardinality: "one"}},
+		{a.magicCodeEmail, systemAttrSpec{etype: "$magicCodes", label: "email", valueType: "blob", cardinality: "one", indexed: true}},
+	}
+	for _, check := range checks {
+		at, ok := cat.ByID(check.id)
+		if !ok {
+			return errors.New("authn: magic-code attribute catalog has incompatible schema")
+		}
+		if err := validateSystemAttr(appID, at, check.spec); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // VerifyRefreshToken ports app-user-model/get-by-refresh-token: hash the raw
@@ -616,19 +684,28 @@ func (s *Service) SignOut(ctx context.Context, appID [16]byte, rawToken string) 
 	if err != nil {
 		return err
 	}
-	rows, err := s.DB.FetchTriples(ctx, appID, storage.FetchFilter{
-		AttrIDs: [][16]byte{a.tokenHashedToken},
-		Value:   HashToken(rawToken),
-	})
-	if err != nil || len(rows) == 0 {
+	return s.DB.WithTx(ctx, func(tx pgx.Tx) error {
+		var tokenEntity [16]byte
+		err := tx.QueryRow(ctx, `
+			SELECT t.entity_id
+			  FROM triples t
+			  JOIN attrs a ON a.id = t.attr_id AND a.deletion_marked_at IS NULL
+			 WHERE t.app_id = $1 AND t.attr_id = $2 AND t.value = $3::jsonb
+			 ORDER BY t.entity_id
+			 LIMIT 1
+			 FOR UPDATE`,
+			appID, a.tokenHashedToken, mustJSON(HashToken(rawToken))).Scan(&tokenEntity)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `
+			DELETE FROM triples
+			 WHERE app_id = $1 AND entity_id = $2`, appID, tokenEntity)
 		return err
-	}
-	var ts []triple.Triple
-	for _, r := range rows {
-		ts = append(ts, r.Triple)
-	}
-	_, err = s.DB.DeleteTriples(ctx, appID, ts)
-	return err
+	})
 }
 
 // VerifyMagicCode ports magic-code-auth/verify!: run the signup permission
@@ -639,6 +716,7 @@ func (s *Service) VerifyMagicCode(ctx context.Context, appID [16]byte,
 	email, code string, guestRefreshToken string, extraFields map[string]any,
 	admin bool,
 ) (map[string]any, error) {
+	email = emailKey(email)
 	// Brute-force gate: locked pairs are refused before any code check.
 	if s.recordLocked(ctx, appID, email) {
 		return nil, ErrLocked
@@ -812,10 +890,29 @@ func (s *Service) userByEmail(ctx context.Context, appID [16]byte, email string,
 		AttrIDs: [][16]byte{a.userEmail},
 		Value:   email,
 	})
-	if err != nil || len(rows) == 0 {
+	if err != nil {
 		return nil, err
 	}
-	return s.loadUser(ctx, appID, rows[0].Triple.E, a)
+	if len(rows) != 0 {
+		return s.loadUser(ctx, appID, rows[0].Triple.E, a)
+	}
+	// Compatibility for pre-normalization users. New writes are lowercase, but
+	// an existing mixed-case identity must win over creating a duplicate.
+	var entity [16]byte
+	err = s.Pool.QueryRow(ctx, `
+		SELECT entity_id
+		  FROM triples
+		 WHERE app_id=$1 AND attr_id=$2
+		   AND lower(value #>> '{}')=$3
+		 ORDER BY created_at, entity_id
+		 LIMIT 1`, appID, a.userEmail, emailKey(email)).Scan(&entity)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return s.loadUser(ctx, appID, entity, a)
 }
 
 // consumeCode ports app-user-magic-code-model/consume!: find the entity
@@ -844,10 +941,10 @@ func (s *Service) consumeCode(ctx context.Context, appID [16]byte, a systemAttrs
 		     AND h.app_id = $1
 		     AND h.attr_id = $3 AND h.value = $2::jsonb
 		     AND t.entity_id = h.entity_id
-		     AND EXISTS (
+			     AND EXISTS (
 		       SELECT 1 FROM triples e
 		        WHERE e.app_id = $1 AND e.entity_id = h.entity_id
-		          AND e.attr_id = $4 AND e.value = $5::jsonb)
+		          AND e.attr_id = $4 AND lower(e.value #>> '{}') = $5)
 		     AND (t.attr_id = $3 OR t.attr_id = $4)
 		  RETURNING t.entity_id, t.attr_id, t.created_at
 		)
@@ -857,7 +954,7 @@ func (s *Service) consumeCode(ctx context.Context, appID [16]byte, a systemAttrs
 		 GROUP BY entity_id
 		 ORDER BY code_created DESC
 		 LIMIT 1`,
-		appID, mustJSON(hash), a.magicCodeHash, a.magicCodeEmail, mustJSON(email),
+		appID, mustJSON(hash), a.magicCodeHash, a.magicCodeEmail, emailKey(email),
 	).Scan(&claimed, &codeCreated)
 	if err == pgx.ErrNoRows {
 		return ErrInvalidCode
@@ -865,7 +962,7 @@ func (s *Service) consumeCode(ctx context.Context, appID [16]byte, a systemAttrs
 	if err != nil {
 		return err
 	}
-	if s.now().Sub(codeCreated) > ttl {
+	if !s.now().Before(codeCreated.Add(ttl)) {
 		return ErrExpiredCode
 	}
 	return nil
