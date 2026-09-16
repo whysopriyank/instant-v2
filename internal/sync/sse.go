@@ -53,14 +53,65 @@ type sseConn struct {
 
 // sseEvent is one queued SSE frame plus its optional generation guard
 // (RT-001f): fan-out envelopes and initial answers carry the stamped epoch
-// and group key; the GET writer drops them if a re-gate superseded the epoch
-// before the socket write, instead of serving denied data post-revoke.
+// and exact subscription; the GET writer holds a generation lease through
+// the bounded write and flush, dropping superseded or cancelled events.
 // Control replies (errors, handshake) carry no guard and always send.
 type sseEvent struct {
 	frame  Frame
 	hasGen bool
 	gen    uint64
-	subID  string
+	sub    *reactive.Subscription
+}
+
+var errSSEMissingSubscription = errors.New("sync: guarded SSE event missing subscription")
+
+const sseWriteTimeout = 10 * time.Second
+
+// writeSSEEvent renders and writes one SSE data event. Frame encoding happens
+// before taking a subscription's delivery lease, while the bounded network
+// write and flush stay inside it. A gate swap therefore cannot overtake a
+// write that was admitted for the current generation.
+func writeSSEEvent(w http.ResponseWriter, ev sseEvent) error {
+	var payload []byte
+	if raw, ok := ev.frame["__raw"]; ok {
+		payload = raw
+	} else {
+		var err error
+		payload, err = ev.frame.Encode()
+		if err != nil {
+			return err
+		}
+	}
+
+	rc := http.NewResponseController(w)
+	write := func(requireDeadline bool) error {
+		if err := rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout)); err != nil && requireDeadline {
+			return err
+		}
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", payload); err != nil {
+			return err
+		}
+		return rc.Flush()
+	}
+
+	if !ev.hasGen {
+		// Control replies retain compatibility with writers without the
+		// optional deadline interface. Guarded data writes fail closed.
+		return write(false)
+	}
+	if ev.sub == nil {
+		return errSSEMissingSubscription
+	}
+	current, err := ev.sub.WithCurrentGeneration(ev.gen, func() error {
+		return write(true)
+	})
+	if err != nil {
+		return err
+	}
+	if !current {
+		return errGenerationSuperseded
+	}
+	return nil
 }
 
 // SSEHandler serves the /runtime/sse pair. Wire Manager/Store/Refresh exactly
@@ -78,9 +129,8 @@ type SSEHandler struct {
 	// MaxConnsPerIP caps streams per client IP; <= 0 means 100. The global
 	// cap alone let one host squat every slot indefinitely (audit H5).
 	MaxConnsPerIP int
-	// HeartbeatEvery is the SSE comment-ping cadence; <= 0 means 20s. Each
-	// write carries a deadline of one heartbeat interval, so a dead reader
-	// frees its slot within ~1 interval instead of forever.
+	// HeartbeatEvery is the SSE comment-ping cadence; <= 0 means 20s. Pings
+	// carry that interval as their deadline; data events use sseWriteTimeout.
 	HeartbeatEvery time.Duration
 	// Limiter charges per-message chatter on the POST batch path (same ws
 	// class as the WS loop); nil disables charging (tests).
@@ -214,23 +264,8 @@ func (h *SSEHandler) getSSE(w http.ResponseWriter, r *http.Request) {
 	writeDeadline()
 	w.WriteHeader(http.StatusOK)
 
-	flushEvent := func(b []byte) bool {
-		if _, err := fmt.Fprintf(w, "data: %s\n\n", b); err != nil {
-			return false
-		}
-		fl.Flush()
-		return true
-	}
 	writeEvent := func(f Frame) bool {
-		b, err := f.Encode()
-		if err != nil {
-			// RT-002b/RT-002e: a frame that cannot render must end the
-			// stream, never be skipped. Skipping strands the client
-			// behind an advancing watermark with no signal; ending it
-			// forces reconnect from a full snapshot.
-			return false
-		}
-		return flushEvent(b)
+		return writeSSEEvent(w, sseEvent{frame: f}) == nil
 	}
 
 	// First event mirrors v1's handle-sse-init!: transport handshake only —
@@ -266,27 +301,12 @@ func (h *SSEHandler) getSSE(w http.ResponseWriter, r *http.Request) {
 			// frames would leave them stale with no signal at all.
 			return
 		case ev := <-conn.events:
-			// Generation guard (RT-001f): a queued envelope superseded by
-			// a re-gate that landed after enqueue is dropped, never served
-			// as an authorized new answer. The notifier's retry re-serves
-			// every attached member under the new gate at the same txID,
-			// so dropping converges instead of stranding.
-			if ev.hasGen && h.Store != nil {
-				if sub, ok := h.Store.Get(ev.subID); !ok || sub.Gen.Load() != ev.gen {
+			if err := writeSSEEvent(w, ev); err != nil {
+				// A stale/cancelled queued generation is intentionally dropped;
+				// all other write failures end the stream and trigger teardown.
+				if errors.Is(err, errGenerationSuperseded) {
 					continue
 				}
-			}
-			f := ev.frame
-			if raw, isRaw := f["__raw"]; isRaw {
-				writeDeadline()
-				if _, err := fmt.Fprintf(w, "data: %s\n\n", raw); err != nil {
-					return
-				}
-				fl.Flush()
-				continue
-			}
-			writeDeadline()
-			if !writeEvent(f) {
 				return
 			}
 		}
@@ -341,18 +361,18 @@ func (h *SSEHandler) postSSE(w http.ResponseWriter, r *http.Request) {
 					return errSSEBackpressure
 				}
 			},
-			SendRawGen: func(b []byte, gen uint64, subID string) error {
+			SendRawGen: func(b []byte, gen uint64, sub *reactive.Subscription) error {
 				select {
-				case conn.events <- sseEvent{frame: Frame{"__raw": json.RawMessage(b)}, hasGen: true, gen: gen, subID: subID}:
+				case conn.events <- sseEvent{frame: Frame{"__raw": json.RawMessage(b)}, hasGen: true, gen: gen, sub: sub}:
 					return nil
 				default:
 					signalOverflow(conn)
 					return errSSEBackpressure
 				}
 			},
-			SendGen: func(f Frame, gen uint64, subID string) error {
+			SendGen: func(f Frame, gen uint64, sub *reactive.Subscription) error {
 				select {
-				case conn.events <- sseEvent{frame: f, hasGen: true, gen: gen, subID: subID}:
+				case conn.events <- sseEvent{frame: f, hasGen: true, gen: gen, sub: sub}:
 					return nil
 				default:
 					signalOverflow(conn)
@@ -486,7 +506,7 @@ func (h *SSEHandler) snapshot(ctx context.Context, sess *Session, f Frame) error
 		"processed-tx-id": json.RawMessage(mustJSON(snapTx)),
 	}
 	if sess.SendGen != nil {
-		return sess.SendGen(fr, genAfter, key)
+		return sess.SendGen(fr, genAfter, sub)
 	}
 	return sess.Send(fr)
 }

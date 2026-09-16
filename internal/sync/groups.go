@@ -142,12 +142,10 @@ func (m *Manager) newGroupLocked(key string, sess *Session, rawQ json.RawMessage
 	// be recalled — but the server certifies nothing (no snapshot, no watermark
 	// advance), stays attached, and the armed retry re-serves every attached
 	// member under the new gate at the same txID, healing the stale read.
-	// Queued (SSE) members drop superseded envelopes at dequeue and heal the
-	// same way with zero wire leak. Holding the swap lock across socket writes
-	// would close the per-send window, but a wedged client would then stall all
-	// re-gating process-wide — a worse failure mode for a security boundary.
-	// Dispatch itself stays outside any lock, so a slow member cannot stall
-	// re-gating.
+	// Queued SSE members hold a per-subscription generation lease through
+	// their bounded socket write and flush. A swap waits for admitted writes;
+	// after the swap, old queued envelopes are dropped. No global registry
+	// lock is held across network writes; dispatch itself stays unlocked.
 	g := &queryGroup{
 		key: key, class: class, appID: sess.AppID,
 		sub: sub, cat: cat,
@@ -159,10 +157,6 @@ func (m *Manager) newGroupLocked(key string, sess *Session, rawQ json.RawMessage
 		}
 		return m.dispatchGroup(g, fr)
 	}
-	if _, err := m.Deps.Store.Add(sub); err != nil {
-		return nil, err
-	}
-	m.groups[key] = g
 	return g, nil
 }
 
@@ -172,78 +166,80 @@ func (m *Manager) attachGroup(ctx context.Context, sess *Session, rawQ json.RawM
 	key := groupKey(sess.AppID, class, rawQ, sess.Admin)
 
 	m.groupsMu.Lock()
+	// Admission is one registry transaction except for a necessary rule load.
+	// The final resolution, cap check and both membership records stay locked.
+	sess.mu.Lock()
+	closing := sess.closing
+	sess.mu.Unlock()
+	if closing {
+		m.groupsMu.Unlock()
+		return nil, fmt.Errorf("%w: session is closing", ErrCloseSession)
+	}
 	capN := m.Deps.Store.MaxSubsPerApp
 	if capN > 0 && m.appMembers[sess.AppID]+1 > capN {
 		m.groupsMu.Unlock()
 		return nil, &reactive.SubLimitError{AppID: sess.AppID, Max: capN}
 	}
 	g := m.groups[key]
-	if g == nil {
-		var err error
-		g, err = m.newGroupLocked(key, sess, rawQ, topics, cat, class, doc)
-		if err != nil {
-			m.groupsMu.Unlock()
-			return nil, err
-		}
-	}
-	// Version-bound membership (RT-001d): decide under the lock whether a
-	// reload is needed, then release across rule-store I/O so one wedged load
-	// cannot stall revocation of other groups (H-01g). The swap rechecks under
+	// Version-bound membership (RT-001d): an existing group must reload the
+	// current document before admitting a member. The caller's doc may have
+	// become stale after its admission read, so comparing against it cannot
+	// close that window. Release across rule-store I/O so one wedged load
+	// cannot stall revocation of other groups (H-01g); the swap rechecks under
 	// the lock so concurrent re-gates still converge.
-	cur, curOK := g.sub.AttachCtx.(*QueryGate)
-	needReload := !curOK || cur == nil || GateHash(cur.Rules) != GateHash(doc)
-	m.groupsMu.Unlock()
-	var fresh *perms.RuleDoc
-	if needReload {
-		var ferr error
-		fresh, ferr = m.rulesFor(ctx, sess.AppID)
+	var cur *QueryGate
+	if g != nil {
+		cur, _ = g.sub.AttachCtx.(*QueryGate)
+	}
+	if g != nil {
+		observed := g
+		m.groupsMu.Unlock()
+		fresh, ferr := m.rulesFor(ctx, sess.AppID)
 		if ferr != nil {
 			return nil, fmt.Errorf("%w: %v", errRulesReload, ferr)
 		}
+		// Never wait for network delivery while holding the registry lock.
+		observed.sub.LockDelivery()
+		defer observed.sub.UnlockDelivery()
 		m.groupsMu.Lock()
-		// Re-lookup: the group could have been deleted (last member left)
-		// while we loaded. Recreate with the fresh doc in that case.
-		g2 := m.groups[key]
-		if g2 == nil {
-			var err error
-			g2, err = m.newGroupLocked(key, sess, rawQ, topics, cat, class, fresh)
-			if err != nil {
+		g = m.groups[key]
+		if g == observed {
+			sess.mu.Lock()
+			closing := sess.closing
+			sess.mu.Unlock()
+			if closing {
 				m.groupsMu.Unlock()
-				return nil, err
+				return nil, fmt.Errorf("%w: session is closing", ErrCloseSession)
 			}
-			g = g2
-		} else {
-			g = g2
-			if cur2, ok2 := g.sub.AttachCtx.(*QueryGate); !ok2 || cur2 == nil || GateHash(cur2.Rules) != GateHash(fresh) {
+			// A completed swap or replacement wins over this unlocked load.
+			// Hash inequality alone cannot tell which document is newer.
+			cur2, _ := g.sub.AttachCtx.(*QueryGate)
+			if cur2 == cur && (cur2 == nil || GateHash(cur2.Rules) != GateHash(fresh)) {
 				m.rebindGroupLocked(g, fresh)
 			}
 		}
-		m.groupsMu.Unlock()
-	} else {
-		// No reload needed; re-acquire for member add below.
-		m.groupsMu.Lock()
-		// Re-lookup in case of concurrent delete (defensive; group had at
-		// least one member or was just created, so deletion is unlikely but
-		// possible if the last member left between unlock and relock).
-		if g2 := m.groups[key]; g2 != nil {
-			g = g2
-		} else {
-			var err error
-			g, err = m.newGroupLocked(key, sess, rawQ, topics, cat, class, doc)
-			if err != nil {
-				m.groupsMu.Unlock()
-				return nil, err
-			}
-		}
-		m.groupsMu.Unlock()
+		doc = fresh // used only if the observed group was removed
 	}
-	m.groupsMu.Lock()
+	defer m.groupsMu.Unlock()
 	// Re-check the cap after releasing across rule-store I/O: concurrent
 	// attaches could have filled it while we loaded (H-01g independence must
 	// not break admission accounting).
 	if capN > 0 && m.appMembers[sess.AppID]+1 > capN {
-		m.groupsMu.Unlock()
 		return nil, &reactive.SubLimitError{AppID: sess.AppID, Max: capN}
+	}
+	if g == nil {
+		var err error
+		g, err = m.newGroupLocked(key, sess, rawQ, topics, cat, class, doc)
+		if err != nil {
+			return nil, err
+		}
+	}
+	newGroup := m.groups[key] == nil
+	if newGroup {
+		// Keep the group private to this registry transaction until its member
+		// and session ownership records are committed below. The Store is added
+		// last so external reactive observers cannot see a half-admitted group.
+		m.groups[key] = g
 	}
 
 	// Upgrade the group to delta-capable when any member negotiates it.
@@ -252,14 +248,31 @@ func (m *Manager) attachGroup(ctx context.Context, sess *Session, rawQ json.RawM
 	}
 
 	g.mu.Lock()
-	g.members[sess] = member{sess: sess, delta: sess.Features["delta-refresh"]}
-	g.mu.Unlock()
-	m.appMembers[sess.AppID]++
-	m.groupsMu.Unlock()
-
 	sess.mu.Lock()
+	if sess.closing {
+		sess.mu.Unlock()
+		g.mu.Unlock()
+		if newGroup {
+			delete(m.groups, key)
+		}
+		return nil, fmt.Errorf("%w: session is closing", ErrCloseSession)
+	}
+	g.members[sess] = member{sess: sess, delta: sess.Features["delta-refresh"]}
 	sess.Subs[key] = true
+	m.appMembers[sess.AppID]++
+	if newGroup {
+		if _, err := m.Deps.Store.Add(g.sub); err != nil {
+			delete(sess.Subs, key)
+			delete(g.members, sess)
+			m.appMembers[sess.AppID]--
+			delete(m.groups, key)
+			sess.mu.Unlock()
+			g.mu.Unlock()
+			return nil, err
+		}
+	}
 	sess.mu.Unlock()
+	g.mu.Unlock()
 	return g, nil
 }
 
@@ -299,6 +312,7 @@ func (m *Manager) detachMember(sess *Session, id string) {
 // tolerates already-gone memberships, so the snapshot may safely go stale.
 func (m *Manager) DetachAll(sess *Session) {
 	sess.mu.Lock()
+	sess.closing = true
 	ids := make([]string, 0, len(sess.Subs))
 	for id := range sess.Subs {
 		ids = append(ids, id)
@@ -502,7 +516,8 @@ func (m *Manager) dispatchGroup(g *queryGroup, fr reactive.Frame) error {
 
 	for _, mem := range members {
 		if mem.sess.SendRaw == nil && mem.sess.SendRawGen == nil {
-			continue // transport without raw support can't join groups
+			m.failMember(g, mem.sess)
+			continue
 		}
 		var b []byte
 		if mem.delta && deltaRaw != nil {
@@ -519,7 +534,7 @@ func (m *Manager) dispatchGroup(g *queryGroup, fr reactive.Frame) error {
 			// envelopes instead of serving them post-revoke. No pre-send
 			// drop here — enqueue always succeeds unless backpressured —
 			// so every member gets a healing retry via the same txID.
-			serr = mem.sess.SendRawGen(b, fr.Gen, g.key)
+			serr = mem.sess.SendRawGen(b, fr.Gen, g.sub)
 		} else {
 			// Per-member admission (RT-001): a re-gate that landed after
 			// Emit's check — or mid-fan-out — stops the stale spread here

@@ -41,16 +41,16 @@ func TestH01fQueuedSSEEnvelopesDroppedAfterRevoke(t *testing.T) {
 	// SSE-like member: SendRawGen enqueues with epoch (non-blocking in prod;
 	// here a buffered chan of 128 mirroring sseConn.events capacity).
 	type queued struct {
-		b     []byte
-		gen   uint64
-		subID string
+		b   []byte
+		gen uint64
+		sub *reactive.Subscription
 	}
 	queue := make(chan queued, 128)
 	sess := &Session{
 		ID: "sse1", AppID: "app", Subs: map[string]bool{},
-		SendRawGen: func(b []byte, gen uint64, subID string) error {
+		SendRawGen: func(b []byte, gen uint64, sub *reactive.Subscription) error {
 			select {
-			case queue <- queued{b: append([]byte(nil), b...), gen: gen, subID: subID}:
+			case queue <- queued{b: append([]byte(nil), b...), gen: gen, sub: sub}:
 				return nil
 			default:
 				return errors.New("queue full")
@@ -95,17 +95,24 @@ func TestH01fQueuedSSEEnvelopesDroppedAfterRevoke(t *testing.T) {
 		t.Fatal("re-gate did not bump epoch; test staged nothing")
 	}
 
-	// Dequeue guard mirrors sse.go GET writer exactly: Store.Get lookup, drop
-	// on miss or epoch mismatch, serve only current.
+	// Use the production generation lease rather than a copied epoch check.
 	served := 0
 	dropped := 0
 	for {
 		select {
 		case q := <-queue:
-			if sub, ok := mgr.Deps.Store.Get(q.subID); !ok || sub.Gen.Load() != q.gen {
-				dropped++
-			} else {
+			if q.sub != g.sub {
+				t.Fatal("queued envelope lost subscription identity")
+			}
+			current, err := q.sub.WithCurrentGeneration(q.gen, func() error {
 				served++
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !current {
+				dropped++
 			}
 		default:
 			goto done

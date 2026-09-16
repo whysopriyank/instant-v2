@@ -95,6 +95,46 @@ func TestVersionMismatchedJoinRebindsGroup(t *testing.T) {
 	}
 }
 
+func TestVersionStaleJoinRebindsGroupBeforeAdmission(t *testing.T) {
+	ctx := context.Background()
+	allowDoc := &perms.RuleDoc{Raw: json.RawMessage(`{"allow":"all"}`)}
+	denyDoc := &perms.RuleDoc{Raw: json.RawMessage(`{"deny":"all"}`)}
+
+	var current atomic.Pointer[perms.RuleDoc]
+	current.Store(allowDoc)
+	mgr := NewManager(Deps{
+		Store: reactive.NewStore(),
+		Rules: func(context.Context, string) (*perms.RuleDoc, error) {
+			return current.Load(), nil
+		},
+	})
+	rawQ := json.RawMessage(`{"todos":{}}`)
+
+	first := &Session{ID: "first", AppID: "app", Subs: map[string]bool{}}
+	g, err := mgr.attachGroup(ctx, first, rawQ, map[string]bool{}, &platform.AttrCatalog{}, wireNodelist, allowDoc)
+	if err != nil {
+		t.Fatalf("attach first: %v", err)
+	}
+	g.sub.SetSnapshot(json.RawMessage(`{"allow-content":true}`))
+
+	// The caller's admission read is stale: persisted rules changed after it
+	// returned, but before the existing group admits the new member.
+	current.Store(denyDoc)
+	staleRead := allowDoc
+	second := &Session{ID: "second", AppID: "app", Subs: map[string]bool{}}
+	if _, err := mgr.attachGroup(ctx, second, rawQ, map[string]bool{}, &platform.AttrCatalog{}, wireNodelist, staleRead); err != nil {
+		t.Fatalf("attach second: %v", err)
+	}
+
+	gate, _ := g.sub.AttachCtx.(*QueryGate)
+	if gate == nil || GateHash(gate.Rules) != GateHash(denyDoc) {
+		t.Fatal("RT-001d RED: stale admission read left the group under the old allow gate")
+	}
+	if snap := g.sub.Snapshot(); snap != nil {
+		t.Fatalf("RT-001d RED: stale snapshot survived the admission rebind: %s", snap)
+	}
+}
+
 // TestEmitRejectsSupersededGeneration is the pause-after-final-check
 // test: publication pauses inside Emit (past every generation-time
 // authorization check), a real re-gate installs deny, publication

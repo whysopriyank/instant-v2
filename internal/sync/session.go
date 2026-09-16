@@ -126,15 +126,16 @@ type Session struct {
 	// nil falls back to nothing — group dispatch skips such sessions.
 	SendRaw func([]byte) error
 	// SendRawGen is the generation-aware fan-out writer (RT-001f): it carries
-	// the stamped epoch and group key so queued transports (SSE) can drop
-	// superseded envelopes at dequeue time instead of serving them post-revoke.
+	// the stamped epoch and exact subscription so queued transports (SSE) can
+	// validate a generation lease through the bounded write and flush, including
+	// when a removed group key has been reused by another subscription.
 	// Nil falls back to SendRaw with a pre-send epoch check in dispatch.
 	// Production SSE sets it; WS and tests may leave it nil.
-	SendRawGen func(b []byte, gen uint64, subID string) error
+	SendRawGen func(b []byte, gen uint64, sub *reactive.Subscription) error
 	// SendGen is the generation-aware Frame writer for queued initial answers
 	// (RT-001d): same dequeue-drop contract as SendRawGen. Nil falls back to
 	// Send with a pre-send epoch check by the caller.
-	SendGen func(f Frame, gen uint64, subID string) error
+	SendGen func(f Frame, gen uint64, sub *reactive.Subscription) error
 	// Close tears down the transport read loop (RT-002c): group dispatch
 	// calls it after detaching a member whose send failed, so the client
 	// reconnects and re-establishes from a full snapshot. Set by the
@@ -144,7 +145,11 @@ type Session struct {
 	// session.clj:1395): refresh envelopes carry the bare object tree instead
 	// of the join-rows node-list used on the WS path.
 	TreeResults bool
-	mu          sync.Mutex
+	// closing is set before teardown snapshots subscriptions. Admission checks
+	// it again after any unlocked rule I/O so a dead session cannot be
+	// resurrected by a late add-query.
+	closing bool
+	mu      sync.Mutex
 }
 
 // Manager creates sessions and dispatches frames. One Manager per process.

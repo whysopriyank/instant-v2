@@ -93,6 +93,35 @@ func TestDispatchSendFailureDetachesOnlyFailedMember(t *testing.T) {
 	}
 }
 
+// A member that has no usable transport writer is still a delivery failure:
+// silently skipping it would let the shared generation watermark certify a
+// client that received neither a frame nor a disconnect.
+func TestDispatchMissingTransportDetachesExplicitly(t *testing.T) {
+	closed := 0
+	missing := &Session{
+		Subs:  map[string]bool{},
+		Close: func() { closed++ },
+	}
+	var goodSent [][]byte
+	good := &Session{
+		Subs:    map[string]bool{},
+		SendRaw: func(b []byte) error { goodSent = append(goodSent, b); return nil },
+	}
+	mgr, g := testGroup("app1", missing, good)
+	if err := mgr.dispatchGroup(g, treeFrame()); err != nil {
+		t.Fatalf("healthy sibling should still complete the generation: %v", err)
+	}
+	if missing.Subs["grp-test"] {
+		t.Fatal("member without a transport writer remained attached")
+	}
+	if closed != 1 {
+		t.Fatalf("missing transport Close calls = %d, want 1", closed)
+	}
+	if len(goodSent) != 1 || len(goodSent[0]) == 0 {
+		t.Fatalf("healthy sibling got %d frames; want one non-empty frame", len(goodSent))
+	}
+}
+
 // No empty frame may reach the wire on any path (RT-002e).
 func TestDispatchNeverEmitsEmptyFrames(t *testing.T) {
 	var sent [][]byte

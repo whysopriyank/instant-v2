@@ -2,7 +2,7 @@ package sync
 
 import (
 	"encoding/json"
-	"fmt"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -64,7 +64,7 @@ func (h *SSEHandler) AdminSubscribe(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "admin subscribe not configured", http.StatusInternalServerError)
 		return
 	}
-	fl, ok := w.(http.Flusher)
+	_, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
@@ -106,59 +106,42 @@ func (h *SSEHandler) AdminSubscribe(w http.ResponseWriter, r *http.Request) {
 		Rooms:       map[string]bool{},
 	}
 	events := make(chan sseEvent, 128)
-	sess.Send = func(f Frame) error {
+	overflow := make(chan struct{}, 1)
+	signalOverflow := func() {
 		select {
-		case events <- sseEvent{frame: f}:
+		case overflow <- struct{}{}:
+		default:
+		}
+	}
+	enqueue := func(event sseEvent) error {
+		select {
+		case events <- event:
 			return nil
 		default:
+			signalOverflow()
 			return errSSEBackpressure
 		}
+	}
+	sess.Close = signalOverflow
+	sess.Send = func(f Frame) error {
+		return enqueue(sseEvent{frame: f})
 	}
 	sess.SendRaw = func(b []byte) error {
-		select {
-		case events <- sseEvent{frame: Frame{"__raw": json.RawMessage(b)}}:
-			return nil
-		default:
-			return errSSEBackpressure
-		}
+		return enqueue(sseEvent{frame: Frame{"__raw": json.RawMessage(b)}})
 	}
-	sess.SendRawGen = func(b []byte, gen uint64, subID string) error {
-		select {
-		case events <- sseEvent{frame: Frame{"__raw": json.RawMessage(b)}, hasGen: true, gen: gen, subID: subID}:
-			return nil
-		default:
-			return errSSEBackpressure
-		}
+	sess.SendRawGen = func(b []byte, gen uint64, sub *reactive.Subscription) error {
+		return enqueue(sseEvent{frame: Frame{"__raw": json.RawMessage(b)}, hasGen: true, gen: gen, sub: sub})
 	}
-	sess.SendGen = func(f Frame, gen uint64, subID string) error {
-		select {
-		case events <- sseEvent{frame: f, hasGen: true, gen: gen, subID: subID}:
-			return nil
-		default:
-			return errSSEBackpressure
-		}
+	sess.SendGen = func(f Frame, gen uint64, sub *reactive.Subscription) error {
+		return enqueue(sseEvent{frame: f, hasGen: true, gen: gen, sub: sub})
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
 
-	// writeRaw emits pre-encoded group fan-out bytes verbatim.
-	writeRaw := func(b []byte) bool {
-		if _, err := fmt.Fprintf(w, "data: %s\n\n", b); err != nil {
-			return false
-		}
-		fl.Flush()
-		return true
-	}
 	writeEvent := func(f Frame) bool {
-		b, err := f.Encode()
-		if err != nil {
-			// RT-002b/RT-002e: a frame that cannot render must end the
-			// stream, never be skipped (see sse.go writeEvent).
-			return false
-		}
-		return writeRaw(b)
+		return writeSSEEvent(w, sseEvent{frame: f}) == nil
 	}
 
 	_ = writeEvent(Frame{
@@ -186,6 +169,9 @@ func (h *SSEHandler) AdminSubscribe(w http.ResponseWriter, r *http.Request) {
 		writeEvent(ErrFrame(400, "subscribe-failed", herr.Error()))
 		return
 	}
+	// Attachment succeeded. Every subsequent exit must release this session's
+	// subscription and room memberships.
+	defer h.teardownSubs(sess)
 
 	class := wireNodelist
 	if sess.TreeResults {
@@ -203,40 +189,38 @@ func (h *SSEHandler) AdminSubscribe(w http.ResponseWriter, r *http.Request) {
 		_, rerr := h.Manager.snapshotOrRefresh(r.Context(), h.Refresh, sub)
 		if rerr != nil {
 			writeEvent(ErrFrame(400, "subscribe-failed", platform.ClientMessage(rerr)))
-			h.teardownSubs(sess)
 			return
-		}
-		genAfter := sub.Gen.Load()
-		// RT-002a/RT-002d: carry the served pair so the watermark matches.
-		// Fail-closed (H-01d S1): success guarantees non-nil snapshot; nil
-		// means a concurrent re-gate cleared after publish — teardown rather
-		// than serve stale res as a new answer.
-		if snap, tx := sub.SnapshotPair(); snap != nil {
-			result, meta, snapTx = snap, resultMetaOf(snap), tx
-		} else {
-			writeEvent(ErrFrame(400, "subscribe-failed", "subscription re-gated during subscribe"))
-			h.teardownSubs(sess)
-			return
-		}
-		if sub.Gen.Load() != genAfter {
-			writeEvent(ErrFrame(400, "subscribe-failed", "subscription re-gated during subscribe"))
-			h.teardownSubs(sess)
-			return
-		}
-	} else if sub != (*reactive.Subscription)(nil) {
-		// RT-002a/RT-002d: carry the served pair when one exists so the
-		// watermark matches the snapshot.
-		if snap, tx := sub.SnapshotPair(); snap != nil {
-			result, meta, snapTx = snap, resultMetaOf(snap), tx
 		}
 	}
-	if !writeEvent(Frame{
+	if sub == nil {
+		// A successful attachment must resolve to its live reactive
+		// subscription. Refuse to send an unguarded initial answer if not.
+		_ = writeSSEEvent(w, sseEvent{frame: ErrFrame(400, "subscribe-failed", "subscription unavailable")})
+		return
+	}
+	// Capture the epoch before SnapshotPair. The guarded helper validates that
+	// exact epoch again while holding the delivery lease immediately before
+	// writing, so a swap after the pair is captured cannot leak the old answer.
+	initialGen := sub.Gen.Load()
+	snap, tx := sub.SnapshotPair()
+	if snap == nil && h.Refresh != nil {
+		// A refresh hook was configured, so a successful initial refresh must
+		// have left a served snapshot. A cleared pair means a concurrent gate
+		// swap won the boundary; do not turn it into an authorized null result.
+		writeEvent(ErrFrame(400, "subscribe-failed", "subscription re-gated during subscribe"))
+		return
+	}
+	if snap != nil {
+		result, meta, snapTx = snap, resultMetaOf(snap), tx
+	}
+	initial := sseEvent{frame: Frame{
 		"op":              json.RawMessage(`"add-query-ok"`),
 		"q":               qraw,
 		"result":          treeOf(result),
 		"result-meta":     meta,
 		"processed-tx-id": json.RawMessage(mustJSON(snapTx)),
-	}) {
+	}, hasGen: true, gen: initialGen, sub: sub}
+	if err := writeSSEEvent(w, initial); err != nil {
 		return
 	}
 	// Forward any extra protocol replies, but NOT the Manager's bare
@@ -255,25 +239,14 @@ func (h *SSEHandler) AdminSubscribe(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-ctx.Done():
-			h.teardownSubs(sess)
+			return
+		case <-overflow:
 			return
 		case ev := <-events:
-			// Generation guard (RT-001f): drop queued envelopes superseded
-			// after enqueue, same contract as the runtime SSE stream.
-			if ev.hasGen && h.Store != nil {
-				if gsub, ok := h.Store.Get(ev.subID); !ok || gsub.Gen.Load() != ev.gen {
+			if err := writeSSEEvent(w, ev); err != nil {
+				if errors.Is(err, errGenerationSuperseded) {
 					continue
 				}
-			}
-			f := ev.frame
-			var ok bool
-			if raw, isRaw := f["__raw"]; isRaw {
-				ok = writeRaw(raw)
-			} else {
-				ok = writeEvent(f)
-			}
-			if !ok {
-				h.teardownSubs(sess)
 				return
 			}
 		}

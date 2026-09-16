@@ -64,6 +64,10 @@ type Subscription struct {
 	// comparison has no ABA hazard. Opaque to this package beyond the
 	// stamp; sync owns the bumps.
 	Gen atomic.Uint64
+	// deliveryMu orders bounded transport writes/publication against gate
+	// changes. Writers take a read lease; a pending gate change blocks new
+	// leases without serializing independent readers of this subscription.
+	deliveryMu sync.RWMutex
 	// Delta marks groups with at least one delta-refresh member; eligible
 	// refreshes ship patches. Atomic: upgraded from session goroutines at
 	// member attach while drain workers read it.
@@ -96,6 +100,25 @@ type Subscription struct {
 	// authMu; nil until the first install.
 	authMu   sync.Mutex
 	authGate any
+}
+
+// LockDelivery excludes generation deliveries during a gate change. Acquire
+// before any registry lock; never hold a registry lock while waiting here.
+func (s *Subscription) LockDelivery() { s.deliveryMu.Lock() }
+
+func (s *Subscription) UnlockDelivery() { s.deliveryMu.Unlock() }
+
+// WithCurrentGeneration runs fn only for this live subscription's current
+// epoch, holding a delivery lease through fn. Network callbacks must enforce
+// a finite write deadline. A gate change waits for already admitted writes,
+// but cannot be overtaken by new leases once it is waiting.
+func (s *Subscription) WithCurrentGeneration(gen uint64, fn func() error) (bool, error) {
+	s.deliveryMu.RLock()
+	defer s.deliveryMu.RUnlock()
+	if s.cancelled.Load() || s.Gen.Load() != gen {
+		return false, nil
+	}
+	return true, fn()
 }
 
 // SetAuthGate records the gate admitted for the subscription. Called by

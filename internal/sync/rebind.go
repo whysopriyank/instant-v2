@@ -17,15 +17,12 @@ import (
 // effect from the first generation that loads it; allow likewise. Generations
 // that cannot load the current doc are dropped, never served stale.
 //
-// Determinism note (RT-001c): concurrent generations for one subscription
-// serialize their gate swaps on groupsMu and converge on identical content;
-// two generations straddling one rule commit may each run self-consistently
-// under a different version, but no generation ever runs under a doc older
-// than the newest one loaded at its start, and versions only move forward.
-// A commit landing mid-generation (between the reload below and the executor
-// run) can still color that single in-flight generation; closing that
-// microsecond window would require emit-side versioning, which is out of
-// scope for this packet.
+// Concurrent loads converge on an intervening installed gate rather than
+// replacing it with a delayed load. Gate installation takes the subscription's
+// exclusive delivery lock before groupsMu. SSE holds a read lease through its
+// bounded write/flush: admitted writes can finish before installation, but old
+// epochs cannot start writing after it. This boundary is an observed gate swap,
+// not the physical database commit or the time a client receives bytes.
 
 // RefreshGate returns the gate the current refresh generation must run
 // under, plus whether this call re-gated the subscription. It reloads the
@@ -50,9 +47,8 @@ func (m *Manager) RefreshGate(ctx context.Context, sub *reactive.Subscription) (
 	// outside it. Holding groupsMu across rule-store I/O stalled every
 	// group on one wedged load; the swap below rechecks under the lock so
 	// concurrent generations still converge on identical content. Lock
-	// order matches attachGroup (groupsMu outermost, catalog leaf lock
-	// inside rulesFor only when called under it — here rulesFor runs
-	// unlocked, so no inversion).
+	// order for mutation is delivery lease → groupsMu → subscription state.
+	// Rule loading runs without any of these locks.
 	m.groupsMu.Lock()
 	old, _ := sub.AttachCtx.(*QueryGate)
 	m.groupsMu.Unlock()
@@ -63,6 +59,8 @@ func (m *Manager) RefreshGate(ctx context.Context, sub *reactive.Subscription) (
 	if err != nil {
 		return nil, false, err
 	}
+	sub.LockDelivery()
+	defer sub.UnlockDelivery()
 	m.groupsMu.Lock()
 	defer m.groupsMu.Unlock()
 	// A concurrent generation already re-gated while we loaded; converge.
@@ -97,31 +95,33 @@ func (m *Manager) RefreshGate(ctx context.Context, sub *reactive.Subscription) (
 
 // PublishGeneration commits one fanned-out generation as the
 // subscription's served state, coordinated with re-gating (RT-001): the
-// epoch comparison runs under groupsMu — the same lock every swap takes —
+// epoch comparison runs under the delivery lease — excluded by every swap —
 // so a re-gate landing between fan-out and publication refuses the stale
 // commit instead of restoring superseded state over a cleared (or newer)
 // snapshot. Snapshot-then-watermark order matches the notifier's
 // conservative-skew contract. False drops the generation to the retry
-// path, which recomputes under the new gate. Lock order groupsMu → sub.mu
-// matches snapshotOrRefresh; no path takes them in reverse.
+// path, which recomputes under the new gate. Publication still takes groupsMu
+// to serialize snapshot/watermark pairs from concurrent publishers. Lock order
+// delivery → groupsMu → sub.mu; no network I/O runs under groupsMu.
 func (m *Manager) PublishGeneration(sub *reactive.Subscription, gen uint64, result json.RawMessage, txID int64) bool {
 	if sub == nil {
 		return false
 	}
-	m.groupsMu.Lock()
-	defer m.groupsMu.Unlock()
-	if sub.Gen.Load() != gen {
-		return false
-	}
-	sub.SetSnapshot(result)
-	sub.TxID.Store(txID)
-	return true
+	current, _ := sub.WithCurrentGeneration(gen, func() error {
+		m.groupsMu.Lock()
+		defer m.groupsMu.Unlock()
+		sub.SetSnapshot(result)
+		sub.TxID.Store(txID)
+		return nil
+	})
+	return current
 }
 
 // rebindGroupLocked swaps a group's admitted gate after a version-mismatched
 // attach (RT-001d) and drops served state atomically so the joiner's initial
 // answer refreshes under the new gate. Clear-then-bump order matches
-// RefreshGate; see ClearServedState. Caller must hold groupsMu.
+// RefreshGate; see ClearServedState. Caller must hold the subscription's
+// exclusive delivery lock, then groupsMu (in that order).
 func (m *Manager) rebindGroupLocked(g *queryGroup, doc *perms.RuleDoc) {
 	gate := NewQueryGate(doc, g.admittedAdmin())
 	g.sub.AttachCtx = gate
