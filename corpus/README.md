@@ -54,13 +54,16 @@ for a real service. `relations.json` seeds the forward-relation regression.
 | 17 | Reusing an emitted cursor advances to the second entity |
 | 18 | Aliased cardinality-one forward relation retains reference/child projection |
 
-The manifest records 22 narrowly covered surfaces, seven gaps and two unsupported
-surfaces, with zero v1 captures. The matrix currently has 25 entries: 9 covered,
-15 gaps, and 1 unsupported case. Remaining gaps include the full
-cardinality/merge/cascade matrix, dynamic permission
-bindings/fallbacks, token auth, multi-client room fanout, delta refresh, SSE and
-HTTP/SDK capture. Sync/stream acknowledgement placeholders and cross-node rooms
-are explicitly unsupported, not asserted as implemented parity.
+The manifest records 22 narrowly covered surfaces, six gaps and three unsupported
+surfaces, with zero v1 captures. The matrix currently has 26 entries: 9 covered,
+13 gaps, and 4 unsupported cases. Remaining gaps include the full
+cardinality/merge/cascade matrix, token auth, multi-client room fanout, delta
+refresh, SSE and HTTP/SDK capture. Dynamic data-dependent view rules are an
+explicit DA-004V exclusion: the `ws.permissions.dynamic` surface and
+`permissions-ws-dynamic-view-exclusion` row are `unsupported`, and package/DB
+tests do not become corpus or release acceptance. Sync/stream acknowledgement
+placeholders and cross-node rooms are explicitly unsupported, not asserted as
+implemented parity.
 
 ## Promoted query regressions
 
@@ -116,15 +119,33 @@ fixture bootstrap above is v2-only, not a v1 bootstrap implementation.
 
 Differential mode requires a full manifest v1 pin matching the checkout HEAD and
 `--output-dir`; it fails on either transport/decode failure, even when both
-servers failed identically. Zero selected scenarios is an error. `record` remains
-unimplemented and fails explicitly.
+servers failed identically. Zero selected scenarios is an error. WebSocket record
+remains unsupported and fails explicitly (`record mode is unsupported for ws`).
+CF-002 provides bounded HTTP and SSE recording tooling, requiring an explicit
+target, a securely reserved fresh private output directory mode 0700 with a pinned
+identity, caller-supplied endpoint/source/fixture identity metadata, and bounded
+quiescence/size/timeouts, with caller-owned fixture reset. Output directories are resolved
+and reserved via descriptor-relative no-follow traversal (`openat O_NOFOLLOW`, `mkdirat`)
+pinning parent and directory file descriptors and `(dev, ino)` identities without path-based
+cleanup on reservation failure. Publication is atomic and write-once: evidence is written
+to a temporary file via `openat` on the pinned directory file descriptor (mode 0600),
+synced, closed, and published via a kernel no-replace rename (`renameatx_np` on Darwin,
+`renameat2` on Linux) followed by directory sync. Failed publication never performs
+ambiguous named-file deletion: private temporary or
+final artifacts may remain as untrusted incomplete evidence, and the operation returns
+failure. Only a successful return makes an artifact eligible evidence. Non-Unix
+platforms fail closed as unsupported.
 
-Evidence files are write-once, mode 0600, and retain raw received text, normalized
-frames, errors, delta, fixture ID, local v1/v2 revisions and v2 dirty state. Raw
-frames may contain auth/application information: keep the directory private and
-inspect/redact before sharing. Local revision checks do **not** establish which
-revision a remote endpoint is running. A designated comparison run must also
-record endpoint deployment/configuration, equivalent fixture initialization,
+Evidence files retain raw received text, normalized frames, errors, delta, fixture
+ID, local v1/v2 revisions and v2 dirty state. Raw frames may contain auth/application
+information: keep the directory private and inspect/redact before sharing.
+Caller-asserted endpoint ID, source ID, fixture ID, and `fixtureReset=caller-owned`
+metadata are assertions, not proof of candidate revision, true fixture reset, or
+server state. WebSocket recording, client SDK harness bindings, and external
+endpoint process/lifecycle management remain unsupported. Do not claim full
+candidate binding or real fixture reset proof. Local revision checks do **not**
+establish which revision a remote endpoint is running. A designated comparison run
+must also record endpoint deployment/configuration, equivalent fixture initialization,
 and accepted-difference rationale externally. Captures are never automatically
 promoted to oracle entries. `v1-capture` metadata requires a full matching ref,
 a nonempty checked-in raw evidence file, and exact canonical agreement with the

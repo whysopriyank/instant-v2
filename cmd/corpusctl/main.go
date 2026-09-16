@@ -18,9 +18,11 @@ import (
 )
 
 type options struct {
-	mode, transport, corpusDir, suite, target, other, v1Path, v1Ref, outputDir string
-	redactHeaders                                                              headerList
-	timeout                                                                    time.Duration
+	mode, transport, corpusDir, releaseEnvelope, suite, target, other, v1Path, v1Ref, outputDir string
+	endpointID, sourceID, fixtureID                                                             string
+	recordLimit                                                                                 int
+	redactHeaders                                                                               headerList
+	timeout                                                                                     time.Duration
 }
 
 // headerList permits repeatable --redact-header flags while keeping the
@@ -50,28 +52,54 @@ func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 
 func run(args []string, out, diagnostic io.Writer) int {
 	var o options
+	var endpointFlag, endpointIDFlag string
+	var sourceFlag, sourceIDFlag string
+	var fixtureFlag, fixtureIDFlag string
 	flags := flag.NewFlagSet("corpusctl", flag.ContinueOnError)
 	flags.SetOutput(diagnostic)
-	flags.StringVar(&o.mode, "mode", "replay", "validate, replay, differential, or record (unavailable)")
-	flags.StringVar(&o.transport, "transport", "ws", "ws, http, or sse (replay mode)")
+	flags.StringVar(&o.mode, "mode", "replay", "validate, validate-release, replay, differential, or record (http/sse only; ws unsupported)")
+	flags.StringVar(&o.transport, "transport", "ws", "ws, http, or sse (replay or record mode; ws record unsupported)")
 	flags.StringVar(&o.corpusDir, "corpus", "corpus", "corpus directory or one .ndjson file")
+	flags.StringVar(&o.releaseEnvelope, "release-envelope", "", "release-envelope document (required for validate-release)")
 	flags.StringVar(&o.suite, "suite", "", "suite/filename substring")
-	flags.StringVar(&o.target, "target", "", "target WebSocket URL")
+	flags.StringVar(&o.target, "target", "", "target WebSocket or HTTP/SSE URL")
 	flags.StringVar(&o.other, "other", "", "pinned v1 WebSocket URL for differential")
 	flags.StringVar(&o.v1Path, "v1-path", "../instant", "local pinned v1 checkout")
 	flags.StringVar(&o.v1Ref, "v1-ref", "", "expected v1 commit (defaults to corpus manifest)")
-	flags.StringVar(&o.outputDir, "output-dir", "", "new private evidence files (required for differential)")
+	flags.StringVar(&o.outputDir, "output-dir", "", "new private evidence files (required for differential and record)")
+	flags.StringVar(&endpointIDFlag, "endpoint-id", "", "caller-supplied target endpoint identity for record mode")
+	flags.StringVar(&endpointFlag, "endpoint", "", "alias for --endpoint-id")
+	flags.StringVar(&sourceIDFlag, "source-id", "", "caller-supplied source revision/deployment identity for record mode")
+	flags.StringVar(&sourceFlag, "source", "", "alias for --source-id")
+	flags.StringVar(&fixtureIDFlag, "fixture-id", "", "caller-supplied fixture identity for record mode; fixture reset is caller-owned")
+	flags.StringVar(&fixtureFlag, "fixture", "", "alias for --fixture-id")
+	flags.IntVar(&o.recordLimit, "record-limit", 0, "maximum SSE records to capture during record mode")
 	flags.Var(&o.redactHeaders, "redact-header", "additional HTTP header to redact in private evidence (repeatable)")
 	flags.DurationVar(&o.timeout, "timeout", 12*time.Second, "per-scenario timeout")
 	if err := flags.Parse(args); err != nil {
 		return 2
+	}
+	if endpointIDFlag != "" {
+		o.endpointID = endpointIDFlag
+	} else {
+		o.endpointID = endpointFlag
+	}
+	if sourceIDFlag != "" {
+		o.sourceID = sourceIDFlag
+	} else {
+		o.sourceID = sourceFlag
+	}
+	if fixtureIDFlag != "" {
+		o.fixtureID = fixtureIDFlag
+	} else {
+		o.fixtureID = fixtureFlag
 	}
 	fail := func(err error) int { _, _ = fmt.Fprintf(diagnostic, "corpusctl: %v\n", err); return 1 }
 	if flags.NArg() != 0 {
 		return fail(fmt.Errorf("unexpected positional arguments"))
 	}
 	switch o.mode {
-	case "validate":
+	case "validate", "validate-release":
 		if o.suite != "" {
 			return fail(fmt.Errorf("validate checks the entire corpus; --suite is not supported"))
 		}
@@ -79,12 +107,26 @@ func run(args []string, out, diagnostic io.Writer) int {
 		if err != nil {
 			return fail(err)
 		}
+		if o.mode == "validate-release" {
+			if o.releaseEnvelope == "" {
+				return fail(fmt.Errorf("validate-release requires --release-envelope"))
+			}
+			if err := corpus.ValidateDA004VExclusion(o.corpusDir, o.releaseEnvelope); err != nil {
+				return fail(err)
+			}
+		}
 		if _, err := fmt.Fprint(out, report); err != nil {
 			return fail(err)
 		}
 		return 0
 	case "record":
-		return fail(fmt.Errorf("record unavailable: SDK/HTTP capture is not implemented; authored scenarios must be labeled spec or regression"))
+		if o.transport == "ws" {
+			return fail(fmt.Errorf("record mode is unsupported for ws; record is implemented only for http and sse transports"))
+		}
+		if o.transport != "http" && o.transport != "sse" {
+			return fail(fmt.Errorf("unknown transport %q", o.transport))
+		}
+		return runRecordHTTPOrSSE(o, out, diagnostic)
 	case "replay", "differential":
 	default:
 		return fail(fmt.Errorf("unknown mode %q", o.mode))
@@ -304,24 +346,8 @@ func writeEvidence(o options, sc *corpus.Scenario, a, b corpus.ReplayResult, del
 		Other         frameEvidence `json:"other"`
 		Delta         string        `json:"delta"`
 	}{sc.Meta.Suite, sc.Meta.SeedFixture, o.mode, o.v1Ref, v2Ref, len(dirty) > 0, "canonical-v1", evidenceOf(a), evidenceOf(b), delta}
-	data, err := json.MarshalIndent(record, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(o.outputDir, 0700); err != nil {
-		return err
-	}
 	name := filepath.Base(sc.File) + ".evidence.json"
-	f, err := os.OpenFile(filepath.Join(o.outputDir, name), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	if err != nil {
-		return err
-	}
-	_, writeErr := f.Write(append(data, '\n'))
-	closeErr := f.Close()
-	if writeErr != nil {
-		return writeErr
-	}
-	return closeErr
+	return corpus.WriteEvidence(filepath.Join(o.outputDir, name), record)
 }
 
 func writeHTTPEvidence(o options, expected corpus.HTTPExchange, result corpus.HTTPReplayResult) error {
@@ -446,4 +472,258 @@ func replayStatus(passed bool) string {
 		return "covered"
 	}
 	return "gap"
+}
+
+func runRecordHTTPOrSSE(o options, out, diagnostic io.Writer) int {
+	fail := func(err error) int { _, _ = fmt.Fprintf(diagnostic, "corpusctl: %v\n", err); return 1 }
+
+	metadata := corpus.RecordMetadata{
+		EndpointID:   strings.TrimSpace(o.endpointID),
+		SourceID:     strings.TrimSpace(o.sourceID),
+		FixtureID:    strings.TrimSpace(o.fixtureID),
+		FixtureReset: "caller-owned",
+	}
+	if err := metadata.Validate(); err != nil {
+		return fail(err)
+	}
+
+	if o.target == "" {
+		return fail(fmt.Errorf("--target is required for record mode"))
+	}
+	if o.outputDir == "" {
+		return fail(fmt.Errorf("--output-dir is required for record mode"))
+	}
+
+	reservedDir, err := corpus.ReserveOutputDir(o.outputDir)
+	if err != nil {
+		return fail(err)
+	}
+	defer reservedDir.Close()
+
+	if o.suite != "" && !strings.Contains(filepath.Base(o.corpusDir), o.suite) {
+		return fail(fmt.Errorf("--suite for HTTP/SSE requires the scenario filename to match"))
+	}
+
+	info, err := os.Stat(o.corpusDir)
+	if err != nil {
+		return fail(err)
+	}
+	if info.IsDir() {
+		return fail(fmt.Errorf("record mode requires one scenario JSON file, not a directory"))
+	}
+	b, err := os.ReadFile(o.corpusDir)
+	if err != nil {
+		return fail(err)
+	}
+
+	ctx := context.Background()
+	client := http.DefaultClient
+
+	if o.transport == "http" {
+		var expected corpus.HTTPExchange
+		if err := json.Unmarshal(b, &expected); err != nil || (expected.Request.Target == "" && expected.Request.Method == "") {
+			var req corpus.HTTPRequest
+			if rerr := json.Unmarshal(b, &req); rerr != nil || req.Target == "" {
+				return fail(fmt.Errorf("HTTP scenario must declare request target"))
+			}
+			expected.Request = req
+		}
+		if expected.Request.Target == "" {
+			return fail(fmt.Errorf("HTTP scenario must declare request target"))
+		}
+
+		cctx := ctx
+		if o.timeout > 0 {
+			var cancel context.CancelFunc
+			cctx, cancel = context.WithTimeout(ctx, o.timeout)
+			defer cancel()
+		}
+
+		captured, err := corpus.CaptureHTTP(cctx, client, o.target, expected.Request, corpus.CaptureOptions{})
+		if err != nil {
+			return fail(fmt.Errorf("HTTP capture failed: %w", err))
+		}
+
+		if err := writeHTTPRecordEvidence(reservedDir, o, metadata, captured); err != nil {
+			return fail(err)
+		}
+		_, _ = fmt.Fprintf(out, "PASS %s (http record)\n", filepath.Base(o.corpusDir))
+		return 0
+	}
+
+	// Transport == "sse"
+	var scenario corpus.SSEScenario
+	if err := json.Unmarshal(b, &scenario); err != nil {
+		return fail(fmt.Errorf("SSE scenario: %w", err))
+	}
+	if scenario.ID == "" {
+		scenario.ID = strings.TrimSuffix(filepath.Base(o.corpusDir), filepath.Ext(o.corpusDir))
+	}
+	if err := corpus.ValidateScenarioID(scenario.ID); err != nil {
+		return fail(fmt.Errorf("invalid SSE scenario ID %q: %w", scenario.ID, err))
+	}
+	if scenario.Connect.Request.Target == "" {
+		return fail(fmt.Errorf("SSE scenario requires connect request target"))
+	}
+	if scenario.Fixture != "" && metadata.FixtureID != "" && scenario.Fixture != metadata.FixtureID {
+		return fail(fmt.Errorf("fixture flag %q does not match scenario fixture %q", metadata.FixtureID, scenario.Fixture))
+	}
+
+	recordLimit := o.recordLimit
+	if recordLimit <= 0 {
+		recordLimit = len(scenario.Expected)
+	}
+	if recordLimit <= 0 {
+		return fail(fmt.Errorf("SSE record requires a positive record limit (via --record-limit or scenario expected records)"))
+	}
+
+	postReqs := make([]corpus.HTTPRequest, len(scenario.Posts))
+	for i, post := range scenario.Posts {
+		postReqs[i] = post.Request
+	}
+
+	cctx := ctx
+	if o.timeout > 0 {
+		var cancel context.CancelFunc
+		cctx, cancel = context.WithTimeout(ctx, o.timeout)
+		defer cancel()
+	}
+
+	result := corpus.CaptureSSEWithOptions(cctx, client, o.target, scenario.Connect.Request, postReqs, recordLimit, o.timeout, corpus.SSECaptureOptions{
+		Limits:     scenario.Limits,
+		Quiescence: scenario.Quiescence,
+	})
+	if result.Err != nil {
+		return fail(fmt.Errorf("SSE capture failed: %w", result.Err))
+	}
+	if len(result.Records) < recordLimit {
+		return fail(fmt.Errorf("SSE capture incomplete: captured %d records, expected %d", len(result.Records), recordLimit))
+	}
+
+	if err := writeSSERecordEvidence(reservedDir, o, metadata, scenario.ID, result, recordLimit); err != nil {
+		return fail(err)
+	}
+	_, _ = fmt.Fprintf(out, "PASS %s (sse record)\n", scenario.ID)
+	return 0
+}
+
+func writeHTTPRecordEvidence(reservedDir *corpus.ReservedDir, o options, meta corpus.RecordMetadata, captured corpus.HTTPExchange) error {
+	policy := redactionPolicy(o)
+	v2Ref, err := revision(".")
+	if err != nil {
+		return err
+	}
+	dirty, err := exec.Command("git", "status", "--porcelain").Output()
+	if err != nil {
+		return err
+	}
+
+	redactedRaw := corpus.RedactExchange(captured, policy)
+
+	var normalizedBody []byte
+	if strings.Contains(strings.ToLower(captured.Response.Headers.Get("Content-Type")), "json") {
+		if b, err := corpus.CanonicalBytesOpts(captured.Response.Body, corpus.CanonicalOptions{}); err == nil {
+			normalizedBody = b
+		} else {
+			normalizedBody = append([]byte(nil), captured.Response.Body...)
+		}
+	} else {
+		normalizedBody = append([]byte(nil), captured.Response.Body...)
+	}
+
+	normalizedHeaders := corpus.ComparableHeaders(redactedRaw.Response.Headers, nil)
+
+	record := struct {
+		Mode            string                `json:"mode"`
+		Transport       string                `json:"transport"`
+		Scenario        string                `json:"scenario"`
+		Status          string                `json:"status"`
+		Metadata        corpus.RecordMetadata `json:"metadata"`
+		TargetURL       string                `json:"targetUrl"`
+		RedactedHeaders []string              `json:"redactedHeaders"`
+		V2Ref           string                `json:"v2Ref"`
+		V2Dirty         bool                  `json:"v2Dirty"`
+		Raw             corpus.HTTPExchange   `json:"raw"`
+		Normalized      struct {
+			Body    []byte      `json:"body,omitempty"`
+			Headers http.Header `json:"headers,omitempty"`
+		} `json:"normalized"`
+		DurationMS int64 `json:"durationMs"`
+	}{
+		Mode:            "record",
+		Transport:       "http",
+		Scenario:        filepath.Base(o.corpusDir),
+		Status:          "recorded",
+		Metadata:        meta,
+		TargetURL:       o.target,
+		RedactedHeaders: append([]string(nil), policy.HeaderNames...),
+		V2Ref:           v2Ref,
+		V2Dirty:         len(dirty) > 0,
+		Raw:             redactedRaw,
+		DurationMS:      captured.DurationMS,
+	}
+	record.Normalized.Body = normalizedBody
+	record.Normalized.Headers = normalizedHeaders
+
+	filename := filepath.Base(o.corpusDir) + ".http.evidence.json"
+	return reservedDir.WriteEvidence(filename, record)
+}
+
+func writeSSERecordEvidence(reservedDir *corpus.ReservedDir, o options, meta corpus.RecordMetadata, scenarioID string, result corpus.SSECaptureResult, recordLimit int) error {
+	policy := redactionPolicy(o)
+	v2Ref, err := revision(".")
+	if err != nil {
+		return err
+	}
+	dirty, err := exec.Command("git", "status", "--porcelain").Output()
+	if err != nil {
+		return err
+	}
+
+	redactedConnect := corpus.RedactExchange(result.Connect, policy)
+	redactedPosts := redactExchanges(result.Posts, policy)
+	normalizedRecords := corpus.NormalizeSSERecords(result.Records)
+
+	record := struct {
+		Mode            string                `json:"mode"`
+		Transport       string                `json:"transport"`
+		Scenario        string                `json:"scenario"`
+		ID              string                `json:"id"`
+		Status          string                `json:"status"`
+		Metadata        corpus.RecordMetadata `json:"metadata"`
+		TargetURL       string                `json:"targetUrl"`
+		RedactedHeaders []string              `json:"redactedHeaders"`
+		V2Ref           string                `json:"v2Ref"`
+		V2Dirty         bool                  `json:"v2Dirty"`
+		RecordLimit     int                   `json:"recordLimit"`
+		RawConnect      corpus.HTTPExchange   `json:"rawConnect"`
+		RawPosts        []corpus.HTTPExchange `json:"rawPosts,omitempty"`
+		RawRecords      []corpus.SSERecord    `json:"rawRecords"`
+		Normalized      struct {
+			ConnectHeaders http.Header        `json:"connectHeaders,omitempty"`
+			Records        []corpus.SSERecord `json:"records"`
+		} `json:"normalized"`
+		DurationMS int64 `json:"durationMs"`
+	}{
+		Mode:            "record",
+		Transport:       "sse",
+		Scenario:        scenarioID,
+		ID:              scenarioID,
+		Status:          "recorded",
+		Metadata:        meta,
+		TargetURL:       o.target,
+		RedactedHeaders: append([]string(nil), policy.HeaderNames...),
+		V2Ref:           v2Ref,
+		V2Dirty:         len(dirty) > 0,
+		RecordLimit:     recordLimit,
+		RawConnect:      redactedConnect,
+		RawPosts:        redactedPosts,
+		RawRecords:      result.Records,
+		DurationMS:      result.DurationMS,
+	}
+	record.Normalized.ConnectHeaders = corpus.ComparableHeaders(redactedConnect.Response.Headers, nil)
+	record.Normalized.Records = normalizedRecords
+
+	filename := scenarioID + ".sse.evidence.json"
+	return reservedDir.WriteEvidence(filename, record)
 }

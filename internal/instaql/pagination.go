@@ -25,11 +25,26 @@ func effectiveOrder(o *Options) *Order {
 	if o.Order != nil {
 		return o.Order
 	}
+	if o.fallbackIDOrder {
+		return nil
+	}
 	if o.Limit != nil || o.First != nil || o.Last != nil || o.Offset != nil ||
 		o.Before != nil || o.After != nil {
 		return &Order{K: "serverCreatedAt"}
 	}
 	return nil
+}
+
+// paginationOptions preserves the legacy ID order when a paginated etype has
+// no implicit id attr. The serverCreatedAt order is still used for explicit
+// orders and for the default path when the id triple exists.
+func paginationOptions(o *Options, idAttr *platform.Attr) *Options {
+	if o == nil || idAttr != nil || o.Order != nil || effectiveOrder(o) == nil {
+		return o
+	}
+	copy := *o
+	copy.fallbackIDOrder = true
+	return &copy
 }
 
 func effectiveLimitOffset(o *Options) (limit, offset int) {
@@ -59,6 +74,9 @@ func canUseIDFastPath(o *Options, parentRef *refLink) bool {
 	}
 	if o == nil {
 		return true
+	}
+	if o.fallbackIDOrder && (len(o.Before) > 0 || len(o.After) > 0 || o.Last != nil) {
+		return false
 	}
 	return effectiveOrder(o) == nil
 }

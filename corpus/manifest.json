@@ -69,8 +69,8 @@
     },
     {
       "id": "ws.permissions.dynamic",
-      "status": "gap",
-      "note": "Binding and fallback corpus pending; dynamic shared subscriptions are intentionally rejected."
+      "status": "unsupported",
+      "note": "Dynamic data-dependent view rules are explicitly excluded; runtime paths reject them before protected rows are fetched or returned."
     },
     {
       "id": "ws.permissions.view-deny",
@@ -283,13 +283,13 @@
       "transport": "ws",
       "fixture": "deny",
       "owner": "internal/corpus",
-      "expectedState": "bind fallback and denied-state non-leakage are explicit",
-      "status": "gap",
+      "expectedState": "dynamic view rules are rejected before protected rows are fetched or returned",
+      "status": "unsupported",
       "oracle": {
         "kind": "spec",
         "source": "docs/reference/03-protocol.md permissions model"
       },
-      "note": "Dynamic bind/fallback coverage remains package evidence only."
+      "note": "Explicit DA-004V exclusion; package/runtime and DB-backed tests are implementation evidence only, not corpus compatibility acceptance."
     },
     {
       "id": "permissions-lifecycle",
@@ -299,13 +299,29 @@
       "transport": "sse",
       "fixture": "deny",
       "owner": "internal/corpus",
-      "expectedState": "permission changes do not widen an existing stream",
-      "status": "gap",
+      "expectedState": "dynamic view rules are rejected before protected rows are fetched or returned",
+      "status": "unsupported",
       "oracle": {
         "kind": "spec",
         "source": "docs/reference/03-protocol.md permissions model"
       },
-      "note": "SSE permission lifecycle capture is not authored."
+      "note": "Dynamic view lifecycle support is excluded; no corpus stream claims support for data-dependent view rules."
+    },
+    {
+      "id": "permissions-ws-dynamic-view-exclusion",
+      "family": "permissions",
+      "case": "denied-error",
+      "surface": "ws.permissions.dynamic",
+      "transport": "ws",
+      "fixture": "deny",
+      "owner": "internal/corpus",
+      "expectedState": "dynamic view rules are rejected before protected rows are fetched or returned",
+      "status": "unsupported",
+      "oracle": {
+        "kind": "spec",
+        "source": "DEC-001 DA-004V explicit exclusion"
+      },
+      "note": "Required exclusion evidence; package/runtime and DB-backed tests are implementation evidence only, not corpus compatibility acceptance."
     },
     {
       "id": "query-filter-positive",

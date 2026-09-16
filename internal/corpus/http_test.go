@@ -2,13 +2,11 @@ package corpus
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -210,23 +208,6 @@ func TestCaptureSSERequiresBoundedRecordCount(t *testing.T) {
 	}
 }
 
-func TestWriteEvidenceIsPrivateAndWriteOnce(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "nested", "evidence.json")
-	if err := WriteEvidence(path, map[string]any{"raw": json.RawMessage(`{"ok":true}`)}); err != nil {
-		t.Fatal(err)
-	}
-	info, err := os.Stat(path)
-	if err != nil || info.Mode().Perm() != 0600 {
-		t.Fatalf("evidence mode = %v err=%v", info, err)
-	}
-	if err := WriteEvidence(path, map[string]any{"overwrite": true}); err == nil {
-		t.Fatal("evidence overwrite was accepted")
-	}
-	if err := WriteEvidence(filepath.Join("..", "escape.json"), map[string]any{}); err == nil {
-		t.Fatal("relative traversal evidence path was accepted")
-	}
-}
-
 func TestComparableHeadersMergesCaseVariantValues(t *testing.T) {
 	got := comparableHeaders(http.Header{
 		"x-trace": {"b"},
@@ -408,5 +389,79 @@ func TestQuiescenceExpiredDistinguishesParentAndChildDeadline(t *testing.T) {
 	defer cancelChildCanceled()
 	if quiescenceExpired(parentCancel, childCanceled, context.Canceled) {
 		t.Fatal("parent cancellation was incorrectly classified as quiescence")
+	}
+}
+
+func TestRecordMetadataValidation(t *testing.T) {
+	meta := RecordMetadata{
+		EndpointID:   "endpoint-1",
+		SourceID:     "v1-a4d2ef3",
+		FixtureID:    "smoke",
+		FixtureReset: "caller-owned",
+	}
+	if err := meta.Validate(); err != nil {
+		t.Fatalf("valid metadata rejected: %v", err)
+	}
+
+	missingEndpoint := meta
+	missingEndpoint.EndpointID = ""
+	if err := missingEndpoint.Validate(); err == nil || !strings.Contains(err.Error(), "endpoint identity") {
+		t.Fatalf("missing endpoint accepted: %v", err)
+	}
+
+	missingSource := meta
+	missingSource.SourceID = ""
+	if err := missingSource.Validate(); err == nil || !strings.Contains(err.Error(), "source identity") {
+		t.Fatalf("missing source accepted: %v", err)
+	}
+
+	missingFixture := meta
+	missingFixture.FixtureID = ""
+	if err := missingFixture.Validate(); err == nil || !strings.Contains(err.Error(), "fixture identity") {
+		t.Fatalf("missing fixture accepted: %v", err)
+	}
+}
+
+func TestCaptureSSEIncompleteStreamFails(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"op\":\"only-one\"}\n\n")
+		// Server closes stream immediately after 1 record
+	}))
+	defer srv.Close()
+
+	// Ask for 3 records, but server only sends 1
+	res := CaptureSSE(context.Background(), srv.Client(), srv.URL, HTTPRequest{Method: http.MethodGet, Target: "/stream"}, nil, 3, time.Second)
+	if res.Err == nil || !strings.Contains(res.Err.Error(), "incomplete SSE stream") {
+		t.Fatalf("incomplete SSE stream was accepted: %#v", res)
+	}
+	if len(res.Records) != 1 {
+		t.Fatalf("expected 1 collected record before failure: %#v", res.Records)
+	}
+}
+
+func TestCaptureSSEQuiescenceDetectsExtraRecord(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		_, _ = io.WriteString(w, "data: {\"n\":1}\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+		// Write an extra record shortly after
+		time.Sleep(5 * time.Millisecond)
+		_, _ = io.WriteString(w, "data: {\"n\":2}\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}))
+	defer srv.Close()
+
+	// Capture only 1 record, but server emits 2nd record within 50ms quiescence
+	res := CaptureSSEWithOptions(context.Background(), srv.Client(), srv.URL, HTTPRequest{Method: http.MethodGet, Target: "/stream"}, nil, 1, time.Second, SSECaptureOptions{
+		Quiescence: 50 * time.Millisecond,
+	})
+	if res.Err == nil || !strings.Contains(res.Err.Error(), "extra SSE record") {
+		t.Fatalf("extra SSE record during quiescence was not caught: %#v", res)
 	}
 }

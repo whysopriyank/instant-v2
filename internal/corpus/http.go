@@ -16,8 +16,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -185,6 +187,12 @@ func normalizedHTTPBodyPair(expected, actual HTTPResponse) ([]byte, []byte) {
 }
 
 func comparableHeaders(h http.Header, ignored []string) http.Header {
+	return ComparableHeaders(h, ignored)
+}
+
+// ComparableHeaders sorts and canonicalizes header keys, merging values and
+// stripping volatile transport headers like Date and Content-Length.
+func ComparableHeaders(h http.Header, ignored []string) http.Header {
 	out := make(http.Header)
 	ignore := make(map[string]bool, len(ignored)+3)
 	for _, name := range []string{"Date", "Content-Length", "Transfer-Encoding"} {
@@ -360,12 +368,28 @@ type SSECaptureResult struct {
 	Err        error
 }
 
+// SSECaptureOptions tunes bounds and quiescence during SSE capture.
+type SSECaptureOptions struct {
+	Limits     SSELimits
+	Quiescence time.Duration
+}
+
 // CaptureSSE executes the real GET/POST pair and captures exactly recordLimit
 // stream records. It does not seed/reset fixtures. The records retain raw SSE
 // blocks and relative arrival timing; timing is diagnostic, not an oracle.
 func CaptureSSE(ctx context.Context, client *http.Client, baseURL string, connect HTTPRequest, posts []HTTPRequest, recordLimit int, timeout time.Duration) (res SSECaptureResult) {
+	return CaptureSSEWithOptions(ctx, client, baseURL, connect, posts, recordLimit, timeout, SSECaptureOptions{})
+}
+
+// CaptureSSEWithOptions executes SSE capture with caller-specified bounds and quiescence.
+func CaptureSSEWithOptions(ctx context.Context, client *http.Client, baseURL string, connect HTTPRequest, posts []HTTPRequest, recordLimit int, timeout time.Duration, opts SSECaptureOptions) (res SSECaptureResult) {
 	start := time.Now()
-	defer func() { res.DurationMS = time.Since(start).Milliseconds() }()
+	defer func() {
+		res.DurationMS = time.Since(start).Milliseconds()
+		if res.Err == nil && len(res.Records) < recordLimit {
+			res.Err = fmt.Errorf("incomplete SSE stream: captured %d records, want %d", len(res.Records), recordLimit)
+		}
+	}()
 	if recordLimit <= 0 {
 		res.Err = errors.New("SSE capture requires a positive record limit")
 		return
@@ -411,18 +435,43 @@ func CaptureSSE(ctx context.Context, client *http.Client, baseURL string, connec
 	}
 	readResult := make(chan sseReadResult, 1)
 	go func() {
-		reader := newSSEReader(resp.Body, SSELimits{})
+		reader := newSSEReader(resp.Body, opts.Limits)
 		got := make([]SSERecord, 0, recordLimit)
 		for len(got) < recordLimit {
 			record, readErr := reader.read()
 			if readErr != nil {
-				readResult <- sseReadResult{records: got, err: readErr}
+				if errors.Is(readErr, io.EOF) {
+					readResult <- sseReadResult{records: got, err: fmt.Errorf("incomplete SSE stream: server closed stream after %d records, expected %d: %w", len(got), recordLimit, readErr)}
+				} else {
+					readResult <- sseReadResult{records: got, err: readErr}
+				}
 				return
 			}
 			record.ElapsedMS = time.Since(start).Milliseconds()
 			got = append(got, record)
 		}
-		readResult <- sseReadResult{records: got}
+		window := opts.Quiescence
+		if window <= 0 {
+			window = 25 * time.Millisecond
+		}
+		qctx, cancel := context.WithTimeout(ctx, window)
+		defer cancel()
+		rec, qerr := readSSERecordWithContext(qctx, reader)
+		if qerr == nil {
+			rec.ElapsedMS = time.Since(start).Milliseconds()
+			got = append(got, rec)
+			readResult <- sseReadResult{records: got, err: fmt.Errorf("extra SSE record received during quiescence window (%d expected)", recordLimit)}
+		} else if errors.Is(qerr, io.EOF) {
+			if ctx.Err() != nil {
+				readResult <- sseReadResult{records: got, err: ctx.Err()}
+			} else {
+				readResult <- sseReadResult{records: got, err: nil}
+			}
+		} else if quiescenceExpired(ctx, qctx, qerr) {
+			readResult <- sseReadResult{records: got, err: nil}
+		} else {
+			readResult <- sseReadResult{records: got, err: qerr}
+		}
 	}()
 	for _, post := range posts {
 		captured, postErr := CaptureHTTP(ctx, client, baseURL, post, CaptureOptions{})
@@ -809,31 +858,126 @@ func NormalizeSSERecords(records []SSERecord) []SSERecord {
 	return out
 }
 
+// ReservedDir represents a securely reserved, private (mode 0700) output directory
+// with a pinned identity (file descriptor and dev/ino). It prevents path repointing
+// or symlink swap races between reservation and publication.
+type ReservedDir struct {
+	path       string
+	dirFile    *os.File
+	parentFile *os.File
+	dev        uint64
+	ino        uint64
+	parentDev  uint64
+	parentIno  uint64
+	baseName   string
+	closed     bool
+	mu         sync.Mutex
+}
+
+// Path returns the cleaned filesystem path of the reserved directory.
+func (d *ReservedDir) Path() string {
+	return d.path
+}
+
+// Close releases the directory file descriptors held by the reservation.
+func (d *ReservedDir) Close() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed {
+		return nil
+	}
+	d.closed = true
+	var errs []error
+	if d.dirFile != nil {
+		if err := d.dirFile.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if d.parentFile != nil {
+		if err := d.parentFile.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// EvidencePath joins a validated scenario ID to this reserved directory.
+func (d *ReservedDir) EvidencePath(scenarioID, suffix string) (string, error) {
+	return EvidencePath(d.path, scenarioID, suffix)
+}
+
+// WriteEvidence writes one private, write-once JSON artifact into this reserved
+// directory using atomic publication (temporary file mode 0600, fsync, atomic
+// rename with no-replace semantics, and directory sync). Failed publication does
+// not attempt ambiguous named-file cleanup.
+func (d *ReservedDir) WriteEvidence(filenameOrPath string, value any) error {
+	return writeEvidenceInDir(d, filenameOrPath, value, writeHooks{})
+}
+
+type reserveHooks struct {
+	afterStatBeforeMkdir func() error
+}
+
+type writeHooks struct {
+	beforeTempCreate func() error
+	beforeWrite      func() error
+	beforeSync       func() error
+	beforeClose      func() error
+	beforeDirSync    func() error
+}
+
+func validateFreshOutputDirPath(dir string) (string, error) {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return "", errors.New("output directory is required")
+	}
+	cleaned := filepath.Clean(dir)
+	if cleaned == "." || cleaned == string(filepath.Separator) {
+		return "", fmt.Errorf("invalid output directory %q", dir)
+	}
+	if !filepath.IsAbs(cleaned) && (cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator))) {
+		return "", fmt.Errorf("output directory escapes current path: %q", dir)
+	}
+	parts := strings.Split(cleaned, string(filepath.Separator))
+	for _, p := range parts {
+		if p == ".." {
+			return "", fmt.Errorf("output directory escapes current path: %q", dir)
+		}
+	}
+
+	evalPath := cleaned
+	if runtime.GOOS == "darwin" && filepath.IsAbs(cleaned) {
+		for _, sysPrefix := range []string{"/var", "/tmp", "/etc"} {
+			if evalPath == sysPrefix || strings.HasPrefix(evalPath, sysPrefix+"/") {
+				evalPath = "/private" + evalPath
+				break
+			}
+		}
+	}
+	return evalPath, nil
+}
+
+// ReserveOutputDir securely reserves a fresh private output directory with mode 0700
+// and pins its file descriptor and (dev, ino) identity. It rejects existing paths
+// (including empty dirs and regular files), symlink components, parent symlink
+// redirection, and path traversal.
+func ReserveOutputDir(dir string) (*ReservedDir, error) {
+	return reserveOutputDirPlatform(dir)
+}
+
+// CheckFreshOutputDir ensures the output directory path is safe, fresh, and does not already
+// exist. It rejects existing output paths (including empty dirs and regular files),
+// symlink components, parent symlink redirection, and path traversal.
+func CheckFreshOutputDir(dir string) error {
+	return checkFreshOutputDirPlatform(dir)
+}
+
 // WriteEvidence writes one private, write-once JSON artifact. The caller may
 // use RedactEvidence before passing a value here; no overwrite is permitted.
+// Publication is atomic (temporary file mode 0600, fsync, atomic no-replace publication,
+// directory sync). Failed publication may leave private untrusted residue.
 func WriteEvidence(path string, value any) error {
-	if filepath.Clean(path) != path || path == "." || path == string(filepath.Separator) {
-		return fmt.Errorf("invalid evidence path %q", path)
-	}
-	if !filepath.IsAbs(path) && (path == ".." || strings.HasPrefix(path, ".."+string(filepath.Separator))) {
-		return fmt.Errorf("evidence path escapes output directory: %q", path)
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return err
-	}
-	b, err := json.MarshalIndent(value, "", "  ")
-	if err != nil {
-		return err
-	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(append(b, '\n')); err != nil {
-		_ = f.Close()
-		return err
-	}
-	return f.Close()
+	return writeEvidenceWithHooks(path, value, writeHooks{})
 }
 
 // ValidateScenarioID accepts only a filename-safe identifier. IDs are used in
@@ -908,4 +1052,27 @@ func redactHeaders(in http.Header, names []string) http.Header {
 // copying transport framing behavior into the command.
 func MarshalSSERecords(records []SSERecord) ([]byte, error) {
 	return json.Marshal(NormalizeSSERecords(records))
+}
+
+// RecordMetadata records caller-supplied provenance and fixture identity.
+// The CLI does not provision or reset external fixtures; reset is caller-owned.
+type RecordMetadata struct {
+	EndpointID   string `json:"endpointId"`
+	SourceID     string `json:"sourceId"`
+	FixtureID    string `json:"fixtureId"`
+	FixtureReset string `json:"fixtureReset,omitempty"`
+}
+
+// Validate ensures all required identity metadata fields are present and non-empty.
+func (m RecordMetadata) Validate() error {
+	if strings.TrimSpace(m.EndpointID) == "" {
+		return errors.New("missing required endpoint identity metadata")
+	}
+	if strings.TrimSpace(m.SourceID) == "" {
+		return errors.New("missing required source identity metadata")
+	}
+	if strings.TrimSpace(m.FixtureID) == "" {
+		return errors.New("missing required fixture identity metadata; fixture provisioning and reset are caller-owned")
+	}
+	return nil
 }

@@ -268,6 +268,81 @@ func TestQueryPaginationAndAggregate(t *testing.T) {
 	}
 }
 
+func TestQueryDefaultPaginationWithoutIDTripleUsesIDCursor(t *testing.T) {
+	db := qdb(t)
+	ctx := context.Background()
+	appID, cat, ids := qseed(t, db)
+
+	firstID := [16]byte{0xdd}
+	secondID := [16]byte{0xee}
+	if _, err := db.InsertTriples(ctx, appID, cat, []triple.Triple{
+		{E: firstID, A: ids.title, V: "alpha"},
+		{E: secondID, A: ids.title, V: "beta"},
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+
+	ex := &instaql.Executor{DB: db.Pool}
+	run := func(opts map[string]any) ([]map[string]any, *instaql.PageInfo, error) {
+		q, err := instaql.Coerce(map[string]any{"posts": map[string]any{"$": opts}})
+		if err != nil {
+			return nil, nil, err
+		}
+		res, err := ex.Run(ctx, q, cat, appID)
+		if err != nil {
+			return nil, nil, err
+		}
+		var rows []map[string]any
+		if err := json.Unmarshal(res.Data["posts"], &rows); err != nil {
+			return nil, nil, err
+		}
+		return rows, res.PageInfo, nil
+	}
+
+	first, info, err := run(map[string]any{"limit": float64(1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 1 || first[0]["id"] != uuidStr(firstID) {
+		t.Fatalf("default paginated first page = %v, want %s", first, uuidStr(firstID))
+	}
+	if info == nil || info.EndCursor == nil {
+		t.Fatalf("default paginated page-info = %+v", info)
+	}
+	var cursor []any
+	if err := json.Unmarshal([]byte(*info.EndCursor), &cursor); err != nil {
+		t.Fatal(err)
+	}
+	if len(cursor) != 3 || cursor[0] != uuidStr(firstID) || cursor[1] != "" || cursor[2] != nil {
+		t.Fatalf("default paginated cursor = %v, want [%s \"\" null]", cursor, uuidStr(firstID))
+	}
+
+	second, secondInfo, err := run(map[string]any{"limit": float64(1), "after": *info.EndCursor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second) != 1 || second[0]["id"] != uuidStr(secondID) {
+		t.Fatalf("default after-cursor page = %v, want %s", second, uuidStr(secondID))
+	}
+	if secondInfo == nil || secondInfo.HasNextPage || !secondInfo.HasPreviousPage {
+		t.Fatalf("default after-cursor page-info = %+v", secondInfo)
+	}
+	if secondInfo.EndCursor == nil {
+		t.Fatalf("default second-page cursor = %+v", secondInfo)
+	}
+
+	last, lastInfo, err := run(map[string]any{"last": float64(1), "before": *secondInfo.EndCursor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(last) != 1 || last[0]["id"] != uuidStr(firstID) {
+		t.Fatalf("default backward-cursor page = %v, want %s", last, uuidStr(firstID))
+	}
+	if lastInfo == nil || !lastInfo.HasNextPage || lastInfo.HasPreviousPage {
+		t.Fatalf("default backward-cursor page-info = %+v", lastInfo)
+	}
+}
+
 // TestQueryPageInfoBoundaries verifies that page-info is based on a hidden
 // sentinel row rather than the visible page length. In particular, an exact
 // final page must not claim that another page exists.

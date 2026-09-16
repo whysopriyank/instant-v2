@@ -20,7 +20,7 @@ func TestCorpusManifest(t *testing.T) {
 	if !strings.Contains(first, "v1-capture=0") {
 		t.Fatal("authored corpus must not claim recorded v1 oracle evidence")
 	}
-	if !strings.Contains(first, "coverage=25") {
+	if !strings.Contains(first, "coverage=26") {
 		t.Fatalf("coverage matrix missing from validation report: %s", first)
 	}
 }

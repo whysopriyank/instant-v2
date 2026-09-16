@@ -144,6 +144,7 @@ func (x *Executor) runForm(ctx context.Context, f *Form, cat *platform.AttrCatal
 		return err
 	}
 	idAttr := cat.FindByEtypeLabel(f.Etype, "id")
+	opts := paginationOptions(f.Options, idAttr)
 	// Aggregate counts the full matching set, pre-pagination.
 	var aggCount int64
 	if f.Options != nil && f.Options.Aggregate == "count" && (parentRef == nil || parentRef.Mode != "reverse") {
@@ -159,9 +160,9 @@ func (x *Executor) runForm(ctx context.Context, f *Form, cat *platform.AttrCatal
 	sqlPaged := false
 	plan := datalog.BuildPlan(appID, f.Etype, conds)
 	entitySQL, args := plan.EntitySetSQL(attrIDs)
-	if canUseIDFastPath(f.Options, parentRef) {
+	if canUseIDFastPath(opts, parentRef) {
 		sqlPaged = true
-		sqlStr, args2 := paginateWrap(entitySQL, args, f.Options, cat, appID)
+		sqlStr, args2 := paginateWrap(entitySQL, args, opts, cat, appID)
 		ids, err = x.queryIDs(ctx, sqlStr, args2, f.Etype)
 	} else {
 		// Cursors, explicit field ordering, backward pagination, and relation
@@ -195,7 +196,7 @@ func (x *Executor) runForm(ctx context.Context, f *Form, cat *platform.AttrCatal
 	}
 
 	// Apply the requested order before selecting the page.
-	if err := applyOrder(entities, f.Options); err != nil {
+	if err := applyOrder(entities, opts); err != nil {
 		return err
 	}
 
@@ -207,14 +208,14 @@ func (x *Executor) runForm(ctx context.Context, f *Form, cat *platform.AttrCatal
 	if idAttr != nil {
 		orderAttrID = idAttr.UUID()
 	}
-	slice, hasNextPage, hasPreviousPage, err := pageEntities(entities, f.Options, f.Etype, sqlPaged, orderAttrID)
+	slice, hasNextPage, hasPreviousPage, err := pageEntities(entities, opts, f.Etype, sqlPaged, orderAttrID)
 	if err != nil {
 		return err
 	}
-	if needsPageInfo(f.Options) {
+	if needsPageInfo(opts) {
 		if len(slice) > 0 {
-			sc := encodeEntityCursor(slice[0], f.Options, idAttr)
-			ec := encodeEntityCursor(slice[len(slice)-1], f.Options, idAttr)
+			sc := encodeEntityCursor(slice[0], opts, idAttr)
+			ec := encodeEntityCursor(slice[len(slice)-1], opts, idAttr)
 			pageInfo.StartCursor = &sc
 			pageInfo.EndCursor = &ec
 		}

@@ -82,6 +82,14 @@ type Oracle struct {
 	Evidence string `json:"evidence,omitempty"`
 }
 
+// DA004V exclusion identifiers are part of the release-candidate corpus
+// contract. They keep the explicit dynamic-view exclusion distinguishable from
+// an ordinary missing coverage row.
+const (
+	DA004VExclusionSurfaceID  = "ws.permissions.dynamic"
+	DA004VExclusionCoverageID = "permissions-ws-dynamic-view-exclusion"
+)
+
 // ValidateCorpus requires a bijection between manifest entries and NDJSON
 // files, registered fixture profiles, and truthful explicit coverage gaps.
 // The report is sorted and contains no timestamps or machine-local paths.
@@ -182,6 +190,65 @@ func ValidateCorpus(dir string) (string, error) {
 	}
 	sort.Strings(lines)
 	return fmt.Sprintf("validated %d scenarios; coverage=%d; spec=%d regression=%d v1-capture=%d\n%s\n", len(scenarios), len(m.Coverage), oracles["spec"], oracles["regression"], oracles["v1-capture"], strings.Join(lines, "\n")), nil
+}
+
+// ValidateDA004VExclusion composes the corpus exclusion assertion with its
+// explicitly selected release envelope. QR-003 calls this component with
+// candidate-owned paths; ordinary corpus fixture validation stays path-agnostic.
+func ValidateDA004VExclusion(corpusDir, envelopePath string) error {
+	m, err := LoadManifest(corpusDir)
+	if err != nil {
+		return err
+	}
+	surfaces := make(map[string]Surface, len(m.Surfaces))
+	for _, surface := range m.Surfaces {
+		surfaces[surface.ID] = surface
+	}
+	if err := validateDA004VCorpusExclusion(surfaces, m.Coverage); err != nil {
+		return err
+	}
+	return ValidateDA004VReleaseEnvelope(envelopePath)
+}
+
+func validateDA004VCorpusExclusion(surfaces map[string]Surface, coverage []CoverageEntry) error {
+	surface, ok := surfaces[DA004VExclusionSurfaceID]
+	if !ok {
+		return fmt.Errorf("DA-004V exclusion evidence missing surface %q", DA004VExclusionSurfaceID)
+	}
+	if surface.Status != "unsupported" {
+		return fmt.Errorf("DA-004V dynamic view surface %q claims status %q; want unsupported", DA004VExclusionSurfaceID, surface.Status)
+	}
+	note := strings.ToLower(surface.Note)
+	if !strings.Contains(note, "dynamic") || !strings.Contains(note, "view") || !strings.Contains(note, "reject") {
+		return fmt.Errorf("DA-004V surface %q does not document explicit dynamic-view rejection", DA004VExclusionSurfaceID)
+	}
+
+	foundExclusion := false
+	for _, entry := range coverage {
+		if entry.Surface != DA004VExclusionSurfaceID {
+			continue
+		}
+		if entry.Status != "unsupported" {
+			return fmt.Errorf("DA-004V dynamic view coverage %q claims status %q; want unsupported", entry.ID, entry.Status)
+		}
+		if entry.ID != DA004VExclusionCoverageID {
+			continue
+		}
+		foundExclusion = true
+		if entry.Scenario != "" || len(entry.Evidence) != 0 {
+			return fmt.Errorf("DA-004V exclusion coverage %q must not claim corpus scenario evidence", entry.ID)
+		}
+		expected := strings.ToLower(entry.ExpectedState)
+		for _, term := range []string{"dynamic", "view", "reject", "protected", "fetch"} {
+			if !strings.Contains(expected, term) {
+				return fmt.Errorf("DA-004V exclusion coverage %q must state fail-closed protected-row behavior", entry.ID)
+			}
+		}
+	}
+	if !foundExclusion {
+		return fmt.Errorf("DA-004V exclusion evidence missing coverage %q", DA004VExclusionCoverageID)
+	}
+	return nil
 }
 
 var coverageFamilies = map[string]bool{

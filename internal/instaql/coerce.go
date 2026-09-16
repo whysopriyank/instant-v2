@@ -22,6 +22,7 @@ import (
 type Options struct {
 	Where           []WhereCond
 	Order           *Order
+	fallbackIDOrder bool
 	Limit           *int
 	First           *int
 	Last            *int

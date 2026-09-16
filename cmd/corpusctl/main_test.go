@@ -3,9 +3,13 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/instant-v2/instant-v2/internal/corpus"
@@ -21,10 +25,25 @@ func TestValidateCommand(t *testing.T) {
 	}
 }
 
+func TestValidateReleaseCommand(t *testing.T) {
+	var out, stderr bytes.Buffer
+	if code := run([]string{
+		"--mode", "validate-release",
+		"--corpus", "../../corpus",
+		"--release-envelope", "../../docs/reference/release-envelope.md",
+	}, &out, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, &stderr)
+	}
+	if !strings.Contains(out.String(), "coverage=26") {
+		t.Fatalf("missing composed validation report: %s", &out)
+	}
+}
+
 func TestCommandFailuresAreNonzero(t *testing.T) {
 	for name, args := range map[string][]string{
 		"missing-manifest":              {"--mode", "validate", "--corpus", t.TempDir()},
 		"filtered-validation":           {"--mode", "validate", "--corpus", "../../corpus", "--suite", "smoke"},
+		"missing-release-envelope":      {"--mode", "validate-release", "--corpus", "../../corpus"},
 		"empty-selection":               {"--mode", "replay", "--target", ":invalid", "--corpus", "../../corpus", "--suite", "not-a-suite"},
 		"failed-replay":                 {"--mode", "replay", "--target", ":invalid", "--corpus", "../../corpus/00-smoke.ndjson"},
 		"missing-differential-evidence": {"--mode", "differential", "--target", ":invalid", "--other", ":invalid"},
@@ -234,5 +253,570 @@ func TestSSEEvidenceRejectsUnsafeScenarioID(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "invalid scenario id") {
 			t.Fatalf("unsafe SSE evidence path %q was accepted: %v", id, err)
 		}
+	}
+}
+
+func TestRecordHTTPSuccessAndRetention(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/query" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer secret-auth" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Set-Cookie", "auth-session=secret-session")
+		w.Header().Set("X-Custom-Secret", "secret-custom")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"session-id":"11111111-1111-4111-8111-111111111111","tx-id":100,"n":1.0,"ok":true}`)
+	}))
+	defer srv.Close()
+
+	tempDir := t.TempDir()
+	scenarioPath := filepath.Join(tempDir, "query.json")
+	scenarioContent := []byte(`{
+		"request": {
+			"method": "POST",
+			"target": "/v1/query",
+			"headers": {"Authorization": ["Bearer secret-auth"]},
+			"body": "eyJtZXNzYWdlIjoiaGVsbG8ifQ=="
+		}
+	}`)
+	if err := os.WriteFile(scenarioPath, scenarioContent, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(tempDir, "evidence-out")
+	var out, stderr bytes.Buffer
+	args := []string{
+		"--mode", "record",
+		"--transport", "http",
+		"--corpus", scenarioPath,
+		"--target", srv.URL,
+		"--output-dir", outDir,
+		"--endpoint-id", "test-endpoint-v2",
+		"--source-id", "test-source-rev",
+		"--fixture-id", "smoke",
+		"--redact-header", "X-Custom-Secret",
+	}
+
+	code := run(args, &out, &stderr)
+	if code != 0 {
+		t.Fatalf("record failed code=%d stderr=%s", code, &stderr)
+	}
+	if !strings.Contains(out.String(), "PASS query.json (http record)") {
+		t.Fatalf("unexpected stdout: %s", &out)
+	}
+
+	evidencePath := filepath.Join(outDir, "query.json.http.evidence.json")
+	info, err := os.Stat(evidencePath)
+	if err != nil {
+		t.Fatalf("missing evidence file: %v", err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("expected 0600 permissions, got %v", info.Mode().Perm())
+	}
+
+	b, err := os.ReadFile(evidencePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record struct {
+		Mode            string                `json:"mode"`
+		Transport       string                `json:"transport"`
+		Status          string                `json:"status"`
+		Metadata        corpus.RecordMetadata `json:"metadata"`
+		TargetURL       string                `json:"targetUrl"`
+		RedactedHeaders []string              `json:"redactedHeaders"`
+		Raw             corpus.HTTPExchange   `json:"raw"`
+		Normalized      struct {
+			Body    []byte              `json:"body"`
+			Headers map[string][]string `json:"headers"`
+		} `json:"normalized"`
+	}
+	if err := json.Unmarshal(b, &record); err != nil {
+		t.Fatalf("unmarshal evidence JSON: %v", err)
+	}
+
+	if record.Mode != "record" || record.Transport != "http" || record.Status != "recorded" {
+		t.Fatalf("unexpected record header: %#v", record)
+	}
+	if record.Metadata.EndpointID != "test-endpoint-v2" || record.Metadata.SourceID != "test-source-rev" || record.Metadata.FixtureID != "smoke" || record.Metadata.FixtureReset != "caller-owned" {
+		t.Fatalf("unexpected metadata: %#v", record.Metadata)
+	}
+	if record.TargetURL != srv.URL {
+		t.Fatalf("unexpected target url: %s", record.TargetURL)
+	}
+
+	// Verify path-scoped redaction
+	if got := record.Raw.Request.Headers.Get("Authorization"); got != "<redacted>" {
+		t.Fatalf("Authorization not redacted: %q", got)
+	}
+	if got := record.Raw.Response.Headers.Get("Set-Cookie"); got != "<redacted>" {
+		t.Fatalf("Set-Cookie not redacted: %q", got)
+	}
+	if got := record.Raw.Response.Headers.Get("X-Custom-Secret"); got != "<redacted>" {
+		t.Fatalf("X-Custom-Secret not redacted: %q", got)
+	}
+
+	// Verify raw and canonical normalized forms
+	if !strings.Contains(string(record.Raw.Response.Body), `"tx-id":100`) {
+		t.Fatalf("raw body missing unmasked tx-id: %s", record.Raw.Response.Body)
+	}
+	// In canonical bytes, root tx-id is masked as <tx-id>
+	if !strings.Contains(string(record.Normalized.Body), corpus.NormalizedTxID) {
+		t.Fatalf("normalized body missing canonical tx-id mask: %s", record.Normalized.Body)
+	}
+}
+
+func TestRecordSSESuccessAndRetention(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			flusher, _ := w.(http.Flusher)
+			_, _ = io.WriteString(w, "data: {\"op\":\"init-ok\",\"session-id\":\"11111111-1111-4111-8111-111111111111\"}\n\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
+			_, _ = io.WriteString(w, "data: {\"op\":\"refresh-ok\",\"n\":1.0}\n\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
+		case http.MethodPost:
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"status":"posted"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	tempDir := t.TempDir()
+	scenarioPath := filepath.Join(tempDir, "sse-scenario.json")
+	scenarioContent := []byte(`{
+		"id": "test-sse-record",
+		"fixture": "smoke",
+		"connect": {
+			"request": {
+				"method": "GET",
+				"target": "/stream",
+				"headers": {"Authorization": ["Bearer sse-secret"]}
+			}
+		},
+		"posts": [
+			{
+				"request": {
+					"method": "POST",
+					"target": "/post",
+					"headers": {"Authorization": ["Bearer post-secret"]},
+					"body": "e30="
+				}
+			}
+		],
+		"expected": [
+			{"kind": "data"},
+			{"kind": "data"}
+		]
+	}`)
+	if err := os.WriteFile(scenarioPath, scenarioContent, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(tempDir, "sse-out")
+	var out, stderr bytes.Buffer
+	args := []string{
+		"--mode", "record",
+		"--transport", "sse",
+		"--corpus", scenarioPath,
+		"--target", srv.URL,
+		"--output-dir", outDir,
+		"--endpoint-id", "test-endpoint-v2",
+		"--source-id", "test-source-rev",
+		"--fixture-id", "smoke",
+		"--record-limit", "2",
+	}
+
+	code := run(args, &out, &stderr)
+	if code != 0 {
+		t.Fatalf("sse record failed code=%d stderr=%s", code, &stderr)
+	}
+	if !strings.Contains(out.String(), "PASS test-sse-record (sse record)") {
+		t.Fatalf("unexpected stdout: %s", &out)
+	}
+
+	evidencePath := filepath.Join(outDir, "test-sse-record.sse.evidence.json")
+	info, err := os.Stat(evidencePath)
+	if err != nil {
+		t.Fatalf("missing sse evidence file: %v", err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("expected 0600 permissions, got %v", info.Mode().Perm())
+	}
+
+	b, err := os.ReadFile(evidencePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record struct {
+		Mode       string                `json:"mode"`
+		Transport  string                `json:"transport"`
+		Status     string                `json:"status"`
+		ID         string                `json:"id"`
+		Metadata   corpus.RecordMetadata `json:"metadata"`
+		RawConnect corpus.HTTPExchange   `json:"rawConnect"`
+		RawPosts   []corpus.HTTPExchange `json:"rawPosts"`
+		RawRecords []corpus.SSERecord    `json:"rawRecords"`
+		Normalized struct {
+			Records []corpus.SSERecord `json:"records"`
+		} `json:"normalized"`
+	}
+	if err := json.Unmarshal(b, &record); err != nil {
+		t.Fatalf("unmarshal sse evidence JSON: %v", err)
+	}
+
+	if record.Mode != "record" || record.Transport != "sse" || record.Status != "recorded" || record.ID != "test-sse-record" {
+		t.Fatalf("unexpected sse record header: %#v", record)
+	}
+	if record.Metadata.FixtureReset != "caller-owned" {
+		t.Fatalf("expected fixtureReset caller-owned: %v", record.Metadata.FixtureReset)
+	}
+	if got := record.RawConnect.Request.Headers.Get("Authorization"); got != "<redacted>" {
+		t.Fatalf("connect Authorization not redacted: %q", got)
+	}
+	if len(record.RawPosts) != 1 || record.RawPosts[0].Request.Headers.Get("Authorization") != "<redacted>" {
+		t.Fatalf("post Authorization not redacted: %#v", record.RawPosts)
+	}
+	if len(record.RawRecords) != 2 || len(record.Normalized.Records) != 2 {
+		t.Fatalf("unexpected record counts: raw=%d norm=%d", len(record.RawRecords), len(record.Normalized.Records))
+	}
+
+	// Verify raw and canonical normalized forms for SSE
+	if !strings.Contains(string(record.RawRecords[0].Raw), "session-id") {
+		t.Fatalf("raw record omitted framing: %s", record.RawRecords[0].Raw)
+	}
+	if !strings.Contains(string(record.Normalized.Records[0].Normalized), corpus.NormalizedSessionID) {
+		t.Fatalf("normalized sse record missing canonical session-id: %s", record.Normalized.Records[0].Normalized)
+	}
+}
+
+func TestRecordMissingRequiredMetadataFails(t *testing.T) {
+	tempDir := t.TempDir()
+	scenarioPath := filepath.Join(tempDir, "req.json")
+	if err := os.WriteFile(scenarioPath, []byte(`{"request":{"method":"GET","target":"/test"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	freshDir := filepath.Join(tempDir, "fresh")
+
+	cases := map[string][]string{
+		"missing-target": {
+			"--mode", "record", "--transport", "http", "--corpus", scenarioPath,
+			"--output-dir", freshDir, "--endpoint-id", "ep", "--source-id", "src", "--fixture-id", "fix",
+		},
+		"missing-output-dir": {
+			"--mode", "record", "--transport", "http", "--corpus", scenarioPath,
+			"--target", "http://localhost", "--endpoint-id", "ep", "--source-id", "src", "--fixture-id", "fix",
+		},
+		"missing-endpoint-id": {
+			"--mode", "record", "--transport", "http", "--corpus", scenarioPath,
+			"--target", "http://localhost", "--output-dir", freshDir, "--source-id", "src", "--fixture-id", "fix",
+		},
+		"missing-source-id": {
+			"--mode", "record", "--transport", "http", "--corpus", scenarioPath,
+			"--target", "http://localhost", "--output-dir", freshDir, "--endpoint-id", "ep", "--fixture-id", "fix",
+		},
+		"missing-fixture-id": {
+			"--mode", "record", "--transport", "http", "--corpus", scenarioPath,
+			"--target", "http://localhost", "--output-dir", freshDir, "--endpoint-id", "ep", "--source-id", "src",
+		},
+	}
+
+	for name, args := range cases {
+		t.Run(name, func(t *testing.T) {
+			var out, stderr bytes.Buffer
+			code := run(args, &out, &stderr)
+			if code == 0 {
+				t.Fatalf("expected failure for %s, got 0", name)
+			}
+			if stderr.Len() == 0 {
+				t.Fatalf("expected diagnostic message for %s", name)
+			}
+		})
+	}
+}
+
+func TestRecordWSUnsupported(t *testing.T) {
+	cases := map[string][]string{
+		"explicit-ws":   {"--mode", "record", "--transport", "ws"},
+		"default-is-ws": {"--mode", "record"},
+	}
+	for name, args := range cases {
+		t.Run(name, func(t *testing.T) {
+			var out, stderr bytes.Buffer
+			code := run(args, &out, &stderr)
+			if code == 0 {
+				t.Fatal("expected nonzero exit for unsupported WS record")
+			}
+			if !strings.Contains(stderr.String(), "record mode is unsupported for ws") {
+				t.Fatalf("expected unsupported WS message, got: %s", stderr.String())
+			}
+		})
+	}
+}
+
+func TestRecordMissingMetadataMakesZeroRequests(t *testing.T) {
+	var requestCount int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&requestCount, 1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	defer srv.Close()
+
+	tempDir := t.TempDir()
+	scenarioPath := filepath.Join(tempDir, "req.json")
+	if err := os.WriteFile(scenarioPath, []byte(`{"request":{"method":"GET","target":"/test"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := map[string][]string{
+		"missing-endpoint-id": {
+			"--mode", "record", "--transport", "http", "--corpus", scenarioPath,
+			"--target", srv.URL, "--output-dir", filepath.Join(tempDir, "out1"), "--source-id", "src", "--fixture-id", "fix",
+		},
+		"missing-source-id": {
+			"--mode", "record", "--transport", "http", "--corpus", scenarioPath,
+			"--target", srv.URL, "--output-dir", filepath.Join(tempDir, "out2"), "--endpoint-id", "ep", "--fixture-id", "fix",
+		},
+		"missing-fixture-id": {
+			"--mode", "record", "--transport", "http", "--corpus", scenarioPath,
+			"--target", srv.URL, "--output-dir", filepath.Join(tempDir, "out3"), "--endpoint-id", "ep", "--source-id", "src",
+		},
+		"whitespace-endpoint-id": {
+			"--mode", "record", "--transport", "http", "--corpus", scenarioPath,
+			"--target", srv.URL, "--output-dir", filepath.Join(tempDir, "out4"), "--endpoint-id", "   ", "--source-id", "src", "--fixture-id", "fix",
+		},
+		"missing-output-dir": {
+			"--mode", "record", "--transport", "http", "--corpus", scenarioPath,
+			"--target", srv.URL, "--endpoint-id", "ep", "--source-id", "src", "--fixture-id", "fix",
+		},
+		"existing-output-dir": {
+			"--mode", "record", "--transport", "http", "--corpus", scenarioPath,
+			"--target", srv.URL, "--output-dir", tempDir, "--endpoint-id", "ep", "--source-id", "src", "--fixture-id", "fix",
+		},
+	}
+
+	for name, args := range cases {
+		t.Run(name, func(t *testing.T) {
+			atomic.StoreInt64(&requestCount, 0)
+			var out, stderr bytes.Buffer
+			code := run(args, &out, &stderr)
+			if code == 0 {
+				t.Fatalf("expected failure for %s, got 0", name)
+			}
+			if got := atomic.LoadInt64(&requestCount); got != 0 {
+				t.Fatalf("expected 0 HTTP requests for %s, got %d", name, got)
+			}
+		})
+	}
+}
+
+func TestRecordOutputFreshnessAndWriteOnce(t *testing.T) {
+	tempDir := t.TempDir()
+	scenarioPath := filepath.Join(tempDir, "req.json")
+	if err := os.WriteFile(scenarioPath, []byte(`{"request":{"method":"GET","target":"/test"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Output directory contains existing files: must fail closed as not fresh
+	nonFreshDir := filepath.Join(tempDir, "not-fresh")
+	if err := os.Mkdir(nonFreshDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nonFreshDir, "existing.txt"), []byte("exists"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, stderr bytes.Buffer
+	args := []string{
+		"--mode", "record", "--transport", "http", "--corpus", scenarioPath,
+		"--target", "http://127.0.0.1:1", "--output-dir", nonFreshDir,
+		"--endpoint-id", "ep", "--source-id", "src", "--fixture-id", "fix",
+	}
+	code := run(args, &out, &stderr)
+	if code == 0 || !strings.Contains(stderr.String(), "already exists") {
+		t.Fatalf("non-fresh output dir was accepted: code=%d stderr=%s", code, &stderr)
+	}
+
+	// 2. Existing empty directory: must fail closed
+	emptyDir := filepath.Join(tempDir, "empty-dir")
+	if err := os.Mkdir(emptyDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	stderr.Reset()
+	args = []string{
+		"--mode", "record", "--transport", "http", "--corpus", scenarioPath,
+		"--target", "http://127.0.0.1:1", "--output-dir", emptyDir,
+		"--endpoint-id", "ep", "--source-id", "src", "--fixture-id", "fix",
+	}
+	code = run(args, &out, &stderr)
+	if code == 0 || !strings.Contains(stderr.String(), "already exists") {
+		t.Fatalf("empty output dir was accepted: code=%d stderr=%s", code, &stderr)
+	}
+
+	// 3. Symlink output directory: must fail closed
+	symlinkDir := filepath.Join(tempDir, "symlink-dir")
+	if err := os.Symlink(emptyDir, symlinkDir); err != nil {
+		t.Fatal(err)
+	}
+	stderr.Reset()
+	args = []string{
+		"--mode", "record", "--transport", "http", "--corpus", scenarioPath,
+		"--target", "http://127.0.0.1:1", "--output-dir", symlinkDir,
+		"--endpoint-id", "ep", "--source-id", "src", "--fixture-id", "fix",
+	}
+	code = run(args, &out, &stderr)
+	if code == 0 || !strings.Contains(stderr.String(), "symlink") {
+		t.Fatalf("symlink output dir was accepted: code=%d stderr=%s", code, &stderr)
+	}
+
+	// 4. Output directory with symlink parent: must fail closed
+	childUnderSymlink := filepath.Join(symlinkDir, "child")
+	stderr.Reset()
+	args = []string{
+		"--mode", "record", "--transport", "http", "--corpus", scenarioPath,
+		"--target", "http://127.0.0.1:1", "--output-dir", childUnderSymlink,
+		"--endpoint-id", "ep", "--source-id", "src", "--fixture-id", "fix",
+	}
+	code = run(args, &out, &stderr)
+	if code == 0 || !strings.Contains(stderr.String(), "symlink") {
+		t.Fatalf("child under symlink parent was accepted: code=%d stderr=%s", code, &stderr)
+	}
+
+	// 5. Unsafe output directory: must fail closed
+	stderr.Reset()
+	args = []string{
+		"--mode", "record", "--transport", "http", "--corpus", scenarioPath,
+		"--target", "http://127.0.0.1:1", "--output-dir", "../escape",
+		"--endpoint-id", "ep", "--source-id", "src", "--fixture-id", "fix",
+	}
+	code = run(args, &out, &stderr)
+	if code == 0 || !strings.Contains(stderr.String(), "output directory escapes") {
+		t.Fatalf("unsafe output dir was accepted: code=%d stderr=%s", code, &stderr)
+	}
+
+	// 6. Successful record creates reserved dir mode 0700 and writes mode 0600 evidence
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	defer srv.Close()
+
+	freshDir := filepath.Join(tempDir, "fresh-run")
+	out.Reset()
+	stderr.Reset()
+	args = []string{
+		"--mode", "record", "--transport", "http", "--corpus", scenarioPath,
+		"--target", srv.URL, "--output-dir", freshDir,
+		"--endpoint-id", "ep", "--source-id", "src", "--fixture-id", "fix",
+	}
+	code = run(args, &out, &stderr)
+	if code != 0 {
+		t.Fatalf("record failed on fresh dir: code=%d stderr=%s", code, &stderr)
+	}
+
+	dirFI, err := os.Stat(freshDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dirFI.Mode().Perm() != 0700 {
+		t.Fatalf("expected dir mode 0700, got %#o", dirFI.Mode().Perm())
+	}
+
+	evFI, err := os.Stat(filepath.Join(freshDir, "req.json.http.evidence.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evFI.Mode().Perm() != 0600 {
+		t.Fatalf("expected file mode 0600, got %#o", evFI.Mode().Perm())
+	}
+
+	// Duplicate run on the now-existing dir must fail closed
+	out.Reset()
+	stderr.Reset()
+	code = run(args, &out, &stderr)
+	if code == 0 || !strings.Contains(stderr.String(), "already exists") {
+		t.Fatalf("duplicate record run on existing dir was accepted: code=%d stderr=%s", code, &stderr)
+	}
+}
+
+func TestRecordFailurePropagation(t *testing.T) {
+	tempDir := t.TempDir()
+	scenarioPath := filepath.Join(tempDir, "req.json")
+	if err := os.WriteFile(scenarioPath, []byte(`{"request":{"method":"GET","target":"/unreachable"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	outDir := filepath.Join(tempDir, "out")
+
+	// HTTP failure propagation: unreachable target
+	var out, stderr bytes.Buffer
+	args := []string{
+		"--mode", "record", "--transport", "http", "--corpus", scenarioPath,
+		"--target", "http://127.0.0.1:1", "--output-dir", outDir,
+		"--endpoint-id", "ep", "--source-id", "src", "--fixture-id", "fix",
+		"--timeout", "100ms",
+	}
+	code := run(args, &out, &stderr)
+	if code == 0 {
+		t.Fatal("unreachable HTTP target reported success")
+	}
+	if !strings.Contains(stderr.String(), "HTTP capture failed") {
+		t.Fatalf("unexpected error message: %s", &stderr)
+	}
+	// Ensure no evidence file was emitted
+	if _, err := os.Stat(filepath.Join(outDir, "req.json.http.evidence.json")); err == nil {
+		t.Fatal("evidence file was emitted despite failed capture")
+	}
+
+	// SSE failure propagation: incomplete stream
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"op\":\"first\"}\n\n")
+		// closes immediately after 1 event
+	}))
+	defer srv.Close()
+
+	sseScenarioPath := filepath.Join(tempDir, "sse-req.json")
+	if err := os.WriteFile(sseScenarioPath, []byte(`{
+		"id": "sse-incomplete",
+		"connect": {"request": {"method": "GET", "target": "/stream"}},
+		"expected": [{"kind": "data"}, {"kind": "data"}]
+	}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	sseOutDir := filepath.Join(tempDir, "sse-out")
+
+	out.Reset()
+	stderr.Reset()
+	sseArgs := []string{
+		"--mode", "record", "--transport", "sse", "--corpus", sseScenarioPath,
+		"--target", srv.URL, "--output-dir", sseOutDir,
+		"--endpoint-id", "ep", "--source-id", "src", "--fixture-id", "fix",
+		"--record-limit", "2",
+	}
+	code = run(sseArgs, &out, &stderr)
+	if code == 0 {
+		t.Fatal("incomplete SSE stream reported success")
+	}
+	if !strings.Contains(stderr.String(), "incomplete SSE stream") {
+		t.Fatalf("expected incomplete stream error, got: %s", &stderr)
+	}
+	// Ensure no evidence file was emitted
+	if _, err := os.Stat(filepath.Join(sseOutDir, "sse-incomplete.sse.evidence.json")); err == nil {
+		t.Fatal("evidence file was emitted despite incomplete stream")
 	}
 }
