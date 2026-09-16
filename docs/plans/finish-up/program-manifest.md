@@ -10,7 +10,7 @@ its packet against current source and the latest handoff before changing status.
 |---:|---|---:|---|---|---|
 | 1 | F-001 candidate truth | 01 | `COMPLETE / ACCEPTED_SOURCE_BACKED_LEDGER` | — | source + review |
 | 2 | F-002 DEC-001 envelope | 01 | `COMPLETE / OWNER_APPROVED_POLICY_DECISION` | F-001, owner | approved decision |
-| 3 | RT-001 permission rebinding | 02 | `PARTIAL / ACCEPTED_CODE_POLICY_RESIDUAL` | F-002 rule policy | integrated + security review |
+| 3 | RT-001 permission rebinding | 02 | `COMPLETE / ACCEPTED_BOUNDED_REBINDING` | F-002 rule policy | integrated + security review |
 | 4 | RT-002 delivery/watermarks | 02 | `PARTIAL / ACCEPTED_BOUNDED_REPAIR_CLIENT_EVIDENCE_PENDING` | F-002, RT-001 | integrated + reliability review |
 | 5 | RT-003 depth-one recovery | 02 | `COMPLETE / ACCEPTED_HERMETIC_RECOVERY` | F-002 | focused + package |
 | 6 | DA-001 durable storage assembly | 03 | `PARTIAL / LOCAL_REOPEN_ACCEPTED_ENV_PENDING` | F-002 storage profile | integrated + restart |

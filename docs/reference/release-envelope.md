@@ -181,3 +181,42 @@ DA-004V is the approved `EXCLUDED` surface; no other row is excluded.
 | Packet changes | None from the proposal: REQUIRED/DEFERRED ledger above stands as approved |
 | Authority grants | None granted; every `AUTH-*` registry row remains `NOT_GRANTED` |
 | Support/budget values | Profile and alpha envelope tables above, approved as written |
+
+## Successor ratification — RT-001 bounded permission rebinding
+
+Decision ID: `DEC-001-rt001-bounded-rebinding-20260917`
+Predecessor: `DEC-001-single-node-alpha-20260905` (original approval record
+above is preserved unchanged; this record does not rewrite it).
+Scope: RT-001 dynamic permission rebinding only — ratifies the bounded
+in-flight WebSocket exception that postdates the original approval. No other
+packet, surface, budget, authority, candidate, or compatibility claim changes.
+Candidate verified: `main` at
+`6b1288601d3be9d0cb6b0af17bdee5b35fd06b07` (clean tree).
+Approving owner: Priyank, project owner.
+Approval timestamp (UTC): `2026-09-16T19:05:43Z` (2026-09-17 IST working
+session; structured prompt approving the exact seven-clause contract below).
+Approval evidence: explicit structured owner approval in this finish-up
+working session selecting `APPROVE seven clauses` for the exact contract
+quoted below; recorded in the session log alongside the RT-001 close-out.
+No approval is inferred from the implementation or the earlier recommendation.
+
+Ratified bounded-rebinding policy (exact text):
+
+1. Authorization linearizes when the server observes the new rules generation
+   at a refresh or attach boundary, not at database commit time.
+2. No refresh starting after the observed swap may use the superseded gate.
+3. An already-started WebSocket fan-out may deliver at most one superseded
+   envelope before the observed swap takes effect.
+4. That envelope cannot commit a snapshot or advance a watermark.
+5. Every attached member is retried at the same transaction ID under the new
+   gate.
+6. SSE delivers no stale queued event after the observed generation swap.
+7. A rules-only update becomes effective at the next attach or refresh boundary
+   and does not require proactive delivery by itself.
+
+Preservation: every unrelated REQUIRED, DEFERRED, and EXCLUDED selection,
+the approved profile, the alpha qualification envelope, the
+external-authority registry (every `AUTH-*` remains `NOT_GRANTED`), and the
+accepted-difference registry stand exactly as written above. RT-001 remains
+a REQUIRED packet; this ratification supplies the missing policy approval
+for its bounded exception and authorizes no broader release-envelope change.

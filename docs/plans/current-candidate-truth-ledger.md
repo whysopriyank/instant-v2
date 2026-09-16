@@ -729,3 +729,20 @@ provider, recovery, soak-campaign, or clean-candidate evidence is claimed by
 this reconciliation; the config-test ambient-`DATABASE_URL` isolation caveat is
 recorded in `execution-ledger.md`. New candidate SHA and final tree state are
 recorded in the execution ledger's stabilization section.
+
+## RT-001 close-out (2026-09-17 IST, main at 6b1288601d3be9d0cb6b0af17bdee5b35fd06b07, clean tree)
+
+RT-001 permission rebinding is `COMPLETE / ACCEPTED_BOUNDED_REBINDING`.
+Ratification `DEC-001-rt001-bounded-rebinding-20260917` (successor to
+`DEC-001-single-node-alpha-20260905`) records the owner-approved seven-clause
+bounded exception; original approval preserved unchanged; unrelated envelope
+selections unchanged. Live 6/6 RT-001 tests green with zero skips on owned
+PostgreSQL 17.11 (`testkit`-isolated `instant_test_*` only); corpus replay
+18/18 green including `05-permission-deny`; focused hermetic suite twice under
+race, full sync/reactive/instantd race packages, vet, build, gofmt, and
+diff-check all green; independent security review ACCEPT with no unresolved
+blocker. RT-001a–e each green per `02-realtime-correctness.md`. RT-002 stays
+PARTIAL; Phase 02 gate `REALTIME_TRUSTWORTHY` stays open. No other packet or
+selection changes. Evidence detail lives in the execution ledger's RT-001
+close-out section. New candidate SHA is recorded at commit time in this
+session's final report.

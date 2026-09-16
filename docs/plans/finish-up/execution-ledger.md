@@ -10,7 +10,7 @@ the remaining defects. No push or deployment is selected by this objective.
 
 | ID | Invariant / production path | Planned evidence / red expectation | Scope | Status |
 |---|---|---|---|---|
-| RT-001 | Permission revocation coordinates with initial answers, queued delivery, refresh fan-out and publication | Deterministic revocation at publication boundaries; current partial-send exception does not establish original acceptance | reactive, sync, daemon assembly; architecture review first | PARTIAL |
+| RT-001 | Permission revocation coordinates with initial answers, queued delivery, refresh fan-out and publication | Deterministic revocation at publication boundaries; bounded WS exception ratified (`DEC-001-rt001-bounded-rebinding-20260917`), live 6/6 + corpus 18/18 green, security review ACCEPT | reactive, sync, daemon assembly; architecture review first | COMPLETE |
 | RT-002 | Failed delivery has an explicit recovery outcome and reconnect establishes matching state/watermark | Actual notifier retry and transport reconnect tests, including same-tx corrective delivery | reactive, sync | PARTIAL |
 | RT-003 | Queue depth one reopens after drain | Deterministic fill/shed/drain/resume tests and reactive race package | reactive/config | COMPLETE |
 | DA-001-R | Failed root confirmation cannot be trusted by a later upload, even if directory cleanup fails | Inject root-sync failure and failed cleanup, then retry; current Stat shortcut bypasses confirmation | storageapi backend and durability tests | SUPERSEDED: committed DA-001 backend work pins barrier-ordered root confirmation (`TestDiskBackendSecondUploadWaitsForRootConfirmation`) and owned-DB retry semantics; the Stat-shortcut red probe is retained as a follow-up hardening row, not a stabilization blocker |
@@ -378,3 +378,44 @@ is clean.
 ## H-06 review/commit (independent, local only)
 - Reviewer inputs: requirement table, exact diff, raw outcomes above, skipped (SSE live reconnect, delta live reconnect, SDK corrective-frame proof), draft handoff. Findings repaired: S1 fallback, SSE Store wiring, attach missing Unlock (deadlock), splice/mat ordering, WS timeout.
 - Commit: stage reviewed realtime + storage + tests together (realtime shared interfaces + daemon wiring + tests land together); storage barrier test lands in same train (accepted with realtime; separately reviewable). No git add . indiscriminate; inspect diff --cached --check + staged diff. No push/deploy.
+
+## RT-001 close-out (2026-09-17 IST, HEAD 6b1288601d3be9d0cb6b0af17bdee5b35fd06b07, clean tree, go1.27.1 darwin/arm64)
+
+Owner ratification: `DEC-001-rt001-bounded-rebinding-20260917` (successor to
+`DEC-001-single-node-alpha-20260905`, recorded in
+`docs/reference/release-envelope.md`; original approval preserved unchanged).
+Owner Priyank approved the exact seven-clause bounded-rebinding contract via
+explicit structured approval at `2026-09-16T19:05:43Z`. No approval inferred
+from implementation or recommendation. Unrelated envelope selections unchanged.
+
+Live evidence (owned fixture `DATABASE_URL=postgres://priyank@localhost/postgres`,
+PostgreSQL 17.11 Homebrew, `wal_level=logical`, `testkit`-isolated
+`instant_test_*` databases only; one sandboxed attempt failed to connect and
+was rerun with escalation approval):
+- `INSTANT_TEST_INTEGRATION=1 go test -race ./internal/sync -run
+  '^(TestRealtimeRebindDeniesExistingSubscription|TestRealtimeRegrantRestoresExistingSubscription|TestRealtimeRuleOutageDropsAndRecovers|TestSteadyDenySecondCommitDoesNotLeak|TestSupersededGenerationDrops|TestSyncFailsClosedOnRulesLoadError)$'
+  -count=1 -v` → 6 PASS, 0 SKIP, exit 0.
+- `INSTANT_TEST_INTEGRATION=1 go test -race ./internal/corpus -run
+  '^TestCorpusReplayIntegration$' -count=1 -v` → 18/18 scenarios PASS
+  including `05-permission-deny`, 0 skips, exit 0.
+
+Hermetic evidence: focused RT-001 suite (21 sync + 3 reactive tests incl. all
+packet-named regressions and SSE-lease legs) PASS twice under `-race`; `go
+test -race ./internal/sync ./internal/reactive ./cmd/instantd -count=1`
+PASS; `go vet` on those three packages exit 0; `go build ./...` exit 0;
+`gofmt -l` empty; `git diff --check` clean.
+
+Security review: independent read-only review of the exact candidate returned
+ACCEPT with no unresolved blocker (10 falsification targets — stale gate
+reuse, >1 superseded WS envelope, stale snapshot/watermark commit, stale SSE
+delivery, fail-open on lookup error, group sharing across generations,
+late-allow-over-deny, teardown resurrection, ABA/cancellation, lock
+inversion/I-O under global lock — all falsified with file:line citations;
+one non-blocking note: rule-doc cache has no TTL, only `Invalidate`
+refresh; consistent with the ratified observed-swap boundary). Two earlier
+reviewer spawns failed at the provider level with no verdict and were
+superseded by this completed review; zero repair cycles consumed.
+
+Status: RT-001 `COMPLETE / ACCEPTED_BOUNDED_REBINDING`. RT-002 remains
+PARTIAL; Phase 02 gate `REALTIME_TRUSTWORTHY` remains open. No other packet
+changed. No push, publication, deployment, or tag.
