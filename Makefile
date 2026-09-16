@@ -24,9 +24,12 @@ V1_URL ?=
 V2_URL ?=
 DIFFERENTIAL_OUTPUT ?=
 
+# Supported benchmark packages tested by bench-acceptance.
+# Per DEC-001 (EV-006), cmd/benchsmoke is declared historical diagnostic code
+# and is not a supported acceptance entrypoint; it is deliberately excluded here.
 BENCH_PACKAGES := ./internal/benchharness ./internal/benchrun ./cmd/soak ./cmd/soaksetup ./cmd/benchrun ./cmd/benchreport
 
-.PHONY: help bootstrap lint test test-unit test-integration test-contract test-release require-integration container-verify soak-gate vet tidy corpus corpus-check replay differential build build-bench bench-acceptance bench-run bench-report bench-verify bench-smoke run migrate-up migrate-down clean schemagen
+.PHONY: help bootstrap lint test test-unit test-release-contract supply-chain-preflight test-supply-chain-contract test-integration test-contract test-contract-discovery test-release validate-release require-integration container-verify soak-gate vet tidy corpus corpus-check replay differential build build-bench build-historical-benchsmoke bench-acceptance bench-run bench-report bench-verify bench-smoke run migrate-up migrate-down clean schemagen
 
 help: ## list targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | sort | awk 'BEGIN{FS=":.*?## "}{printf "%-18s %s\n",$$1,$$2}'
@@ -43,8 +46,18 @@ vet: ## go vet
 
 test: test-unit ## alias for the hermetic unit lane
 
-test-unit: ## unit/race tests without live PostgreSQL prerequisites
+test-unit: test-release-contract ## unit/race tests without live PostgreSQL prerequisites
 	INSTANT_TEST_INTEGRATION=0 DATABASE_URL= TEST_DATABASE_URL= $(GO) test ./... -race -count=1 -short
+
+test-release-contract: ## hermetic QR-003 release-gate contract checks
+	bash scripts/test-quality-release-gate.sh
+	GOFLAGS=-json $(MAKE) --no-print-directory test-contract-discovery
+
+supply-chain-preflight: ## offline QR-005 supply-chain input preflight
+	bash scripts/quality-supply-chain-preflight.sh
+
+test-supply-chain-contract: ## hermetic QR-005 supply-chain preflight contract checks
+	bash scripts/test-quality-supply-chain-preflight.sh
 
 require-integration:
 	@test -n "$${DATABASE_URL:-}" || { echo "DATABASE_URL is required; use an isolated PostgreSQL server with CREATEDB and wal_level=logical" >&2; exit 2; }
@@ -56,8 +69,11 @@ test-integration: require-integration ## explicitly required isolated PostgreSQL
 test-contract: require-integration check-generated ## validate corpus and replay real v2 behavior with isolated fixtures
 	$(GO) run ./cmd/corpusctl --mode validate --corpus corpus/
 	INSTANT_TEST_INTEGRATION=0 DATABASE_URL= TEST_DATABASE_URL= $(GO) test ./internal/corpus ./cmd/corpusctl ./internal/protocol -race -count=1 -short
-	$(GO) test ./internal/corpus -list '^TestCorpusReplayIntegration$$' | grep -Fx 'TestCorpusReplayIntegration'
+	$(MAKE) --no-print-directory test-contract-discovery
 	INSTANT_TEST_INTEGRATION=1 $(GO) test ./internal/corpus -run '^TestCorpusReplayIntegration$$' -race -count=1
+
+test-contract-discovery: ## prove the selected integration test exists, even when the parent gate uses JSON output
+	GOFLAGS= $(GO) test ./internal/corpus -list '^TestCorpusReplayIntegration$$' | grep -Fx 'TestCorpusReplayIntegration'
 
 container-verify: ## build and check container health, non-root identity, and TLS roots
 	bash scripts/quality-container.sh
@@ -65,11 +81,11 @@ container-verify: ## build and check container health, non-root identity, and TL
 soak-gate: build-bench ## existing CI soak/RSS gate against an explicitly seeded running server
 	SOAK_BIN="$(BIN)/soak" SOAK_URL="$(SOAK_URL)" SOAK_APP="$(SOAK_APP)" SOAK_ATTR="$(SOAK_ATTR)" SOAK_SERVER_PID="$(SOAK_SERVER_PID)" SOAK_EVENTS="$(SOAK_EVENTS)" SOAK_LOG="$(SOAK_LOG)" bash scripts/quality-soak.sh
 
-test-release: ## full quality gate; requires live integration, soak, and pinned-v1 oracle prerequisites
-	$(MAKE) lint vet build
-	$(MAKE) test-unit test-integration test-contract bench-acceptance bench-verify
-	$(MAKE) container-verify soak-gate
-	$(MAKE) differential
+test-release: ## DEC-001 single-node-alpha gate; validates pre-existing qualified evidence
+	bash scripts/quality-release-gate.sh
+
+validate-release: ## validate the approved dynamic-view exclusion against corpus and release envelope
+	$(GO) run ./cmd/corpusctl --mode validate-release --corpus corpus/ --release-envelope docs/reference/release-envelope.md
 
 tidy: ## keep go.mod honest
 	$(GO) mod tidy
@@ -103,7 +119,7 @@ migrate-down:
 build: ## build instantd
 	$(GO) build -o $(BIN)/instantd ./cmd/instantd
 
-build-bench: ## build instantd and benchmark tools
+build-bench: ## build instantd and supported benchmark tools (excludes historical benchsmoke)
 	@mkdir -p "$(BIN)"
 	$(GO) build -o "$(BIN)/instantd" ./cmd/instantd
 	$(GO) build -o "$(BIN)/benchrun" ./cmd/benchrun
@@ -111,7 +127,11 @@ build-bench: ## build instantd and benchmark tools
 	$(GO) build -o "$(BIN)/soak" ./cmd/soak
 	$(GO) build -o "$(BIN)/soaksetup" ./cmd/soaksetup
 
-bench-acceptance: ## run benchmark harness/report acceptance tests with race detection
+build-historical-benchsmoke: ## compile historical diagnostic benchsmoke CLI (unsupported acceptance entrypoint; see DEC-001)
+	@mkdir -p "$(BIN)"
+	$(GO) build -o "$(BIN)/benchsmoke" ./cmd/benchsmoke
+
+bench-acceptance: ## run supported benchmark harness/report acceptance tests with race detection (excludes historical benchsmoke)
 	$(GO) test $(BENCH_PACKAGES) -race -count=1 -short -p 1
 
 bench-run: build-bench ## run an explicit live-config pair or synthetic acceptance pair
@@ -132,7 +152,7 @@ bench-report: build-bench ## verify a raw bundle and render its offline report
 bench-verify: bench-report ## verify a bundle and regenerate its offline report
 	test -s "$(BUNDLE)/report.md"
 
-bench-smoke: build-bench ## prepare a marked disposable DB for an operator-invoked V2 soak
+bench-smoke: build-bench ## prepare a marked disposable DB via supported cmd/soaksetup (cmd/benchsmoke is historical; DEC-001)
 	test -n "$(DATABASE_URL)" || { echo "DATABASE_URL is required" >&2; exit 2; }
 	test -n "$(BENCHMARK_MARKER)" || { echo "BENCHMARK_MARKER is required" >&2; exit 2; }
 	@test "$(DATABASE_URL)" = "$$(printf '%s' "$(DATABASE_URL)" | grep -E 'instant_bench_[A-Za-z0-9_.-]+')" || { echo "DATABASE_URL must name an instant_bench_ database" >&2; exit 2; }

@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# Hermetic contract checks for QR-003 preflight and failure propagation.
+set -euo pipefail
+
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+source_gate="$script_dir/quality-release-gate.sh"
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+repo="$tmp/repo"
+evidence="$tmp/evidence"
+fakebin="$tmp/bin"
+mkdir -p "$repo/scripts" "$repo/bin" "$evidence/records" "$evidence/handoffs" "$evidence/raw" "$evidence/candidate" "$fakebin"
+cp "$source_gate" "$repo/scripts/quality-release-gate.sh"
+gate="$repo/scripts/quality-release-gate.sh"
+git -C "$repo" init -q
+git -C "$repo" config user.email test@example.invalid
+git -C "$repo" config user.name test
+printf 'candidate\n' >"$repo/README"
+printf 'bin/\n' >"$repo/.gitignore"
+git -C "$repo" add README .gitignore scripts/quality-release-gate.sh
+GIT_AUTHOR_DATE=2026-01-01T00:00:00Z GIT_COMMITTER_DATE=2026-01-01T00:00:00Z git -C "$repo" commit -qm initial
+sha=$(git -C "$repo" rev-parse HEAD)
+hex=$(printf x | shasum -a 256 | awk '{print $1}')
+campaign_started=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+printf raw >"$evidence/raw/result"
+raw_size=$(wc -c <"$evidence/raw/result" | tr -d ' ')
+raw_sha=$(shasum -a 256 "$evidence/raw/result" | awk '{print $1}')
+printf candidate-binary >"$evidence/candidate/instantd"
+printf canonical-config >"$evidence/candidate/config.json"
+binary_size=$(wc -c <"$evidence/candidate/instantd" | tr -d ' ')
+binary_sha=$(shasum -a 256 "$evidence/candidate/instantd" | awk '{print $1}')
+config_size=$(wc -c <"$evidence/candidate/config.json" | tr -d ' ')
+config_sha=$(shasum -a 256 "$evidence/candidate/config.json" | awk '{print $1}')
+
+packets=(CF-002 CF-003 DA-001 DA-002 DA-003 DA-004 DA-004V DA-005 DA-006A DA-007 DA-008A EV-001 EV-002 EV-003 EV-004 EV-005 EV-006 F-001 F-002 FR-001 OP-003 OP-005 QR-001 QR-003 QR-005 RT-001 RT-002 RT-003)
+handoffs='[]'
+for packet in "${packets[@]}"; do
+  path="handoffs/$packet"
+  printf '%s\n' "$packet" >"$evidence/$path"
+  size=$(wc -c <"$evidence/$path" | tr -d ' ')
+  digest=$(shasum -a 256 "$evidence/$path" | awk '{print $1}')
+  handoffs=$(jq -c --arg p "$packet" --arg sha "$sha" --arg path "$path" --arg digest "$digest" --arg at "$campaign_started" --argjson size "$size" '. + [{packet:$p,state:(if $p=="DA-004V" then "ACCEPTED_EXCEPTION" else "GREEN" end),campaign_id:"campaign-1",candidate_sha:$sha,finished_at:$at,path:$path,size_bytes:$size,sha256:$digest}]' <<<"$handoffs")
+done
+
+record() {
+  local name=$1 packet=$2 details=$3
+  jq -n --arg packet "$packet" --arg sha "$sha" --arg binary "$binary_sha" --arg config "$config_sha" --arg endpoint "$hex" --arg at "$campaign_started" --argjson details "$details" --argjson size "$raw_size" --arg rawsha "$raw_sha" '{schema_version:1,packet:$packet,campaign_id:"campaign-1",candidate_sha:$sha,binary_sha256:$binary,configuration_sha256:$config,endpoint_sha256:$endpoint,fixture_id:"fixture-1",started_at:$at,finished_at:$at,host:{id:"host-1",os:(if $packet=="OP-003" then "linux" else "test" end),kernel:"kernel",arch:"amd64",runtime:"go"},result:"PASS",selected_count:1,skipped_count:0,cleanup:"complete",artifacts:[{path:"raw/result",size_bytes:$size,sha256:$rawsha}],details:$details}' >"$evidence/records/$name.json"
+}
+record native-linux OP-003 '{"native":true,"platform_checks":1}'
+record soak QR-001 '{"sessions":500,"active_seconds":900,"committed_transactions":1,"acknowledged_transactions":1,"refreshed_transactions":1,"dropped_transactions":0,"unresolved_transactions":0}'
+record recovery OP-005 '{"max_rto_seconds":3600,"max_drain_seconds":30,"outcomes":[{"id":"crash-after-commit","result":"PASS"},{"id":"crash-before-commit","result":"PASS"},{"id":"crash-during-publication","result":"PASS"},{"id":"drain-idle","result":"PASS"},{"id":"drain-moderate","result":"PASS"},{"id":"drain-saturated","result":"PASS"},{"id":"postgres-restart","result":"PASS"}]}'
+
+jq -n --arg sha "$sha" --arg endpoint "$hex" --arg at "$campaign_started" --arg binary "$binary_sha" --arg config "$config_sha" --argjson binary_size "$binary_size" --argjson config_size "$config_size" --argjson handoffs "$handoffs" '{schema_version:1,decision_id:"DEC-001-single-node-alpha-20260905",profile:"single-node-alpha",campaign_id:"campaign-1",campaign_started_at:$at,campaign_max_age_seconds:86400,candidate:{sha:$sha,endpoint_sha256:$endpoint,binary:{path:"candidate/instantd",size_bytes:$binary_size,sha256:$binary},configuration:{path:"candidate/config.json",size_bytes:$config_size,sha256:$config}},lanes:{hermetic:"run",owned_db:"run",corpus:"run",container:"not_selected",soak:"artifact",recovery:"artifact",external_v1:"not_selected",performance:"not_selected",artifact:"validate"},provider_evidence:"not_selected",external_records:{native_linux:"records/native-linux.json",soak:"records/soak.json",recovery:"records/recovery.json"},handoffs:$handoffs}' >"$evidence/manifest.json"
+
+cat >"$fakebin/make" <<'EOF'
+#!/usr/bin/env bash
+target=${@: -1}
+echo "$target" >>"$RELEASE_TEST_CALLS"
+if [[ ${RELEASE_TEST_FAIL_TARGET:-} == "$target" ]]; then exit 7; fi
+if [[ ${RELEASE_TEST_MUTATE_EVIDENCE_TARGET:-} == "$target" ]]; then printf changed >>"$RELEASE_TEST_MUTATE_EVIDENCE_PATH"; fi
+if [[ $target == build ]]; then cp "$RELEASE_TEST_BINARY" "${@: -2:1}/bin/instantd"; fi
+case "$target" in test-unit|bench-acceptance|test-integration|test-contract)
+  if [[ ${RELEASE_TEST_ZERO_TARGET:-} == "$target" ]]; then exit 0; fi
+  if [[ ${RELEASE_TEST_SKIP_TARGET:-} == "$target" ]]; then
+    printf '{"Action":"skip","Package":"example/corpus","Test":"TestSelected"}\n'
+    exit 0
+  fi
+  if [[ $target == test-contract ]]; then printf '{"Action":"skip","Package":"example/corpus","Test":"TestSelected"}\n'; fi
+  printf '{"Action":"pass","Package":"example/corpus","Test":"TestSelected"}\n'
+esac
+EOF
+chmod +x "$fakebin/make"
+
+calls="$tmp/calls"
+base=(env PATH="$fakebin:$PATH" RELEASE_GATE_MANIFEST="$evidence/manifest.json" RELEASE_CANDIDATE_SHA="$sha" RELEASE_CAMPAIGN_ID=campaign-1 DATABASE_URL=postgres://redacted RELEASE_TEST_CALLS="$calls" RELEASE_TEST_BINARY="$evidence/candidate/instantd" bash "$gate")
+
+pass=0
+fail=0
+ok() { local name=$1 out; shift; if out=$("$@" 2>&1); then echo "PASS: $name"; pass=$((pass+1)); else echo "FAIL: $name ($out)" >&2; fail=$((fail+1)); fi; }
+bad() { local name=$1 expected=$2; shift 2; local out status=0; out=$("$@" 2>&1) || status=$?; if [[ $status -ne 0 && $out == *"$expected"* ]]; then echo "PASS: $name"; pass=$((pass+1)); else echo "FAIL: $name ($status: $out)" >&2; fail=$((fail+1)); fi; }
+status_is() { local name=$1 expected=$2; shift 2; local status=0; "$@" >/dev/null 2>&1 || status=$?; if [[ $status -eq $expected ]]; then echo "PASS: $name"; pass=$((pass+1)); else echo "FAIL: $name (got $status, want $expected)" >&2; fail=$((fail+1)); fi; }
+
+: >"$calls"
+ok "happy path" "${base[@]}"
+expected=$'validate-release\nlint\nvet\ncheck-generated\nbuild\ntest-unit\nbench-acceptance\ntest-integration\ntest-contract'
+[[ $(cat "$calls") == "$expected" ]] || { echo "FAIL: command order" >&2; fail=$((fail+1)); }
+if ! grep -Eq 'container-verify|soak-gate|differential|bench-verify|publish' "$calls"; then echo "PASS: forbidden targets absent"; pass=$((pass+1)); else fail=$((fail+1)); fi
+
+bad "missing campaign" "RELEASE_CAMPAIGN_ID is required" env PATH="$fakebin:$PATH" RELEASE_GATE_MANIFEST="$evidence/manifest.json" RELEASE_CANDIDATE_SHA="$sha" DATABASE_URL=x bash "$gate"
+bad "missing database" "DATABASE_URL is required" env PATH="$fakebin:$PATH" RELEASE_GATE_MANIFEST="$evidence/manifest.json" RELEASE_CANDIDATE_SHA="$sha" RELEASE_CAMPAIGN_ID=campaign-1 bash "$gate"
+bad "missing manifest" "RELEASE_GATE_MANIFEST" env PATH="$fakebin:$PATH" RELEASE_CANDIDATE_SHA="$sha" RELEASE_CAMPAIGN_ID=campaign-1 DATABASE_URL=x bash "$gate"
+bad "candidate mismatch" "candidate SHA mismatch" env PATH="$fakebin:$PATH" RELEASE_GATE_MANIFEST="$evidence/manifest.json" RELEASE_CANDIDATE_SHA=0000000000000000000000000000000000000000 RELEASE_CAMPAIGN_ID=campaign-1 DATABASE_URL=x bash "$gate"
+printf dirty >"$repo/dirty"
+bad "dirty tree" "candidate tree is dirty" "${base[@]}"
+rm "$repo/dirty"
+
+cp "$evidence/manifest.json" "$evidence/bad.json"
+jq '.lanes.container="run"' "$evidence/bad.json" >"$evidence/bad.tmp" && mv "$evidence/bad.tmp" "$evidence/bad.json"
+bad "wrong lane selection" "manifest schema" env PATH="$fakebin:$PATH" RELEASE_GATE_MANIFEST="$evidence/bad.json" RELEASE_CANDIDATE_SHA="$sha" RELEASE_CAMPAIGN_ID=campaign-1 DATABASE_URL=x bash "$gate"
+
+status_is "child failure propagated" 7 env PATH="$fakebin:$PATH" RELEASE_GATE_MANIFEST="$evidence/manifest.json" RELEASE_CANDIDATE_SHA="$sha" RELEASE_CAMPAIGN_ID=campaign-1 DATABASE_URL=x RELEASE_TEST_CALLS="$calls" RELEASE_TEST_BINARY="$evidence/candidate/instantd" RELEASE_TEST_FAIL_TARGET=vet bash "$gate"
+bad "zero selected tests rejected" "test-unit selected zero tests" env PATH="$fakebin:$PATH" RELEASE_GATE_MANIFEST="$evidence/manifest.json" RELEASE_CANDIDATE_SHA="$sha" RELEASE_CAMPAIGN_ID=campaign-1 DATABASE_URL=x RELEASE_TEST_CALLS="$calls" RELEASE_TEST_BINARY="$evidence/candidate/instantd" RELEASE_TEST_ZERO_TARGET=test-unit bash "$gate"
+bad "selected test skip rejected" "test-integration skipped selected tests" env PATH="$fakebin:$PATH" RELEASE_GATE_MANIFEST="$evidence/manifest.json" RELEASE_CANDIDATE_SHA="$sha" RELEASE_CAMPAIGN_ID=campaign-1 DATABASE_URL=x RELEASE_TEST_CALLS="$calls" RELEASE_TEST_BINARY="$evidence/candidate/instantd" RELEASE_TEST_SKIP_TARGET=test-integration bash "$gate"
+bad "built binary mismatch rejected" "built candidate binary does not match" env PATH="$fakebin:$PATH" RELEASE_GATE_MANIFEST="$evidence/manifest.json" RELEASE_CANDIDATE_SHA="$sha" RELEASE_CAMPAIGN_ID=campaign-1 DATABASE_URL=x RELEASE_TEST_CALLS="$calls" RELEASE_TEST_BINARY="$evidence/raw/result" bash "$gate"
+cp "$evidence/records/soak.json" "$evidence/records/soak.source-saved"
+bad "source evidence mutation rejected" "source evidence changed during release gate: records/soak.json" env PATH="$fakebin:$PATH" RELEASE_GATE_MANIFEST="$evidence/manifest.json" RELEASE_CANDIDATE_SHA="$sha" RELEASE_CAMPAIGN_ID=campaign-1 DATABASE_URL=x RELEASE_TEST_CALLS="$calls" RELEASE_TEST_BINARY="$evidence/candidate/instantd" RELEASE_TEST_MUTATE_EVIDENCE_TARGET=lint RELEASE_TEST_MUTATE_EVIDENCE_PATH="$evidence/records/soak.json" bash "$gate"
+mv "$evidence/records/soak.source-saved" "$evidence/records/soak.json"
+
+cp "$evidence/records/soak.json" "$evidence/records/soak.saved"
+jq '.selected_count="1"' "$evidence/records/soak.saved" >"$evidence/records/soak.json"
+bad "wrong record type rejected" "soak record failed its common contract" "${base[@]}"
+jq '.artifacts=["not-an-artifact"]' "$evidence/records/soak.saved" >"$evidence/records/soak.json"
+bad "malformed artifact inventory rejected" "soak record failed its common contract" "${base[@]}"
+mv "$evidence/records/soak.saved" "$evidence/records/soak.json"
+
+cp "$evidence/records/native-linux.json" "$evidence/records/native-linux.saved"
+jq '.host.os="darwin"' "$evidence/records/native-linux.saved" >"$evidence/records/native-linux.json"
+bad "non-Linux native evidence rejected" "native Linux evidence is insufficient" "${base[@]}"
+mv "$evidence/records/native-linux.saved" "$evidence/records/native-linux.json"
+
+jq '(.handoffs[] | select(.packet=="RT-003") | .candidate_sha)="0000000000000000000000000000000000000000"' "$evidence/manifest.json" >"$evidence/bad.json"
+bad "handoff candidate mismatch rejected" "RT-003 handoff candidate mismatch" env PATH="$fakebin:$PATH" RELEASE_GATE_MANIFEST="$evidence/bad.json" RELEASE_CANDIDATE_SHA="$sha" RELEASE_CAMPAIGN_ID=campaign-1 DATABASE_URL=x bash "$gate"
+jq '(.handoffs[] | select(.packet=="RT-003") | .state)="PARTIAL"' "$evidence/manifest.json" >"$evidence/bad.json"
+bad "handoff state rejected" "RT-003 handoff is not accepted" env PATH="$fakebin:$PATH" RELEASE_GATE_MANIFEST="$evidence/bad.json" RELEASE_CANDIDATE_SHA="$sha" RELEASE_CAMPAIGN_ID=campaign-1 DATABASE_URL=x bash "$gate"
+jq '.candidate.binary.path="../outside"' "$evidence/manifest.json" >"$evidence/bad.json"
+bad "unsafe artifact path rejected" "candidate-binary artifact path is unsafe" env PATH="$fakebin:$PATH" RELEASE_GATE_MANIFEST="$evidence/bad.json" RELEASE_CANDIDATE_SHA="$sha" RELEASE_CAMPAIGN_ID=campaign-1 DATABASE_URL=x bash "$gate"
+ln -s raw/result "$evidence/evidence-link"
+bad "evidence symlink rejected" "release evidence may not contain symlinks" "${base[@]}"
+rm "$evidence/evidence-link"
+
+bad "production rejects test seams" "test seams are not accepted" env PATH="$fakebin:$PATH" RELEASE_GATE_TESTING=1 RELEASE_GATE_MANIFEST="$evidence/manifest.json" RELEASE_CANDIDATE_SHA="$sha" RELEASE_CAMPAIGN_ID=campaign-1 DATABASE_URL=x bash "$gate"
+
+echo "$pass passed, $fail failed"
+(( fail == 0 ))
