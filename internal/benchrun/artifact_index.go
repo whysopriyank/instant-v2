@@ -69,6 +69,11 @@ func (w *ArtifactWriter) Finalize() error {
 		return err
 	}
 	if err := buildChecksumsWithLimits(w.Root, w.MaxBytes, w.MaxFileBytes); err != nil {
+		rollbackErr := os.Remove(filepath.Join(w.Root, "raw-index.json"))
+		w.total -= int64(len(indexBytes))
+		if rollbackErr != nil && !os.IsNotExist(rollbackErr) {
+			return errors.Join(err, fmt.Errorf("rollback raw index after finalization failure: %w", rollbackErr))
+		}
 		return err
 	}
 	w.finalized = true
@@ -76,6 +81,9 @@ func (w *ArtifactWriter) Finalize() error {
 }
 
 func BuildChecksums(root string) error {
+	if err := rejectApprovedBundle(root); err != nil {
+		return err
+	}
 	total, perFile, err := bundleArtifactLimits(root)
 	if err != nil {
 		return err
@@ -109,12 +117,33 @@ func buildChecksumsWithLimits(root string, totalLimit, fileLimit int64) error {
 		return err
 	}
 	sort.Strings(files)
-	f, err := os.OpenFile(filepath.Join(root, "checksums.sha256"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o640)
+	tmp, err := os.CreateTemp(root, ".checksums-*.tmp")
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	return writeChecksumIndex(f, root, files, totalLimit, fileLimit)
+	tmpName := tmp.Name()
+	removeTemp := true
+	defer func() {
+		if removeTemp {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if err := writeChecksumIndex(tmp, root, files, totalLimit, fileLimit); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, filepath.Join(root, "checksums.sha256")); err != nil {
+		return err
+	}
+	removeTemp = false
+	return nil
 }
 
 func writeChecksumIndex(dst io.Writer, root string, files []string, totalLimit, fileLimit int64) error {
@@ -216,6 +245,24 @@ func RebuildBundleIndexes(root string) error {
 	if err != nil {
 		return err
 	}
+	if err := rejectApprovedBundle(root); err != nil {
+		return err
+	}
+	return rebuildBundleIndexes(root)
+}
+
+func rejectApprovedBundle(root string) error {
+	m, err := LoadManifest(root)
+	if err != nil {
+		return nil
+	}
+	if m.ApprovalSignature != "" || m.ContentRoot != "" {
+		return errors.New("approved bundle cannot be regenerated in place")
+	}
+	return nil
+}
+
+func rebuildBundleIndexes(root string) error {
 	totalLimit, fileLimit, err := bundleArtifactLimits(root)
 	if err != nil {
 		return err
@@ -254,10 +301,44 @@ func RebuildBundleIndexes(root string) error {
 		return err
 	}
 	indexBytes = append(indexBytes, '\n')
-	if err := os.WriteFile(filepath.Join(root, "raw-index.json"), indexBytes, 0o640); err != nil {
+	if err := atomicReplaceFile(filepath.Join(root, "raw-index.json"), indexBytes, 0o640); err != nil {
 		return err
 	}
-	return BuildChecksums(root)
+	return buildChecksumsWithLimits(root, totalLimit, fileLimit)
+}
+
+func atomicReplaceFile(path string, data []byte, mode os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".benchrun-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	removeTemp := true
+	defer func() {
+		if removeTemp {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	removeTemp = false
+	return nil
 }
 
 func bundleFiles(root string) (map[string]bool, error) {

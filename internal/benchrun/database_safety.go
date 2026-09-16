@@ -77,3 +77,56 @@ func validateLoopbackDBHost(host string) error {
 	}
 	return nil
 }
+
+// IsDatabaseRequired reports whether Before/After database snapshots are required
+// for the given manifest and target.
+func IsDatabaseRequired(m Manifest, target Target) bool {
+	return isLiveTarget(m, target) || isTargetDatabaseRequired(target) || m.DatabaseIDs[target.ID] != "" || m.PostgresVersion != ""
+}
+
+// isTargetDatabaseRequired reports whether the target configuration requires database snapshots.
+func isTargetDatabaseRequired(target Target) bool {
+	return target.Endpoint != "" || target.DatabaseName != "" || target.PostgresVersion != ""
+}
+
+// isUnsupportedDBSnapshot reports whether the snapshot represents unsupported collection.
+func isUnsupportedDBSnapshot(s DBSnapshot) bool {
+	for _, m := range dbSnapshotMeasurements(s) {
+		if m.Status != StatusUnsupported {
+			return false
+		}
+	}
+	return true
+}
+
+func hasUnsupportedDBSnapshotMeasurement(s DBSnapshot) bool {
+	for _, m := range dbSnapshotMeasurements(s) {
+		if m.Status == StatusUnsupported {
+			return true
+		}
+	}
+	return false
+}
+
+// isFailedDBSnapshot reports whether the snapshot contains failed measurements.
+func isFailedDBSnapshot(s DBSnapshot) bool {
+	for _, m := range dbSnapshotMeasurements(s) {
+		if m.Status == StatusFailed {
+			return true
+		}
+	}
+	return false
+}
+
+func isIncompleteDBSnapshot(s DBSnapshot) bool {
+	for _, m := range dbSnapshotMeasurements(s) {
+		if m.Status == "" {
+			return true
+		}
+	}
+	return false
+}
+
+func dbSnapshotMeasurements(s DBSnapshot) []Measurement {
+	return []Measurement{s.Connections, s.BlockHits, s.BlockReads, s.TempBytes, s.TempFiles, s.Commits, s.Rollbacks, s.TupleReads, s.TupleWrites, s.WALBytes, s.SlotLag, s.PoolActive, s.PoolIdle}
+}

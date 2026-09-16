@@ -87,6 +87,9 @@ func (w *ArtifactWriter) WriteJSONL(name string, records any) (retErr error) {
 	if w.finalized {
 		return errors.New("artifact writer already finalized")
 	}
+	if err := w.isFinalizedOrApprovedOnDisk(); err != nil {
+		return err
+	}
 	p, err := w.resolve(name)
 	if err != nil {
 		return err
@@ -215,9 +218,25 @@ func marshalRedactedJSON(v any) ([]byte, error) {
 	return redactJSONBytes(b, true)
 }
 
+func (w *ArtifactWriter) isFinalizedOrApprovedOnDisk() error {
+	if _, err := os.Lstat(filepath.Join(w.Root, "checksums.sha256")); err == nil {
+		return errors.New("artifact bundle already finalized: checksums.sha256 already exists")
+	}
+	if _, err := os.Lstat(filepath.Join(w.Root, "raw-index.json")); err == nil {
+		return errors.New("artifact bundle already finalized: raw-index.json already exists")
+	}
+	if m, err := LoadManifest(w.Root); err == nil && (m.ApprovalSignature != "" || m.ContentRoot != "") {
+		return errors.New("approved bundle cannot be modified in place")
+	}
+	return nil
+}
+
 func (w *ArtifactWriter) writeUnlocked(name string, data []byte) error {
 	if w.finalized {
 		return errors.New("artifact writer already finalized")
+	}
+	if err := w.isFinalizedOrApprovedOnDisk(); err != nil {
+		return err
 	}
 	p, err := w.resolve(name)
 	if err != nil {
@@ -236,9 +255,20 @@ func (w *ArtifactWriter) writeUnlocked(name string, data []byte) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	if _, err = f.Write(data); err != nil {
-		return err
+	var writeErr error
+	if _, writeErr = f.Write(data); writeErr != nil {
+		_ = f.Close()
+		_ = os.Remove(p)
+		return writeErr
+	}
+	if syncErr := f.Sync(); syncErr != nil {
+		_ = f.Close()
+		_ = os.Remove(p)
+		return syncErr
+	}
+	if closeErr := f.Close(); closeErr != nil {
+		_ = os.Remove(p)
+		return closeErr
 	}
 	w.total += int64(len(data))
 	return nil
@@ -252,6 +282,9 @@ func (w *ArtifactWriter) RewriteJSON(name string, v any) error {
 	defer w.mu.Unlock()
 	if w.finalized {
 		return errors.New("artifact writer already finalized")
+	}
+	if err := w.isFinalizedOrApprovedOnDisk(); err != nil {
+		return err
 	}
 	p, err := w.resolve(name)
 	if err != nil {

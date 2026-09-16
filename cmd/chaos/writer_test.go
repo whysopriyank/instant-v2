@@ -2,6 +2,8 @@ package main
 
 import (
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -35,5 +37,49 @@ func TestDecodeTransactResponseAcceptsPositiveTxID(t *testing.T) {
 	txID, status, body, err := decodeTransactResponse(200, []byte(`{"tx-id":42}`), nil)
 	if err != nil || txID != 42 || status != 200 || body != `{"tx-id":42}` {
 		t.Fatalf("valid response rejected: tx=%d status=%d body=%q err=%v", txID, status, body, err)
+	}
+}
+
+func TestWriterLoopPropagatesTransportFailure(t *testing.T) {
+	attempt := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt++
+		if attempt == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"tx-id":1}`))
+			return
+		}
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("server does not support hijacking")
+		}
+		conn, _, _ := hj.Hijack()
+		_ = conn.Close()
+	}))
+	defer srv.Close()
+
+	_, _, err := writerLoop(srv.URL, "app", "attr", 3)
+	if err == nil || !strings.Contains(err.Error(), "transport") {
+		t.Fatalf("transport failure after initial write was not propagated: %v", err)
+	}
+}
+
+func TestWriterLoopPropagatesDecodeFailure(t *testing.T) {
+	attempt := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt++
+		if attempt == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"tx-id":1}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"tx-id": invalid`))
+	}))
+	defer srv.Close()
+
+	_, _, err := writerLoop(srv.URL, "app", "attr", 3)
+	if err == nil || !strings.Contains(err.Error(), "decode") {
+		t.Fatalf("decode failure after initial write was not propagated: %v", err)
 	}
 }

@@ -101,6 +101,15 @@ func (r *PairRunner) Run(ctx context.Context) (Summary, error) {
 	if r.Writer == nil || r.Executor == nil {
 		return Summary{}, errors.New("pair runner requires writer and target executor")
 	}
+	if _, statErr := os.Stat(filepath.Join(r.Writer.Root, "checksums.sha256")); statErr == nil {
+		return Summary{}, errors.New("artifact bundle already finalized")
+	}
+	if _, statErr := os.Stat(filepath.Join(r.Writer.Root, "raw-index.json")); statErr == nil {
+		return Summary{}, errors.New("artifact bundle already finalized")
+	}
+	if m, err := LoadManifest(r.Writer.Root); err == nil && (m.ApprovalSignature != "" || m.ContentRoot != "") {
+		return Summary{}, errors.New("approved bundle cannot be regenerated in place")
+	}
 	if err := bindTargetKinds(r.Targets); err != nil {
 		return Summary{}, err
 	}
@@ -258,6 +267,47 @@ func (r *PairRunner) Run(ctx context.Context) (Summary, error) {
 					run.PrimaryClass = Pass
 				}
 			}
+			if IsDatabaseRequired(r.Manifest, target) {
+				if result.DBBefore.At.IsZero() || result.DBAfter.At.IsZero() || isIncompleteDBSnapshot(result.DBBefore) || isIncompleteDBSnapshot(result.DBAfter) {
+					run.PrimaryClass = HarnessDefect
+					if run.Failure == "" {
+						run.Failure = "required database before/after snapshot is incomplete"
+					}
+				} else if run.CollectorProvenance != nil && strings.HasPrefix(run.CollectorProvenance["database"], "failed") {
+					run.PrimaryClass = HarnessDefect
+					if run.Failure == "" {
+						run.Failure = "required database collector failed: " + run.CollectorProvenance["database"]
+					}
+				} else if run.CollectorProvenance != nil && strings.HasPrefix(run.CollectorProvenance["database"], "unsupported") {
+					run.PrimaryClass = HarnessDefect
+					if run.Failure == "" {
+						run.Failure = "required database collector is unsupported: " + run.CollectorProvenance["database"]
+					}
+				} else if isFailedDBSnapshot(result.DBBefore) {
+					run.PrimaryClass = HarnessDefect
+					if run.Failure == "" {
+						reason := result.DBBefore.Connections.Error
+						if reason == "" {
+							reason = "failed measurement in db-before"
+						}
+						run.Failure = "required database before snapshot failed: " + reason
+					}
+				} else if isFailedDBSnapshot(result.DBAfter) {
+					run.PrimaryClass = HarnessDefect
+					if run.Failure == "" {
+						reason := result.DBAfter.Connections.Error
+						if reason == "" {
+							reason = "failed measurement in db-after"
+						}
+						run.Failure = "required database after snapshot failed: " + reason
+					}
+				} else if hasUnsupportedDBSnapshotMeasurement(result.DBBefore) || hasUnsupportedDBSnapshotMeasurement(result.DBAfter) {
+					run.PrimaryClass = HarnessDefect
+					if run.Failure == "" {
+						run.Failure = "required database collection is unsupported"
+					}
+				}
+			}
 			if run.EvidenceMaxFrames == 0 && run.EvidenceMaxBytes == 0 && run.EvidenceMaxRetained == 0 {
 				run.EvidenceMaxFrames = r.Manifest.EvidenceMaxFrames
 				run.EvidenceMaxBytes = r.Manifest.EvidenceMaxBytes
@@ -298,6 +348,15 @@ func (r *PairRunner) Run(ctx context.Context) (Summary, error) {
 // PairRunner seam so existing callers need only provide three Targets; the
 // artifact shape and two-target path remain unchanged.
 func (r *PairRunner) runThreeTarget(ctx context.Context) (Summary, error) {
+	if _, statErr := os.Stat(filepath.Join(r.Writer.Root, "checksums.sha256")); statErr == nil {
+		return Summary{}, errors.New("artifact bundle already finalized")
+	}
+	if _, statErr := os.Stat(filepath.Join(r.Writer.Root, "raw-index.json")); statErr == nil {
+		return Summary{}, errors.New("artifact bundle already finalized")
+	}
+	if m, err := LoadManifest(r.Writer.Root); err == nil && (m.ApprovalSignature != "" || m.ContentRoot != "") {
+		return Summary{}, errors.New("approved bundle cannot be regenerated in place")
+	}
 	if r.Plan.Pairs != 7 {
 		r.Plan.Pairs = 7
 	}
@@ -456,6 +515,47 @@ func (r *PairRunner) runThreeTarget(ctx context.Context) (Summary, error) {
 					run.Failure = executeErr.Error()
 				} else if run.PrimaryClass == "" {
 					run.PrimaryClass = Pass
+				}
+			}
+			if IsDatabaseRequired(r.Manifest, target) {
+				if result.DBBefore.At.IsZero() || result.DBAfter.At.IsZero() || isIncompleteDBSnapshot(result.DBBefore) || isIncompleteDBSnapshot(result.DBAfter) {
+					run.PrimaryClass = HarnessDefect
+					if run.Failure == "" {
+						run.Failure = "required database before/after snapshot is incomplete"
+					}
+				} else if run.CollectorProvenance != nil && strings.HasPrefix(run.CollectorProvenance["database"], "failed") {
+					run.PrimaryClass = HarnessDefect
+					if run.Failure == "" {
+						run.Failure = "required database collector failed: " + run.CollectorProvenance["database"]
+					}
+				} else if run.CollectorProvenance != nil && strings.HasPrefix(run.CollectorProvenance["database"], "unsupported") {
+					run.PrimaryClass = HarnessDefect
+					if run.Failure == "" {
+						run.Failure = "required database collector is unsupported: " + run.CollectorProvenance["database"]
+					}
+				} else if isFailedDBSnapshot(result.DBBefore) {
+					run.PrimaryClass = HarnessDefect
+					if run.Failure == "" {
+						reason := result.DBBefore.Connections.Error
+						if reason == "" {
+							reason = "failed measurement in db-before"
+						}
+						run.Failure = "required database before snapshot failed: " + reason
+					}
+				} else if isFailedDBSnapshot(result.DBAfter) {
+					run.PrimaryClass = HarnessDefect
+					if run.Failure == "" {
+						reason := result.DBAfter.Connections.Error
+						if reason == "" {
+							reason = "failed measurement in db-after"
+						}
+						run.Failure = "required database after snapshot failed: " + reason
+					}
+				} else if hasUnsupportedDBSnapshotMeasurement(result.DBBefore) || hasUnsupportedDBSnapshotMeasurement(result.DBAfter) {
+					run.PrimaryClass = HarnessDefect
+					if run.Failure == "" {
+						run.Failure = "required database collection is unsupported"
+					}
 				}
 			}
 			if run.EvidenceMaxFrames == 0 && run.EvidenceMaxBytes == 0 && run.EvidenceMaxRetained == 0 {

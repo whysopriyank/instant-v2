@@ -108,7 +108,21 @@ func fingerprintTree(repoRoot, status, diff string, untracked []byte) (string, e
 		if !info.Mode().IsRegular() {
 			return "", fmt.Errorf("untracked path %q is not a regular file or symlink", rawPath)
 		}
-		b, err := os.ReadFile(full)
+		f, err := os.Open(full)
+		if err != nil {
+			return "", fmt.Errorf("open untracked file %q: %w", rawPath, err)
+		}
+		fInfo, err := f.Stat()
+		if err != nil {
+			_ = f.Close()
+			return "", fmt.Errorf("stat untracked file %q: %w", rawPath, err)
+		}
+		if !os.SameFile(info, fInfo) {
+			_ = f.Close()
+			return "", fmt.Errorf("untracked file %q changed during fingerprint (same-UID replacement detected)", rawPath)
+		}
+		b, err := io.ReadAll(f)
+		_ = f.Close()
 		if err != nil {
 			return "", fmt.Errorf("read untracked file %q: %w", rawPath, err)
 		}
@@ -162,7 +176,25 @@ func fingerprintReplayInputs(repoRoot string, h io.Writer) error {
 		if !entry.Type().IsRegular() {
 			return fmt.Errorf("replay input %q is not a regular file, directory, or symlink", rel)
 		}
-		b, err := os.ReadFile(path)
+		entryInfo, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		fInfo, err := f.Stat()
+		if err != nil {
+			_ = f.Close()
+			return err
+		}
+		if !os.SameFile(entryInfo, fInfo) {
+			_ = f.Close()
+			return fmt.Errorf("replay input %q changed during fingerprint (same-UID replacement detected)", rel)
+		}
+		b, err := io.ReadAll(f)
+		_ = f.Close()
 		if err != nil {
 			return err
 		}
@@ -186,10 +218,30 @@ func sha256File(path string) (string, error) {
 }
 
 func verifyBinaryHash(path, expected string) error {
-	got, err := sha256File(path)
+	info, err := os.Lstat(path)
 	if err != nil {
 		return err
 	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return fmt.Errorf("binary %q is not a regular file", path)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	fInfo, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(info, fInfo) {
+		return fmt.Errorf("binary %q changed during verification (same-UID replacement detected)", path)
+	}
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return err
+	}
+	got := hex.EncodeToString(h.Sum(nil))
 	if expected == "" || got != expected {
 		return fmt.Errorf("binary hash mismatch (expected %s, got %s)", expected, got)
 	}
@@ -201,14 +253,19 @@ func verifyBinaryHash(path, expected string) error {
 // checked again after copying, so a concurrent worktree mutation cannot be
 // silently certified by a build of a mixed tree.
 func snapshotCandidate(repoRoot string, expected candidateProvenance) (string, string, error) {
-	snapshot, err := os.MkdirTemp("", "chaos-candidate-*")
+	privateRoot, err := os.MkdirTemp(chaosTempRoot(), ".instant-v2-chaos-snapshot-*")
 	if err != nil {
+		return "", "", fmt.Errorf("create candidate snapshot root: %w", err)
+	}
+	snapshot := filepath.Join(privateRoot, "candidate")
+	if err := os.Mkdir(snapshot, 0700); err != nil {
+		_ = os.RemoveAll(privateRoot)
 		return "", "", fmt.Errorf("create candidate snapshot: %w", err)
 	}
 	removeSnapshot := true
 	defer func() {
 		if removeSnapshot {
-			_ = os.RemoveAll(snapshot)
+			_ = os.RemoveAll(privateRoot)
 		}
 	}()
 	if err := copyCandidateTree(repoRoot, snapshot); err != nil {
@@ -231,7 +288,15 @@ func snapshotCandidate(repoRoot string, expected candidateProvenance) (string, s
 }
 
 func copyCandidateTree(source, destination string) error {
-	return filepath.WalkDir(source, func(path string, entry os.DirEntry, walkErr error) error {
+	sourceInfo, err := os.Lstat(source)
+	if err != nil {
+		return fmt.Errorf("stat source %q: %w", source, err)
+	}
+	destInfo, err := os.Lstat(destination)
+	if err != nil {
+		return fmt.Errorf("stat destination %q: %w", destination, err)
+	}
+	err = filepath.WalkDir(source, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -260,6 +325,10 @@ func copyCandidateTree(source, destination string) error {
 			if err != nil {
 				return err
 			}
+			recheck, err := os.Lstat(path)
+			if err != nil || !os.SameFile(fileInfo, recheck) {
+				return fmt.Errorf("candidate symlink %q changed during copy (same-UID replacement detected)", rel)
+			}
 			return os.Symlink(link, dst)
 		case mode.IsDir():
 			if err := os.Mkdir(dst, mode.Perm()); err != nil {
@@ -271,12 +340,25 @@ func copyCandidateTree(source, destination string) error {
 			if err != nil {
 				return err
 			}
+			inStat, err := in.Stat()
+			if err != nil {
+				_ = in.Close()
+				return fmt.Errorf("stat opened candidate file %q: %w", rel, err)
+			}
+			if !os.SameFile(fileInfo, inStat) {
+				_ = in.Close()
+				return fmt.Errorf("candidate file %q changed during copy (same-UID replacement detected)", rel)
+			}
+			if inStat.Mode()&os.ModeSymlink != 0 || !inStat.Mode().IsRegular() {
+				_ = in.Close()
+				return fmt.Errorf("candidate file %q changed from regular file during copy", rel)
+			}
 			out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode.Perm())
 			if err != nil {
 				_ = in.Close()
 				return err
 			}
-			_, copyErr := io.Copy(out, in)
+			n, copyErr := io.Copy(out, in)
 			closeInErr := in.Close()
 			closeOutErr := out.Close()
 			if copyErr != nil {
@@ -288,11 +370,26 @@ func copyCandidateTree(source, destination string) error {
 			if closeOutErr != nil {
 				return closeOutErr
 			}
+			if n != fileInfo.Size() {
+				return fmt.Errorf("candidate file %q size changed during copy (expected %d, got %d)", rel, fileInfo.Size(), n)
+			}
 			return os.Chmod(dst, mode.Perm())
 		default:
 			return fmt.Errorf("candidate path %q is not a regular file, directory, or symlink", rel)
 		}
 	})
+	if err != nil {
+		return err
+	}
+	endSourceInfo, err := os.Lstat(source)
+	if err != nil || !os.SameFile(sourceInfo, endSourceInfo) {
+		return fmt.Errorf("source root %q changed during copy (same-UID replacement detected)", source)
+	}
+	endDestInfo, err := os.Lstat(destination)
+	if err != nil || !os.SameFile(destInfo, endDestInfo) {
+		return fmt.Errorf("destination root %q changed during copy (same-UID replacement detected)", destination)
+	}
+	return nil
 }
 
 func sha256Directory(root string) (string, error) {
@@ -314,6 +411,10 @@ func sha256Directory(root string) (string, error) {
 			if err != nil {
 				return err
 			}
+			recheck, err := os.Lstat(path)
+			if err != nil || recheck.Mode()&os.ModeSymlink == 0 {
+				return fmt.Errorf("snapshot symlink %q changed during hash", rel)
+			}
 			_, _ = io.WriteString(h, link)
 			_, _ = io.WriteString(h, "\x00")
 			return nil
@@ -324,16 +425,37 @@ func sha256Directory(root string) (string, error) {
 		if !entry.Type().IsRegular() {
 			return fmt.Errorf("snapshot path %q is not a regular file, directory, or symlink", rel)
 		}
+		entryInfo, err := entry.Info()
+		if err != nil {
+			return err
+		}
 		f, err := os.Open(path)
 		if err != nil {
 			return err
 		}
-		if _, err := io.Copy(h, f); err != nil {
+		fInfo, err := f.Stat()
+		if err != nil {
 			_ = f.Close()
 			return err
 		}
-		if err := f.Close(); err != nil {
+		if !os.SameFile(entryInfo, fInfo) {
+			_ = f.Close()
+			return fmt.Errorf("snapshot file %q changed during hash (same-UID replacement detected)", rel)
+		}
+		if fInfo.Mode()&os.ModeSymlink != 0 || !fInfo.Mode().IsRegular() {
+			_ = f.Close()
+			return fmt.Errorf("snapshot file %q changed from regular file during hash", rel)
+		}
+		n, err := io.Copy(h, f)
+		closeErr := f.Close()
+		if err != nil {
 			return err
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		if n != entryInfo.Size() {
+			return fmt.Errorf("snapshot file %q size changed during hash", rel)
 		}
 		_, _ = io.WriteString(h, "\x00")
 		return nil

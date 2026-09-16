@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -10,11 +11,19 @@ import (
 )
 
 type chaosRunReport struct {
-	Status    string              `json:"status"`
-	Candidate candidateProvenance `json:"candidate"`
-	Config    chaosRunConfig      `json:"config"`
-	Fixture   chaosFixture        `json:"fixture"`
-	Artifact  chaosArtifact       `json:"artifact"`
+	Status    string               `json:"status"`
+	Candidate candidateProvenance  `json:"candidate"`
+	Config    chaosRunConfig       `json:"config"`
+	Fixture   chaosFixture         `json:"fixture"`
+	Process   chaosProcessIdentity `json:"process"`
+	Artifact  chaosArtifact        `json:"artifact"`
+}
+
+type chaosProcessIdentity struct {
+	Postmaster        postmasterProcessIdentity `json:"postmaster"`
+	PostmasterRestart postmasterProcessIdentity `json:"postmaster_restart,omitempty"`
+	InstantdPreCrash  instantdProcessIdentity   `json:"instantd_pre_crash"`
+	InstantdPostCrash instantdProcessIdentity   `json:"instantd_post_crash"`
 }
 
 type chaosRunConfig struct {
@@ -28,9 +37,13 @@ type chaosRunConfig struct {
 }
 
 type chaosFixture struct {
-	ChaosApp  string `json:"chaos_app"`
-	AttrID    string `json:"attr_id"`
-	CorpusApp string `json:"corpus_app"`
+	ChaosApp   string `json:"chaos_app"`
+	AttrID     string `json:"attr_id"`
+	CorpusApp  string `json:"corpus_app"`
+	PGData     string `json:"pg_data"`
+	PGDev      uint64 `json:"pg_dev"`
+	PGIno      uint64 `json:"pg_ino"`
+	PGIdentity string `json:"pg_identity"`
 }
 
 type chaosArtifact struct {
@@ -38,10 +51,71 @@ type chaosArtifact struct {
 	CandidateAgreement bool   `json:"candidate_agreement"`
 	ReplayBaselineOK   bool   `json:"replay_baseline_ok"`
 	ReplayAfterOK      bool   `json:"replay_after_ok"`
+	ReplayOutcome      string `json:"replay_outcome"`
 	CleanupComplete    bool   `json:"cleanup_complete"`
 }
 
+func validatePASSReport(report chaosRunReport) error {
+	if !report.Artifact.CleanupComplete {
+		return errors.New("cleanup is not complete")
+	}
+	if !report.Artifact.CandidateAgreement {
+		return errors.New("candidate agreement is not verified")
+	}
+	if !report.Artifact.ReplayBaselineOK || !report.Artifact.ReplayAfterOK {
+		return errors.New("replay baseline or post-chaos replay failed")
+	}
+	if strings.TrimSpace(report.Artifact.ReplayOutcome) == "" {
+		return errors.New("replay outcome is not bound")
+	}
+	if report.Candidate.Revision == "" {
+		return errors.New("candidate revision is empty")
+	}
+	if report.Candidate.TreeFingerprint == "" {
+		return errors.New("candidate tree fingerprint is empty")
+	}
+	if report.Candidate.BinarySHA256 == "" || report.Candidate.BinarySHA256 != report.Artifact.InstantdSHA256 {
+		return errors.New("binary sha256 mismatch or empty")
+	}
+	if report.Candidate.SnapshotSHA256 == "" {
+		return errors.New("candidate snapshot sha256 is empty")
+	}
+	if report.Process.Postmaster.PID <= 0 || report.Process.Postmaster.StartTime <= 0 {
+		return errors.New("postmaster process identity is not bound")
+	}
+	if report.Process.PostmasterRestart.PID <= 0 || report.Process.PostmasterRestart.StartTime <= 0 {
+		return errors.New("restarted postmaster process identity is not bound")
+	}
+	if report.Process.InstantdPreCrash.PID <= 0 || report.Process.InstantdPreCrash.StartTime <= 0 {
+		return errors.New("instantd pre-crash process identity is not bound")
+	}
+	if report.Process.InstantdPostCrash.PID <= 0 || report.Process.InstantdPostCrash.StartTime <= 0 {
+		return errors.New("instantd post-crash process identity is not bound")
+	}
+	if report.Process.InstantdPreCrash.BinarySHA256 == "" || report.Process.InstantdPreCrash.BinarySHA256 != report.Candidate.BinarySHA256 || report.Process.InstantdPostCrash.BinarySHA256 == "" || report.Process.InstantdPostCrash.BinarySHA256 != report.Candidate.BinarySHA256 {
+		return errors.New("instantd process binary identity is not bound to candidate")
+	}
+	if report.Process.Postmaster == report.Process.PostmasterRestart {
+		return errors.New("postmaster restart identity did not change")
+	}
+	if report.Process.InstantdPreCrash == report.Process.InstantdPostCrash {
+		return errors.New("instantd crash/restart identity did not change")
+	}
+	if report.Fixture.PGDev == 0 || report.Fixture.PGIno == 0 || report.Fixture.PGIdentity == "" {
+		return errors.New("PG fixture identity is not bound")
+	}
+	if report.Fixture.ChaosApp == "" || report.Fixture.AttrID == "" || report.Fixture.CorpusApp == "" {
+		return errors.New("fixture IDs are not bound")
+	}
+	return nil
+}
+
 func writeChaosReport(path string, report chaosRunReport) (string, error) {
+	if report.Status == "PASS" {
+		if err := validatePASSReport(report); err != nil {
+			return "", fmt.Errorf("cannot emit PASS report: %w", err)
+		}
+	}
 	b, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("serialize chaos report: %w", err)
@@ -54,6 +128,7 @@ func writeChaosReport(path string, report chaosRunReport) (string, error) {
 		}
 		path = f.Name()
 		if err := writeAndCloseReport(f, b); err != nil {
+			_ = os.Remove(path)
 			return "", err
 		}
 		return path, nil
@@ -62,12 +137,29 @@ func writeChaosReport(path string, report chaosRunReport) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve chaos report path: %w", err)
 	}
-	f, err := os.OpenFile(absolute, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	dir := filepath.Dir(absolute)
+	tmp, err := os.CreateTemp(dir, ".instant-v2-chaos-report-*.tmp")
 	if err != nil {
-		return "", fmt.Errorf("create chaos report %q: %w", absolute, err)
+		return "", fmt.Errorf("create chaos report temporary file: %w", err)
 	}
-	if err := writeAndCloseReport(f, b); err != nil {
+	tmpName := tmp.Name()
+	if err := writeAndCloseReport(tmp, b); err != nil {
+		_ = os.Remove(tmpName)
 		return "", err
+	}
+	if _, err := os.Lstat(absolute); err == nil {
+		_ = os.Remove(tmpName)
+		return "", fmt.Errorf("create chaos report %q: file already exists", absolute)
+	} else if !os.IsNotExist(err) {
+		_ = os.Remove(tmpName)
+		return "", fmt.Errorf("inspect chaos report %q: %w", absolute, err)
+	}
+	if err := os.Link(tmpName, absolute); err != nil {
+		_ = os.Remove(tmpName)
+		return "", fmt.Errorf("finalize chaos report %q: %w", absolute, err)
+	}
+	if err := os.Remove(tmpName); err != nil {
+		return "", fmt.Errorf("remove temporary chaos report %q: %w", tmpName, err)
 	}
 	return absolute, nil
 }

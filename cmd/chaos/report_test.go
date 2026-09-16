@@ -8,18 +8,37 @@ import (
 	"testing"
 )
 
-func TestWriteChaosReportIsDurableAndWriteOnce(t *testing.T) {
-	root := t.TempDir()
-	path := filepath.Join(root, "chaos-report.json")
-	reportPath, err := writeChaosReport(path, chaosRunReport{
+func validPASSReport() chaosRunReport {
+	return chaosRunReport{
 		Status: "PASS",
 		Candidate: candidateProvenance{
 			Revision:        "abc",
 			TreeFingerprint: "tree",
 			BinarySHA256:    "bin",
+			SnapshotSHA256:  "snapshot",
 		},
-		Artifact: chaosArtifact{CandidateAgreement: true},
-	})
+		Fixture: chaosFixture{ChaosApp: "chaos", AttrID: "attr", CorpusApp: "corpus", PGDev: 1, PGIno: 2, PGIdentity: "dev:1 ino:2"},
+		Process: chaosProcessIdentity{
+			Postmaster:        postmasterProcessIdentity{PID: 1, StartTime: 1},
+			PostmasterRestart: postmasterProcessIdentity{PID: 4, StartTime: 2},
+			InstantdPreCrash:  instantdProcessIdentity{PID: 2, StartTime: 1, BinarySHA256: "bin"},
+			InstantdPostCrash: instantdProcessIdentity{PID: 3, StartTime: 2, BinarySHA256: "bin"},
+		},
+		Artifact: chaosArtifact{
+			InstantdSHA256:     "bin",
+			CandidateAgreement: true,
+			ReplayBaselineOK:   true,
+			ReplayAfterOK:      true,
+			ReplayOutcome:      "baseline: 1/1; post-chaos: 1/1",
+			CleanupComplete:    true,
+		},
+	}
+}
+
+func TestWriteChaosReportIsDurableAndWriteOnce(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "chaos-report.json")
+	reportPath, err := writeChaosReport(path, validPASSReport())
 	if err != nil || reportPath != path {
 		t.Fatalf("report write failed: path=%q err=%v", reportPath, err)
 	}
@@ -37,7 +56,7 @@ func TestWriteChaosReportIsDurableAndWriteOnce(t *testing.T) {
 }
 
 func TestWriteChaosReportPropagatesWriteFailure(t *testing.T) {
-	_, err := writeChaosReport(filepath.Join(t.TempDir(), "missing", "report.json"), chaosRunReport{Status: "PASS"})
+	_, err := writeChaosReport(filepath.Join(t.TempDir(), "missing", "report.json"), validPASSReport())
 	if err == nil || !strings.Contains(err.Error(), "create chaos report") {
 		t.Fatalf("report write failure swallowed: %v", err)
 	}

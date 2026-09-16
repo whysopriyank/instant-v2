@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -238,5 +239,36 @@ func TestCleanupBeforePASSPropagatesFailure(t *testing.T) {
 	}
 	if err := cleanupBeforePASS(true, func() error { return errors.New("must be skipped") }); err != nil {
 		t.Fatalf("keep mode attempted cleanup: %v", err)
+	}
+}
+
+func TestInstantdStopRefusesPIDReuse(t *testing.T) {
+	cmd := exec.Command("sleep", "60")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	}()
+
+	start, err := processStartToken(cmd.Process.Pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst := &instantdInstance{
+		Cmd: cmd,
+		Identity: instantdProcessIdentity{
+			PID:          cmd.Process.Pid,
+			StartTime:    start + 1,
+			BinarySHA256: "not-used-after-token-mismatch",
+		},
+	}
+
+	if err := inst.Stop(); err == nil {
+		t.Fatal("Stop succeeded with a mismatched kernel process start token")
+	}
+	if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
+		t.Fatalf("Stop killed or reaped the process after identity mismatch: %v", err)
 	}
 }

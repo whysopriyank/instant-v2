@@ -24,7 +24,13 @@ func writerLoop(baseURL, appID, attrID string, writes int) ([]journalEntry, int,
 	for i := 0; i < writes; i++ {
 		entity := writeEntityID(i)
 		txID, code, body, err := postTransact(baseURL, appID, attrID, entity)
-		if err == nil && code == 200 {
+		if err != nil {
+			if strings.Contains(err.Error(), "decode transact response") {
+				return nil, rejected, fmt.Errorf("writer transact %d decode failure: %w", i, err)
+			}
+			return nil, rejected, fmt.Errorf("writer transact %d transport failure: %w", i, err)
+		}
+		if code == 200 {
 			journal = append(journal, journalEntry{Entity: entity, TxID: txID})
 		} else {
 			rejected++

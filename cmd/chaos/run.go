@@ -27,6 +27,12 @@ func cleanupBeforePASS(keep bool, cleanup func() error) error {
 }
 
 func run() error {
+	if *flagSkipCorp {
+		return errors.New("cannot emit PASS when --skip-corpus is enabled: PASS requires bound replay outcome")
+	}
+	if *flagKeep {
+		return errors.New("cannot emit PASS when --keep is enabled: PASS requires verified cleanup")
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -80,6 +86,13 @@ func run() error {
 		return fmt.Errorf("pg_ctl start: %v\n%s", err, out)
 	}
 	clusterInitialized = true
+	postmasterIdent, err := readPostmasterIdentity(pgData, preparedPGData.Identity)
+	if err != nil {
+		return fmt.Errorf("read initial postmaster identity: %w", err)
+	}
+	if postmasterIdent.PID <= 0 {
+		return errors.New("initial postmaster process identity missing")
+	}
 	dsn := fmt.Sprintf("postgres://instant@localhost:%d/instant_chaos?sslmode=disable", *flagPGPort)
 	if out, err := pgBin("createdb", "-h", "localhost", "-p", fmt.Sprint(*flagPGPort), "-U", "instant", "instant_chaos"); err != nil {
 		return fmt.Errorf("createdb: %v\n%s", err, out)
@@ -197,13 +210,13 @@ func run() error {
 	}
 	p1, err := startInstantd(instantdBin, dsn, httpAddr)
 	if err != nil {
-		return err
+		return fmt.Errorf("start instantd candidate: %w", err)
 	}
 	defer stopInstantd(p1)
 	if err := waitHealth(baseURL, 30*time.Second, true); err != nil {
 		return err
 	}
-	fmt.Printf("   instantd up at %s (pid %d)\n", baseURL, p1.Process.Pid)
+	fmt.Printf("   instantd up at %s (pid %d)\n", baseURL, p1.Identity.PID)
 
 	// ---- Phase 4: connect sessions + writer loop ----------------------------
 	fmt.Printf("== [3] connecting %d WS sessions (add-query chaos-items) ==\n", *flagSessions)
@@ -244,12 +257,8 @@ func run() error {
 
 	// ---- Phase 5: THE CHAOS — SIGSTOP, then crash postgres -------------------
 	fmt.Println("== [4] CHAOS: SIGSTOP postmaster, then pg_ctl stop -m immediate ==")
-	pm, err := pidOfPostmaster(pgData, preparedPGData.Identity)
-	if err != nil {
-		return fmt.Errorf("postmaster pid safety check: %w", err)
-	}
-	if pm != "" {
-		if err := freezeAndThawPostmaster(pm, 2*time.Second); err != nil {
+	if postmasterIdent.PID > 0 {
+		if err := freezeAndThawPostmasterIdentity(postmasterIdent, pgData, preparedPGData.Identity, 2*time.Second); err != nil {
 			return err
 		}
 	}
@@ -272,7 +281,9 @@ func run() error {
 
 	// Kill instantd: every WS client must observe connection loss.
 	fmt.Println("== [5] SIGKILL instantd; expecting all clients to see connection loss ==")
-	stopInstantd(p1)
+	if err := stopInstantd(p1); err != nil {
+		return fmt.Errorf("stop instantd after outage: %w", err)
+	}
 	deadline := time.Now().Add(20 * time.Second)
 	dropped := 0
 	for time.Now().Before(deadline) {
@@ -310,6 +321,13 @@ func run() error {
 		"-w", "-t", "60", "start"); err != nil {
 		return fmt.Errorf("pg_ctl restart: %v\n%s", err, out)
 	}
+	postmasterRestartIdent, err := readPostmasterIdentity(pgData, preparedPGData.Identity)
+	if err != nil {
+		return fmt.Errorf("read restart postmaster identity: %w", err)
+	}
+	if postmasterRestartIdent.PID <= 0 {
+		return errors.New("restart postmaster process identity missing")
+	}
 	fmt.Printf("   starting instantd at %s...\n", httpAddr)
 	if err := verifyBinaryHash(instantdBin, candidate.BinarySHA256); err != nil {
 		return fmt.Errorf("verify instantd before recovery start: %w", err)
@@ -319,7 +337,7 @@ func run() error {
 	}
 	p2, err := startInstantd(instantdBin, dsn, httpAddr)
 	if err != nil {
-		return err
+		return fmt.Errorf("start recovery instantd: %w", err)
 	}
 	defer stopInstantd(p2)
 	if err := waitHealth(baseURL, 45*time.Second, true); err != nil {
@@ -442,9 +460,29 @@ func run() error {
 	if err := verifySnapshotHash(buildSrc, candidate.SnapshotSHA256); err != nil {
 		return fmt.Errorf("verify candidate snapshot before report: %w", err)
 	}
+	if err := verifyInstantdIdentity(p2); err != nil {
+		return fmt.Errorf("verify recovered instantd identity before report: %w", err)
+	}
+	if err := stopInstantd(p2); err != nil {
+		return fmt.Errorf("stop recovered instantd before report: %w", err)
+	}
 	if err := validateReportPath(*flagReport, pgData); err != nil {
 		return fmt.Errorf("report path safety check: %w", err)
 	}
+	dev, ino, ok := pgDataDevIno(preparedPGData.Identity)
+	if !ok {
+		return errors.New("cannot determine PG data device/inode")
+	}
+	pgIdent := fmt.Sprintf("dev:%d ino:%d", dev, ino)
+	summarizeReplay := func(out string) string {
+		match := corpusSummaryRE.FindStringSubmatch(out)
+		if len(match) == 3 {
+			return match[0]
+		}
+		return strings.TrimSpace(out)
+	}
+	replayOutcome := fmt.Sprintf("baseline: %s; post-chaos: %s", summarizeReplay(corpusBaseline), summarizeReplay(corpusAfter))
+
 	reportPath, err := writeChaosReport(*flagReport, chaosRunReport{
 		Status:    "PASS",
 		Candidate: candidate,
@@ -457,12 +495,27 @@ func run() error {
 			Keep:         *flagKeep,
 			WebSocketURL: wsURL,
 		},
-		Fixture: chaosFixture{ChaosApp: chaosApp, AttrID: attrID, CorpusApp: corpusAppID},
+		Fixture: chaosFixture{
+			ChaosApp:   chaosApp,
+			AttrID:     attrID,
+			CorpusApp:  corpusAppID,
+			PGData:     pgData,
+			PGDev:      dev,
+			PGIno:      ino,
+			PGIdentity: pgIdent,
+		},
+		Process: chaosProcessIdentity{
+			Postmaster:        postmasterIdent,
+			PostmasterRestart: postmasterRestartIdent,
+			InstantdPreCrash:  p1.Identity,
+			InstantdPostCrash: p2.Identity,
+		},
 		Artifact: chaosArtifact{
 			InstantdSHA256:     candidate.BinarySHA256,
 			CandidateAgreement: true,
-			ReplayBaselineOK:   corpusBaseline == "" || strings.Contains(corpusBaseline, "scenarios passed"),
-			ReplayAfterOK:      corpusAfter == "" || strings.Contains(corpusAfter, "scenarios passed"),
+			ReplayBaselineOK:   corpusBaseline != "" && strings.Contains(corpusBaseline, "scenarios passed"),
+			ReplayAfterOK:      corpusAfter != "" && strings.Contains(corpusAfter, "scenarios passed"),
+			ReplayOutcome:      replayOutcome,
 			CleanupComplete:    !*flagKeep && cleanupDone,
 		},
 	})

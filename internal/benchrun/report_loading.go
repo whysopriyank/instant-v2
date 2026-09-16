@@ -258,7 +258,11 @@ func validatePairProcessEvidence(root string, m Manifest, cells map[string]*repo
 						if err := validateLiveResourceEvidence(filepath.Join(root, "runs", run.ID), run, target); err != nil {
 							return err
 						}
-						if err := validateCollectorEvidence(filepath.Join(root, "runs", run.ID), run, target); err != nil {
+						if err := validateCollectorEvidence(filepath.Join(root, "runs", run.ID), run, target, IsDatabaseRequired(m, target)); err != nil {
+							return err
+						}
+					} else if run.PrimaryClass == Pass && IsDatabaseRequired(m, target) {
+						if err := validateRequiredDatabaseEvidence(filepath.Join(root, "runs", run.ID), run, target); err != nil {
 							return err
 						}
 					}
@@ -267,6 +271,14 @@ func validatePairProcessEvidence(root string, m Manifest, cells map[string]*repo
 		}
 	}
 	return nil
+}
+
+func validateRequiredDatabaseEvidence(dir string, run Run, target Target) error {
+	states, err := validateCollectorProvenance(run)
+	if err != nil {
+		return err
+	}
+	return validateDatabaseEvidence(dir, run, target, states["database"], true)
 }
 
 func validatePairRunSet(m Manifest, runIDs map[string]bool) error {

@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -339,41 +338,28 @@ func writePGDataOwner(dir string, expected os.FileInfo, owner pgDataOwner) error
 	return writePGDataOwnerAt(target, expected, owner)
 }
 
+type postmasterProcessIdentity struct {
+	PID       int    `json:"pid"`
+	StartTime int64  `json:"start_time"`
+	DataDir   string `json:"data_dir"`
+	Port      int    `json:"port"`
+}
+
+func readPostmasterIdentity(pgData string, expected os.FileInfo) (postmasterProcessIdentity, error) {
+	target, err := safePGDataPath(pgData)
+	if err != nil {
+		return postmasterProcessIdentity{}, err
+	}
+	return readPostmasterIdentityDescriptor(target, expected)
+}
+
 func pidOfPostmaster(pgData string, expected os.FileInfo) (string, error) {
-	if err := verifyPGDataIdentity(pgData, expected); err != nil {
+	ident, err := readPostmasterIdentity(pgData, expected)
+	if err != nil {
 		return "", err
 	}
-	path := filepath.Join(pgData, "postmaster.pid")
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
+	if ident.PID <= 0 {
 		return "", nil
 	}
-	if err != nil {
-		return "", fmt.Errorf("inspect postmaster pid: %w", err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return "", errors.New("refusing non-regular postmaster pid file")
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return "", fmt.Errorf("open postmaster pid: %w", err)
-	}
-	b, readErr := io.ReadAll(io.LimitReader(f, 4096))
-	closeErr := f.Close()
-	if readErr != nil {
-		return "", fmt.Errorf("read postmaster pid: %w", readErr)
-	}
-	if closeErr != nil {
-		return "", fmt.Errorf("close postmaster pid: %w", closeErr)
-	}
-	if err := verifyPGDataIdentity(pgData, expected); err != nil {
-		return "", err
-	}
-	line, _, _ := strings.Cut(string(b), "\n")
-	line = strings.TrimSpace(line)
-	pid, err := strconv.ParseInt(line, 10, 64)
-	if err != nil || pid <= 0 {
-		return "", fmt.Errorf("invalid postmaster pid %q", line)
-	}
-	return line, nil
+	return strconv.Itoa(ident.PID), nil
 }

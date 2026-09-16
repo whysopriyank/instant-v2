@@ -15,7 +15,58 @@ import (
 	"time"
 )
 
-func startInstantd(bin, dsn, addr string) (*exec.Cmd, error) {
+type instantdProcessIdentity struct {
+	PID          int    `json:"pid"`
+	StartTime    int64  `json:"start_time"`
+	BinarySHA256 string `json:"binary_sha256"`
+	Addr         string `json:"addr"`
+}
+
+type instantdInstance struct {
+	Cmd      *exec.Cmd
+	Identity instantdProcessIdentity
+}
+
+func verifyInstantdIdentity(inst *instantdInstance) error {
+	if inst == nil || inst.Cmd == nil || inst.Cmd.Process == nil {
+		return errors.New("instantd process identity is unavailable")
+	}
+	token, err := processStartToken(inst.Cmd.Process.Pid)
+	if err != nil {
+		return err
+	}
+	if token != inst.Identity.StartTime {
+		return fmt.Errorf("instantd kernel start identity changed for pid %d", inst.Identity.PID)
+	}
+	got, err := sha256File(inst.Cmd.Path)
+	if err != nil {
+		return err
+	}
+	if got != inst.Identity.BinarySHA256 {
+		return fmt.Errorf("instantd binary identity changed for pid %d", inst.Identity.PID)
+	}
+	return nil
+}
+
+func (inst *instantdInstance) Stop() error {
+	if inst == nil || inst.Cmd == nil || inst.Cmd.Process == nil {
+		return nil
+	}
+	if err := verifyInstantdIdentity(inst); err != nil {
+		return fmt.Errorf("refuse to kill instantd: %w", err)
+	}
+	if err := inst.Cmd.Process.Kill(); err != nil {
+		return fmt.Errorf("kill instantd pid %d: %w", inst.Identity.PID, err)
+	}
+	_, _ = inst.Cmd.Process.Wait()
+	return nil
+}
+
+func startInstantd(bin, dsn, addr string) (*instantdInstance, error) {
+	hash, err := sha256File(bin)
+	if err != nil {
+		return nil, fmt.Errorf("hash instantd binary before start: %w", err)
+	}
 	cmd := exec.Command(bin)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -26,7 +77,29 @@ func startInstantd(bin, dsn, addr string) (*exec.Cmd, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	return cmd, nil
+	startTime, err := processStartToken(cmd.Process.Pid)
+	if err != nil {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+		return nil, err
+	}
+	if currentHash, hashErr := sha256File(bin); hashErr != nil || currentHash != hash {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+		if hashErr != nil {
+			return nil, fmt.Errorf("verify instantd binary after start: %w", hashErr)
+		}
+		return nil, fmt.Errorf("instantd binary changed between hash and exec")
+	}
+	return &instantdInstance{
+		Cmd: cmd,
+		Identity: instantdProcessIdentity{
+			PID:          cmd.Process.Pid,
+			StartTime:    startTime,
+			BinarySHA256: hash,
+			Addr:         addr,
+		},
+	}, nil
 }
 
 func buildInstantd(repoRoot, output string) ([]byte, error) {
@@ -102,12 +175,11 @@ func pgBinInDir(path string, expected os.FileInfo, name string, args ...string) 
 	return string(out), fmt.Errorf("%s: %w", full[0], runErr)
 }
 
-func stopInstantd(p *exec.Cmd) {
-	if p == nil || p.Process == nil {
-		return
+func stopInstantd(inst *instantdInstance) error {
+	if inst == nil {
+		return nil
 	}
-	_ = p.Process.Kill()
-	_, _ = p.Process.Wait()
+	return inst.Stop()
 }
 
 var sendPostmasterSignal = func(signal, pid string) error {
@@ -121,6 +193,45 @@ func freezeAndThawPostmaster(pid string, hold time.Duration) error {
 	time.Sleep(hold)
 	if err := sendPostmasterSignal("-CONT", pid); err != nil {
 		return fmt.Errorf("SIGCONT postmaster %s: %w", pid, err)
+	}
+	return nil
+}
+
+func freezeAndThawPostmasterIdentity(ident postmasterProcessIdentity, pgData string, expected os.FileInfo, hold time.Duration) error {
+	if token, err := processStartToken(ident.PID); err != nil || token != ident.StartTime {
+		if err != nil {
+			return fmt.Errorf("verify postmaster kernel identity before SIGSTOP: %w", err)
+		}
+		return fmt.Errorf("postmaster kernel start identity changed before SIGSTOP")
+	}
+	current, err := readPostmasterIdentity(pgData, expected)
+	if err != nil {
+		return fmt.Errorf("verify postmaster before SIGSTOP: %w", err)
+	}
+	if current != ident {
+		return fmt.Errorf("postmaster identity changed before SIGSTOP (expected %+v, got %+v)", ident, current)
+	}
+	pidStr := strconv.Itoa(ident.PID)
+	if err := sendPostmasterSignal("-STOP", pidStr); err != nil {
+		return fmt.Errorf("SIGSTOP postmaster %s: %w", pidStr, err)
+	}
+	time.Sleep(hold)
+	current, err = readPostmasterIdentity(pgData, expected)
+	if err != nil {
+		return fmt.Errorf("verify postmaster before SIGCONT: %w", err)
+	}
+	if current != ident {
+		return fmt.Errorf("postmaster identity changed during SIGSTOP (expected %+v, got %+v)", ident, current)
+	}
+	if err := sendPostmasterSignal("-CONT", pidStr); err != nil {
+		return fmt.Errorf("SIGCONT postmaster %s: %w", pidStr, err)
+	}
+	current, err = readPostmasterIdentity(pgData, expected)
+	if err != nil {
+		return fmt.Errorf("verify postmaster after SIGCONT: %w", err)
+	}
+	if current != ident {
+		return fmt.Errorf("postmaster identity changed after SIGCONT (expected %+v, got %+v)", ident, current)
 	}
 	return nil
 }

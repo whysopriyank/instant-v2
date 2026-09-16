@@ -82,7 +82,7 @@ const collectorClockSkew = time.Minute
 // validateCollectorEvidence is intentionally shared by the pair and triad
 // loaders. A passing live run is a claim only when every collector's raw
 // evidence and provenance can be replayed offline.
-func validateCollectorEvidence(dir string, run Run, target Target) error {
+func validateCollectorEvidence(dir string, run Run, target Target, databaseRequired bool) error {
 	states, err := validateCollectorProvenance(run)
 	if err != nil {
 		return err
@@ -90,7 +90,7 @@ func validateCollectorEvidence(dir string, run Run, target Target) error {
 	if err := validateRuntimeEvidence(dir, run, states["runtime"]); err != nil {
 		return err
 	}
-	return validateDatabaseEvidence(dir, run, target, states["database"])
+	return validateDatabaseEvidence(dir, run, target, states["database"], databaseRequired)
 }
 
 func validateCollectorProvenance(run Run) (map[string]string, error) {
@@ -202,7 +202,10 @@ func validateRuntimeEvidence(dir string, run Run, state string) error {
 	return nil
 }
 
-func validateDatabaseEvidence(dir string, run Run, target Target, state string) error {
+func validateDatabaseEvidence(dir string, run Run, target Target, state string, databaseRequired bool) error {
+	if databaseRequired && state == "unsupported" {
+		return fmt.Errorf("run %s database collector is required but unsupported", run.ID)
+	}
 	readSnapshot := func(name string) (DBSnapshot, error) {
 		b, err := readBounded(filepath.Join(dir, name+".json"), SmallArtifactBytes)
 		if err != nil {
@@ -233,6 +236,9 @@ func validateDatabaseEvidence(dir string, run Run, target Target, state string) 
 		}
 		if state == "unsupported" && !allUnsupported {
 			return DBSnapshot{}, fmt.Errorf("run %s %s contradicts unsupported collector provenance", run.ID, name)
+		}
+		if databaseRequired && hasUnsupportedDBSnapshotMeasurement(snapshot) {
+			return DBSnapshot{}, fmt.Errorf("run %s %s contains unsupported required database measurement", run.ID, name)
 		}
 		if state == "supported" && allUnsupported {
 			return DBSnapshot{}, fmt.Errorf("run %s %s contradicts supported collector provenance", run.ID, name)

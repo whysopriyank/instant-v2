@@ -176,8 +176,8 @@ func syntheticDBSnapshot(at time.Time) DBSnapshot {
 	return DBSnapshot{
 		At: at, Version: "17.0", Connections: Zero("count"), BlockHits: Zero("count"), BlockReads: Zero("count"),
 		TempBytes: Zero("bytes"), TempFiles: Zero("count"), Commits: Zero("count"), Rollbacks: Zero("count"),
-		TupleReads: Zero("count"), TupleWrites: Zero("count"), WALBytes: Zero("bytes"), SlotLag: Unsupported("bytes", "not collected"),
-		PoolActive: Unsupported("count", "not collected"), PoolIdle: Unsupported("count", "not collected"),
+		TupleReads: Zero("count"), TupleWrites: Zero("count"), WALBytes: Zero("bytes"), SlotLag: Zero("bytes"),
+		PoolActive: Zero("count"), PoolIdle: Zero("count"),
 	}
 }
 

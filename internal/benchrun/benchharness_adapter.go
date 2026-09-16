@@ -75,8 +75,9 @@ func (a BenchharnessDriver) RunTarget(ctx context.Context, spec RunSpec) (Execut
 	result := ExecutionResult{}
 	result.Run = spec.Run
 	result.Run.CollectorProvenance = cloneStringMap(collectors.Provenance)
+	var dbBeforeErr, dbAfterErr error
 	if collectors.Database != nil {
-		result.DBBefore, _ = collectors.Database.Before(ctx)
+		result.DBBefore, dbBeforeErr = collectors.Database.Before(ctx)
 	}
 	var samplesMu sync.Mutex
 	sampleProcess := func(sampleCtx context.Context) {
@@ -160,7 +161,7 @@ func (a BenchharnessDriver) RunTarget(ctx context.Context, spec RunSpec) (Execut
 	sampleProcess(ctx)
 	sampleRuntime(ctx)
 	if collectors.Database != nil {
-		result.DBAfter, _ = collectors.Database.After(ctx)
+		result.DBAfter, dbAfterErr = collectors.Database.After(ctx)
 	}
 	result.Run.StartedAt = artifacts.StartedAt
 	if result.Run.StartedAt.IsZero() {
@@ -226,6 +227,64 @@ func (a BenchharnessDriver) RunTarget(ctx context.Context, spec RunSpec) (Execut
 	if !processIdentityStable(result.Process, measuredStart, measuredEnd) {
 		result.Run.PrimaryClass = HarnessDefect
 		result.Run.Failure = "target process identity changed during measurement"
+	}
+	if isTargetDatabaseRequired(spec.Target) {
+		if collectors.Database == nil {
+			result.Run.PrimaryClass = HarnessDefect
+			result.Run.Failure = "required database collector is not configured"
+			if result.Run.CollectorProvenance == nil {
+				result.Run.CollectorProvenance = make(map[string]string)
+			}
+			result.Run.CollectorProvenance["database"] = "failed: database collector is not configured"
+		} else if dbBeforeErr != nil || isFailedDBSnapshot(result.DBBefore) {
+			reason := "database before collector failed"
+			if dbBeforeErr != nil {
+				reason = Redact(dbBeforeErr.Error())
+			} else if result.DBBefore.Connections.Error != "" {
+				reason = result.DBBefore.Connections.Error
+			}
+			if result.Run.CollectorProvenance == nil {
+				result.Run.CollectorProvenance = make(map[string]string)
+			}
+			result.Run.CollectorProvenance["database"] = "failed: " + reason
+			if result.Run.PrimaryClass == Pass || result.Run.PrimaryClass == "" {
+				result.Run.PrimaryClass = HarnessDefect
+				result.Run.Failure = "database before snapshot failed: " + reason
+			}
+		} else if isUnsupportedDBSnapshot(result.DBBefore) || strings.HasPrefix(collectors.Provenance["database"], "unsupported") {
+			reason := "required database collection is unsupported"
+			if prov := collectors.Provenance["database"]; prov != "" {
+				reason = prov
+			}
+			if result.Run.CollectorProvenance == nil {
+				result.Run.CollectorProvenance = make(map[string]string)
+			}
+			result.Run.CollectorProvenance["database"] = reason
+			if result.Run.PrimaryClass == Pass || result.Run.PrimaryClass == "" {
+				result.Run.PrimaryClass = HarnessDefect
+				result.Run.Failure = reason
+			}
+		} else if dbAfterErr != nil || isFailedDBSnapshot(result.DBAfter) {
+			reason := "database after collector failed"
+			if dbAfterErr != nil {
+				reason = Redact(dbAfterErr.Error())
+			} else if result.DBAfter.Connections.Error != "" {
+				reason = result.DBAfter.Connections.Error
+			}
+			if result.Run.CollectorProvenance == nil {
+				result.Run.CollectorProvenance = make(map[string]string)
+			}
+			result.Run.CollectorProvenance["database"] = "failed: " + reason
+			if result.Run.PrimaryClass == Pass || result.Run.PrimaryClass == "" {
+				result.Run.PrimaryClass = HarnessDefect
+				result.Run.Failure = "database after snapshot failed: " + reason
+			}
+		} else if isUnsupportedDBSnapshot(result.DBAfter) {
+			if result.Run.PrimaryClass == Pass || result.Run.PrimaryClass == "" {
+				result.Run.PrimaryClass = HarnessDefect
+				result.Run.Failure = "required database collection after snapshot is unsupported"
+			}
+		}
 	}
 	var rows []benchharness.LedgerRow
 	if artifacts.Result.Ledger != nil {

@@ -1,6 +1,10 @@
-// Command benchsmoke runs diagnostic, non-claimable live attempts through the
-// production target executor. It exists to prove protocol/provisioning seams
-// before committing hours to the balanced seven-block benchmark.
+// Command benchsmoke is historical diagnostic code and is NOT a supported acceptance entrypoint
+// (see DEC-001 and EV-006). Supported benchmark and soak workflows map to
+// cmd/benchrun, cmd/benchreport, cmd/soak, and cmd/soaksetup.
+//
+// Historically, it ran diagnostic, non-claimable live attempts through the
+// production target executor to probe protocol/provisioning seams before
+// committing hours to the balanced seven-block benchmark.
 package main
 
 import (

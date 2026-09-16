@@ -12,10 +12,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
+	"net"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -31,17 +34,64 @@ import (
 	"github.com/instant-v2/instant-v2/internal/benchharness"
 )
 
-// Lag samples (write→next-refresh-at-this-session), filled from reader
-// goroutines under each session's mu.
-var (
-	lagMu      sync.Mutex
-	lagSamples []time.Duration
-)
+type soakConfig struct {
+	URL          string
+	AppID        string
+	Sessions     int
+	Duration     time.Duration
+	TxInterval   time.Duration
+	GlobalTxRate float64
+	Attr         string
+	RampUp       time.Duration
+	Settle       time.Duration
+	PprofAddr    string
+	MaxP99Lag    time.Duration
+	EventsPath   string
+	OutDir       string
+	Quiescence   time.Duration
+}
 
-func recordLag(d time.Duration) {
-	lagMu.Lock()
-	lagSamples = append(lagSamples, d)
-	lagMu.Unlock()
+type soakDeps struct {
+	Clock       Clock
+	DialSession func(ctx context.Context, logger *slog.Logger, rawURL, appID string, id int,
+		attr *string, txInterval *time.Duration,
+		refreshes, transacts, connects *atomic.Int64, writeGate chan struct{},
+		ledger *TransactionLedger, quiescence time.Duration) error
+	StartPprof func(addr string) (io.Closer, error)
+	Evidence   EvidenceDeps
+	Stdout     io.Writer
+	Stderr     io.Writer
+}
+
+func defaultSoakDeps() soakDeps {
+	return soakDeps{
+		Clock:       realClock{},
+		DialSession: runSession,
+		StartPprof:  defaultStartPprof,
+		Evidence:    defaultEvidenceDeps(),
+		Stdout:      os.Stdout,
+		Stderr:      os.Stderr,
+	}
+}
+
+type nopCloser struct{}
+
+func (nopCloser) Close() error { return nil }
+
+func defaultStartPprof(addr string) (io.Closer, error) {
+	switch strings.ToLower(strings.TrimSpace(addr)) {
+	case "", "none", "disabled":
+		return nil, errors.New("pprof endpoint is required; disabling pprof is not permitted")
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("pprof listen on %s failed: %w", addr, err)
+	}
+	server := &http.Server{Handler: nil}
+	go func() {
+		_ = server.Serve(ln)
+	}()
+	return server, nil
 }
 
 func percentile(sorted []time.Duration, p float64) time.Duration {
@@ -52,45 +102,105 @@ func percentile(sorted []time.Duration, p float64) time.Duration {
 	return sorted[idx]
 }
 
-func main() {
-	url := flag.String("url", envOr("SOAK_URL", "ws://localhost:8888/runtime/session"), "session ws url")
-	appID := flag.String("app", os.Getenv("SOAK_APP"), "app id")
-	n := flag.Int("sessions", 5000, "concurrent sessions")
-	dur := flag.Duration("duration", 30*time.Minute, "soak duration")
-	txRate := flag.Duration("tx-interval", 2*time.Second, "per-session transact interval")
-	globalRate := flag.Float64("global-tx-rate", 8, "aggregate transacts/sec across all sessions")
-	attr := flag.String("attr", os.Getenv("SOAK_ATTR"), "attr uuid (uuid string) to write")
-	rampUp := flag.Duration("ramp", 30*time.Second, "dial ramp window")
-	settle := flag.Duration("settle", 30*time.Second, "post-ramp settle window before writes")
-	pprofAddr := flag.String("pprof", "127.0.0.1:18811", "pprof endpoint")
-	maxP99 := flag.Duration("max-p99-lag", 0, "fail when p99 write→refresh delivery lag exceeds this (0=off)")
-	eventsPath := flag.String("events", envOr("SOAK_EVENTS", ""), "structured JSONL event output path (use - for stdout)")
-	flag.Parse()
+func parseFlags(args []string) (soakConfig, error) {
+	fs := flag.NewFlagSet("soak", flag.ContinueOnError)
+	url := fs.String("url", envOr("SOAK_URL", "ws://localhost:8888/runtime/session"), "session ws url")
+	appID := fs.String("app", os.Getenv("SOAK_APP"), "app id")
+	n := fs.Int("sessions", 5000, "concurrent sessions")
+	dur := fs.Duration("duration", 30*time.Minute, "soak duration")
+	txRate := fs.Duration("tx-interval", 2*time.Second, "per-session transact interval")
+	globalRate := fs.Float64("global-tx-rate", 8, "aggregate transacts/sec across all sessions")
+	attr := fs.String("attr", os.Getenv("SOAK_ATTR"), "attr uuid (uuid string) to write")
+	rampUp := fs.Duration("ramp", 30*time.Second, "dial ramp window")
+	settle := fs.Duration("settle", 30*time.Second, "post-ramp settle window before writes")
+	pprofAddr := fs.String("pprof", "127.0.0.1:18811", "pprof endpoint")
+	maxP99 := fs.Duration("max-p99-lag", 0, "fail when p99 write→refresh delivery lag exceeds this (0=off)")
+	eventsPath := fs.String("events", envOr("SOAK_EVENTS", ""), "structured JSONL event output path (use - for stdout)")
+	outDir := fs.String("out", envOr("SOAK_OUT", ""), "fresh output directory for soak evidence bundle")
+	quiescence := fs.Duration("quiescence", 10*time.Second, "bounded quiescence window after soak duration")
+
+	if err := fs.Parse(args); err != nil {
+		return soakConfig{}, err
+	}
+
 	if *n <= 0 || *globalRate <= 0 || *dur <= 0 {
-		fmt.Fprintln(os.Stderr, "soak: sessions, global-tx-rate, and duration must be positive")
-		os.Exit(2)
+		return soakConfig{}, fmt.Errorf("sessions, global-tx-rate, and duration must be positive")
 	}
 	if err := benchharness.ValidateLoopbackURL(*url); err != nil {
-		fmt.Fprintln(os.Stderr, "soak: refusing non-loopback target:", err)
-		os.Exit(2)
+		return soakConfig{}, fmt.Errorf("refusing non-loopback target: %w", err)
+	}
+	if strings.TrimSpace(*pprofAddr) == "" || strings.EqualFold(strings.TrimSpace(*pprofAddr), "none") || strings.EqualFold(strings.TrimSpace(*pprofAddr), "disabled") {
+		return soakConfig{}, errors.New("pprof endpoint is required; disabling pprof is not permitted")
 	}
 
-	go func() { _ = http.ListenAndServe(*pprofAddr, nil) }()
+	return soakConfig{
+		URL:          *url,
+		AppID:        *appID,
+		Sessions:     *n,
+		Duration:     *dur,
+		TxInterval:   *txRate,
+		GlobalTxRate: *globalRate,
+		Attr:         *attr,
+		RampUp:       *rampUp,
+		Settle:       *settle,
+		PprofAddr:    *pprofAddr,
+		MaxP99Lag:    *maxP99,
+		EventsPath:   *eventsPath,
+		OutDir:       *outDir,
+		Quiescence:   *quiescence,
+	}, nil
+}
 
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	events, closeEvents, err := openEvents(*eventsPath)
+func runSoak(ctx context.Context, cfg soakConfig, deps soakDeps, logger *slog.Logger) error {
+	if logger == nil {
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
+	if deps.Clock == nil {
+		deps.Clock = realClock{}
+	}
+	if deps.DialSession == nil {
+		deps.DialSession = runSession
+	}
+	if deps.StartPprof == nil {
+		deps.StartPprof = defaultStartPprof
+	}
+
+	// EV-002: Required pprof startup failure must affect exit/eligibility.
+	pprofCloser, err := deps.StartPprof(cfg.PprofAddr)
 	if err != nil {
-		logger.Error("cannot open structured event output", "error", err)
-		os.Exit(2)
+		logger.Error("soak FAILED: pprof startup failed", "error", err)
+		return fmt.Errorf("pprof startup failed: %w", err)
 	}
-	defer closeEvents()
-	_ = events.Emit("run_started", map[string]any{
-		"url": *url, "sessions": *n, "duration": dur.String(), "global_tx_rate": *globalRate,
-		"ramp": rampUp.String(), "settle": settle.String(), "workload": "historical-soak",
-	})
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-	runUntil := time.Now().Add(*dur)
+	defer func() {
+		if pprofCloser != nil {
+			_ = pprofCloser.Close()
+		}
+	}()
+
+	// EV-002: Mandatory soak evidence and atomic output.
+	evCfg := EvidenceConfig{
+		EventsPath: cfg.EventsPath,
+		OutDir:     cfg.OutDir,
+		AppID:      cfg.AppID,
+		TargetURL:  cfg.URL,
+	}
+	evMgr, err := NewEvidenceManager(evCfg, deps.Evidence)
+	if err != nil {
+		logger.Error("soak FAILED: evidence initialization failed", "error", err)
+		return fmt.Errorf("evidence initialization failed: %w", err)
+	}
+	defer evMgr.Abort()
+
+	if emitErr := evMgr.Emit("run_started", map[string]any{
+		"url": cfg.URL, "sessions": cfg.Sessions, "duration": cfg.Duration.String(),
+		"global_tx_rate": cfg.GlobalTxRate, "ramp": cfg.RampUp.String(), "settle": cfg.Settle.String(),
+		"workload": "historical-soak", "quiescence": cfg.Quiescence.String(),
+	}); emitErr != nil {
+		logger.Error("soak FAILED: cannot emit run_started event", "error", emitErr)
+		return fmt.Errorf("emit run_started: %w", emitErr)
+	}
+
+	runUntil := time.Now().Add(cfg.Duration)
 	deadline, cancel := context.WithDeadline(ctx, runUntil)
 	defer cancel()
 
@@ -103,26 +213,26 @@ func main() {
 		wg        sync.WaitGroup
 	)
 
+	ledger := NewTransactionLedger(deps.Clock)
+
 	// Writes start only after a settle window, then flow at the global rate.
-	// The gate is unbuffered and the scheduler is blocking: every scheduled
-	// token is delivered to a session or remains visible as schedule slip.
 	writeGate := make(chan struct{})
 	go func() {
-		if *globalRate <= 0 {
-			_ = events.Emit("scheduler_error", map[string]any{"error": "global tx rate must be positive"})
+		if cfg.GlobalTxRate <= 0 {
+			_ = evMgr.Emit("scheduler_error", map[string]any{"error": "global tx rate must be positive"})
 			return
 		}
-		if *settle < 0 {
-			_ = events.Emit("scheduler_error", map[string]any{"error": "settle duration must not be negative"})
+		if cfg.Settle < 0 {
+			_ = evMgr.Emit("scheduler_error", map[string]any{"error": "settle duration must not be negative"})
 			return
 		}
-		start := time.Now().Add(*rampUp + *settle)
-		scheduler, err := benchharness.NewBlockingScheduler(*globalRate, start)
+		start := time.Now().Add(cfg.RampUp + cfg.Settle)
+		scheduler, err := benchharness.NewBlockingScheduler(cfg.GlobalTxRate, start)
 		if err != nil {
-			_ = events.Emit("scheduler_error", map[string]any{"error": err.Error()})
+			_ = evMgr.Emit("scheduler_error", map[string]any{"error": err.Error()})
 			return
 		}
-		count := int(math.Ceil(runUntil.Sub(start).Seconds() * *globalRate))
+		count := int(math.Ceil(runUntil.Sub(start).Seconds() * cfg.GlobalTxRate))
 		if count < 1 {
 			count = 1
 		}
@@ -138,11 +248,11 @@ func main() {
 				return ctx.Err()
 			}
 		})
-		_ = events.Emit("scheduler_finished", map[string]any{"scheduled": len(scheduler.Slips()), "slip_samples": len(scheduler.Slips()), "error": errorString(err)})
+		_ = evMgr.Emit("scheduler_finished", map[string]any{"scheduled": len(scheduler.Slips()), "slip_samples": len(scheduler.Slips()), "error": errorString(err)})
 	}()
 
-	rampStep := *rampUp / time.Duration(*n)
-	for i := 0; i < *n; i++ {
+	rampStep := cfg.RampUp / time.Duration(cfg.Sessions)
+	for i := 0; i < cfg.Sessions; i++ {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
@@ -155,8 +265,8 @@ func main() {
 			}
 			var sess error
 			for attempt := 0; attempt < 3; attempt++ {
-				sess = runSession(deadline, logger, *url, *appID, id,
-					attr, txRate, &refreshes, &transacts, &connects, writeGate)
+				sess = deps.DialSession(deadline, logger, cfg.URL, cfg.AppID, id,
+					&cfg.Attr, &cfg.TxInterval, &refreshes, &transacts, &connects, writeGate, ledger, cfg.Quiescence)
 				if sess == nil {
 					return
 				}
@@ -175,6 +285,7 @@ func main() {
 	}
 
 	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
 	lastR, lastT, lastC := int64(0), int64(0), int64(0)
 loop:
 	for {
@@ -183,54 +294,167 @@ loop:
 			break loop
 		case <-ticker.C:
 			r, t, c := refreshes.Load(), transacts.Load(), connects.Load()
+			mu.Lock()
+			dCount := len(dropped)
+			mu.Unlock()
 			logger.Info("soak", "sessions", c, "refreshes", r, "transacts", t,
 				"r/s", (r-lastR)/10, "t/s", (t-lastT)/10, "c/s", (c-lastC)/10,
-				"dropped", len(dropped))
+				"dropped", dCount, "unresolved", ledger.UnresolvedCount())
 			lastR, lastT, lastC = r, t, c
-			_ = events.Emit("progress", map[string]any{"sessions": c, "refreshes": r, "transacts": t, "dropped": len(dropped)})
+			_ = evMgr.Emit("progress", map[string]any{
+				"sessions": c, "refreshes": r, "transacts": t, "dropped": dCount,
+				"unresolved": ledger.UnresolvedCount(),
+			})
 		}
 	}
 	cancel()
 	wg.Wait()
 
-	if len(dropped) > 0 {
-		_ = events.Emit("run_finished", map[string]any{"status": "failed", "dropped": len(dropped), "refreshes": refreshes.Load(), "transacts": transacts.Load()})
-		logger.Error("soak FAILED: dropped refreshes/protocol errors", "count", len(dropped),
-			"first", dropped[0].Error())
-		os.Exit(1)
-	}
-	if transacts.Load() == 0 {
-		_ = events.Emit("run_finished", map[string]any{"status": "failed", "reason": "zero_writes"})
-		logger.Error("soak FAILED: zero writes submitted")
-		os.Exit(1)
+	// EV-001d: Bounded quiescence must resolve all submitted transactions.
+	if qErr := ledger.QuiesceAll(context.Background(), cfg.Quiescence); qErr != nil {
+		mu.Lock()
+		dropped = append(dropped, qErr)
+		mu.Unlock()
 	}
 
-	// Delivery-lag budget: p50/p99/max of write→refresh samples.
-	lagMu.Lock()
-	sorted := append([]time.Duration(nil), lagSamples...)
-	lagMu.Unlock()
+	workloadManifest := WorkloadManifest{
+		Sessions:     cfg.Sessions,
+		Duration:     cfg.Duration.String(),
+		GlobalTxRate: cfg.GlobalTxRate,
+		TxInterval:   cfg.TxInterval.String(),
+		RampUp:       cfg.RampUp.String(),
+		Settle:       cfg.Settle.String(),
+		Quiescence:   cfg.Quiescence.String(),
+		MaxP99Lag:    cfg.MaxP99Lag.String(),
+	}
+
+	summaryManifest := SummaryManifest{
+		Connects:   connects.Load(),
+		Transacts:  transacts.Load(),
+		Refreshes:  refreshes.Load(),
+		Dropped:    len(dropped),
+		Unresolved: ledger.UnresolvedCount(),
+	}
+
+	// Check failure conditions:
+	var failureReason string
+	if len(dropped) > 0 {
+		failureReason = fmt.Sprintf("dropped refreshes/protocol errors (count: %d, first: %v)", len(dropped), dropped[0])
+	} else if transacts.Load() == 0 {
+		failureReason = "zero writes submitted"
+	}
+
+	if failureReason != "" {
+		summaryManifest.Success = false
+		summaryManifest.FailureError = failureReason
+		_ = evMgr.Emit("run_finished", map[string]any{
+			"status": "failed", "dropped": len(dropped), "refreshes": refreshes.Load(),
+			"transacts": transacts.Load(), "unresolved": ledger.UnresolvedCount(),
+			"reason": failureReason,
+		})
+		_ = evMgr.FlushAndClose()
+		logger.Error("soak FAILED", "reason", failureReason)
+		return fmt.Errorf("soak failed: %s", failureReason)
+	}
+
+	// Delivery-lag budget: p50/p99/max of write→refresh samples from the deterministic ledger.
+	sorted := ledger.LagSamples()
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
 	p50, p99 := percentile(sorted, 0.50), percentile(sorted, 0.99)
 	var max time.Duration
 	if n := len(sorted); n > 0 {
 		max = sorted[n-1]
 	}
+	summaryManifest.LagSamples = len(sorted)
+	summaryManifest.LagP50 = p50.String()
+	summaryManifest.LagP99 = p99.String()
+	summaryManifest.LagMax = max.String()
+
 	logger.Info("transport lag diagnostic", "samples", len(sorted), "p50", p50.Round(time.Millisecond),
 		"p99", p99.Round(time.Millisecond), "max", max.Round(time.Millisecond))
-	_ = events.Emit("lag_diagnostic", map[string]any{"metric_kind": "transport_diagnostic", "semantic_claim": false, "samples": len(sorted), "p50": p50.String(), "p99": p99.String(), "max": max.String()})
-	if *maxP99 > 0 && p99 > *maxP99 {
-		_ = events.Emit("run_finished", map[string]any{"status": "failed", "reason": "p99_budget", "p99": p99.String(), "budget": maxP99.String()})
-		logger.Error("soak FAILED: p99 delivery lag over budget", "p99", p99, "budget", *maxP99)
-		os.Exit(1)
+	_ = evMgr.Emit("lag_diagnostic", map[string]any{
+		"metric_kind": "transport_diagnostic", "semantic_claim": false, "samples": len(sorted),
+		"p50": p50.String(), "p99": p99.String(), "max": max.String(),
+	})
+
+	if cfg.MaxP99Lag > 0 && p99 > cfg.MaxP99Lag {
+		failureReason = fmt.Sprintf("p99 delivery lag over budget (%v > %v)", p99, cfg.MaxP99Lag)
+		summaryManifest.Success = false
+		summaryManifest.FailureError = failureReason
+		_ = evMgr.Emit("run_finished", map[string]any{
+			"status": "failed", "reason": "p99_budget", "p99": p99.String(), "budget": cfg.MaxP99Lag.String(),
+		})
+		_ = evMgr.FlushAndClose()
+		logger.Error("soak FAILED: p99 delivery lag over budget", "p99", p99, "budget", cfg.MaxP99Lag)
+		return fmt.Errorf("soak failed: %s", failureReason)
 	}
+
 	if len(sorted) == 0 {
-		_ = events.Emit("run_finished", map[string]any{"status": "failed", "reason": "no_delivery_samples"})
+		failureReason = "no delivery samples"
+		summaryManifest.Success = false
+		summaryManifest.FailureError = failureReason
+		_ = evMgr.Emit("run_finished", map[string]any{"status": "failed", "reason": "no_delivery_samples"})
+		_ = evMgr.FlushAndClose()
 		logger.Error("soak FAILED: no delivery samples")
-		os.Exit(1)
+		return fmt.Errorf("soak failed: %s", failureReason)
 	}
+
+	// EV-002: Check if any event writing errors occurred during the run.
+	if evErr := evMgr.FirstError(); evErr != nil {
+		failureReason = fmt.Sprintf("mandatory event write error: %v", evErr)
+		summaryManifest.Success = false
+		summaryManifest.FailureError = failureReason
+		_ = evMgr.FlushAndClose()
+		logger.Error("soak FAILED: mandatory event write error", "error", evErr)
+		return fmt.Errorf("soak failed: %s", failureReason)
+	}
+
+	summaryManifest.Success = true
 	logger.Info("soak PASSED", "sessions", connects.Load(), "refreshes", refreshes.Load(),
 		"transacts", transacts.Load())
-	_ = events.Emit("run_finished", map[string]any{"status": "passed", "sessions": connects.Load(), "refreshes": refreshes.Load(), "transacts": transacts.Load(), "lag_samples": len(sorted)})
+	_ = evMgr.Emit("run_finished", map[string]any{
+		"status": "passed", "sessions": connects.Load(), "refreshes": refreshes.Load(),
+		"transacts": transacts.Load(), "lag_samples": len(sorted),
+	})
+
+	// EV-002: Flush and close staged events file.
+	if flushErr := evMgr.FlushAndClose(); flushErr != nil {
+		logger.Error("soak FAILED: flush/close event file error", "error", flushErr)
+		return fmt.Errorf("flush/close event file: %w", flushErr)
+	}
+
+	// EV-002: Atomic publication with completeness manifest.
+	if _, pubErr := evMgr.Publish(summaryManifest, workloadManifest, cfg.PprofAddr); pubErr != nil {
+		logger.Error("soak FAILED: publish evidence bundle error", "error", pubErr)
+		return fmt.Errorf("publish evidence bundle: %w", pubErr)
+	}
+
+	return nil
+}
+
+func runMain(args []string) int {
+	cfg, err := parseFlags(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "soak flag error:", err)
+		return 2
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	err = runSoak(ctx, cfg, defaultSoakDeps(), logger)
+	if err != nil {
+		logger.Error("soak run failed", "error", err)
+		return 1
+	}
+	return 0
+}
+
+func main() {
+	code := runMain(os.Args[1:])
+	if code != 0 {
+		os.Exit(code)
+	}
 }
 
 func errorString(err error) string {
@@ -240,25 +464,19 @@ func errorString(err error) string {
 	return err.Error()
 }
 
-func openEvents(path string) (*benchharness.EventWriter, func(), error) {
-	if path == "" {
-		return benchharness.NewEventWriter(nil, 0), func() {}, nil
-	}
-	if path == "-" {
-		return benchharness.NewEventWriter(func(b []byte) error { _, err := os.Stdout.Write(b); return err }, 0), func() {}, nil
-	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-	if err != nil {
-		return nil, func() {}, err
-	}
-	return benchharness.NewEventWriter(func(b []byte) error { _, err := f.Write(b); return err }, 0), func() { _ = f.Close() }, nil
+// sessionConn abstracts websocket communication for production and injected testing.
+type sessionConn interface {
+	Read(ctx context.Context) (websocket.MessageType, []byte, error)
+	Write(ctx context.Context, typ websocket.MessageType, p []byte) error
+	Close(status websocket.StatusCode, reason string) error
+	SetReadLimit(limit int64)
 }
 
-// runSession drives one client until deadline. Returns a non-nil error when a
-// correctness violation is detected (missed refresh, bad frame ordering).
+// runSession drives one client until deadline using a real WebSocket connection.
 func runSession(ctx context.Context, _ *slog.Logger, rawURL, appID string, id int,
 	attr *string, txInterval *time.Duration,
 	refreshes, transacts, connects *atomic.Int64, writeGate chan struct{},
+	ledger *TransactionLedger, quiescence time.Duration,
 ) error {
 	sep := "?"
 	if strings.Contains(rawURL, "?") {
@@ -272,26 +490,74 @@ func runSession(ctx context.Context, _ *slog.Logger, rawURL, appID string, id in
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "")
 	conn.SetReadLimit(64 << 20)
-	connects.Add(1)
+	if connects != nil {
+		connects.Add(1)
+	}
+
+	return driveSessionWithConn(ctx, conn, ledger, realClock{}, id, appID, attr, txInterval,
+		refreshes, transacts, connects, writeGate, quiescence)
+}
+
+// driveSessionWithConn runs the protocol lifecycle for one session using an abstract connection.
+// This allows full deterministic testing with injected frames and clocks without real sockets.
+func driveSessionWithConn(ctx context.Context, conn sessionConn,
+	ledger *TransactionLedger, clock Clock, id int, appID string,
+	attr *string, txInterval *time.Duration,
+	refreshes, transacts, _ *atomic.Int64, writeGate chan struct{},
+	quiescence time.Duration,
+) error {
+	if ledger == nil {
+		ledger = NewTransactionLedger(clock)
+	}
+	if clock == nil {
+		clock = realClock{}
+	}
+	if quiescence <= 0 {
+		quiescence = 10 * time.Second
+	}
+	var (
+		attrVal       = "default"
+		txIntervalVal = 2 * time.Second
+	)
+	if attr != nil && *attr != "" {
+		attrVal = *attr
+	}
+	if txInterval != nil && *txInterval > 0 {
+		txIntervalVal = *txInterval
+	}
+	if appID == "" {
+		appID = "app"
+	}
+
+	readerCtx, cancelReader := context.WithCancel(context.Background())
+	defer cancelReader()
+
 	readErr := make(chan error, 1) // buffered; only first writer wins
 	send := func(v any) error {
-		b, _ := json.Marshal(v)
+		b, err := json.Marshal(v)
+		if err != nil {
+			return err
+		}
 		return conn.Write(ctx, websocket.MessageText, b)
 	}
 
 	var (
-		pendingTxs    int32
-		gotSnapshot   bool
 		mu            sync.Mutex
-		lastRefreshAt = time.Now()
-		lastTxAt      time.Time // last transact send; sampled on next refresh
+		gotSnapshot   bool
+		lastRefreshAt = clock.Now()
 	)
 
 	initOK := make(chan struct{})
-	reader := func() {
+	readerDone := make(chan struct{})
+
+	go func() {
+		defer close(readerDone)
 		for {
-			_, data, err := conn.Read(ctx)
+			_, data, err := conn.Read(readerCtx)
 			if err != nil {
+				if readerCtx.Err() != nil {
+					return
+				}
 				select {
 				case readErr <- err:
 				default:
@@ -299,46 +565,90 @@ func runSession(ctx context.Context, _ *slog.Logger, rawURL, appID string, id in
 				return
 			}
 			var f struct {
-				Op     string          `json:"op"`
-				Result json.RawMessage `json:"result"`
+				Op            string          `json:"op"`
+				ClientEventID string          `json:"client-event-id"`
+				TxID          json.RawMessage `json:"tx-id"`
+				ProcessedTxID json.RawMessage `json:"processed-tx-id"`
+				Result        json.RawMessage `json:"result"`
+				Status        json.RawMessage `json:"status"`
+				Type          string          `json:"type"`
+				Message       string          `json:"message"`
 			}
 			if json.Unmarshal(data, &f) != nil {
+				protocolErr := ledger.RecordError("", "bad frame JSON")
 				select {
-				case readErr <- fmt.Errorf("bad frame"):
+				case readErr <- protocolErr:
 				default:
 				}
 				return
 			}
 			switch f.Op {
 			case "init-ok":
-				close(initOK)
+				select {
+				case <-initOK:
+				default:
+					close(initOK)
+				}
 			case "add-query-ok":
-				// v1 rides the initial answer on the ack (session.clj:264);
-				// v2 pre-fix sends refresh-ok — accept either.
 				if len(f.Result) > 0 {
 					mu.Lock()
 					gotSnapshot = true
-					lastRefreshAt = time.Now()
+					lastRefreshAt = clock.Now()
 					mu.Unlock()
-					refreshes.Add(1)
+					if refreshes != nil {
+						refreshes.Add(1)
+					}
 				}
 			case "transact-ok":
-				atomic.AddInt32(&pendingTxs, -1)
+				txID := rawToString(f.TxID)
+				if _, err := ledger.RecordAck(f.ClientEventID, txID); err != nil {
+					select {
+					case readErr <- err:
+					default:
+					}
+					return
+				}
 			case "refresh-ok", "refresh-ok-delta":
 				mu.Lock()
 				gotSnapshot = true
-				lastRefreshAt = time.Now()
-				if !lastTxAt.IsZero() {
-					recordLag(time.Since(lastTxAt))
-					lastTxAt = time.Time{}
-				}
+				lastRefreshAt = clock.Now()
 				mu.Unlock()
-				refreshes.Add(1)
+				if refreshes != nil {
+					refreshes.Add(1)
+				}
+				pid := rawToString(f.ProcessedTxID)
+				if _, err := ledger.RecordRefresh(pid, id); err != nil {
+					select {
+					case readErr <- err:
+					default:
+					}
+					return
+				}
+			case "error", "protocol-error":
+				reason := f.Message
+				if reason == "" {
+					reason = f.Type
+				}
+				if reason == "" {
+					reason = "protocol error frame"
+				}
+				terminalErr := ledger.RecordError(f.ClientEventID, reason)
+				select {
+				case readErr <- terminalErr:
+				default:
+				}
+				return
+			default:
+				unknownOpErr := ledger.RecordError(f.ClientEventID, fmt.Sprintf("unrecognized op: %s", f.Op))
+				select {
+				case readErr <- unknownOpErr:
+				default:
+				}
+				return
 			}
 		}
-	}
+	}()
 
-	go reader()
 	if err := send(map[string]any{"op": "init", "app-id": appID}); err != nil {
 		return err
 	}
@@ -352,8 +662,7 @@ func runSession(ctx context.Context, _ *slog.Logger, rawURL, appID string, id in
 		return fmt.Errorf("init-ok timeout")
 	}
 
-	// Subscribe AFTER init-ok: v1 validates ops against session state and
-	// processes frames asynchronously.
+	// Subscribe AFTER init-ok.
 	if err := send(map[string]any{
 		"op":              "add-query",
 		"q":               map[string]any{"todos": map[string]any{}},
@@ -362,17 +671,16 @@ func runSession(ctx context.Context, _ *slog.Logger, rawURL, appID string, id in
 		return err
 	}
 
-	tick := time.NewTicker(*txInterval)
+	tick := time.NewTicker(txIntervalVal)
 	defer tick.Stop()
 	counter := int64(0)
-	snapDeadline := time.Now().Add(20 * time.Second)
+	snapDeadline := clock.Now().Add(20 * time.Second)
+
+writeLoop:
 	for {
 		select {
 		case <-ctx.Done():
-			if atomic.LoadInt32(&pendingTxs) != 0 {
-				return fmt.Errorf("unresolved transacts: %d", atomic.LoadInt32(&pendingTxs))
-			}
-			return nil
+			break writeLoop
 		case err := <-readErr:
 			return err
 		case <-tick.C:
@@ -380,40 +688,72 @@ func runSession(ctx context.Context, _ *slog.Logger, rawURL, appID string, id in
 			snap, lastAt := gotSnapshot, lastRefreshAt
 			mu.Unlock()
 			if !snap {
-				if time.Now().After(snapDeadline) {
+				if clock.Now().After(snapDeadline) {
 					return fmt.Errorf("no snapshot within deadline")
 				}
 				continue
 			}
-			if pending := atomic.LoadInt32(&pendingTxs); pending > 50 {
+			if pending := ledger.UnresolvedCountForSession(id); pending > 50 {
 				return fmt.Errorf("stalled: %d transacts without ok", pending)
 			}
-			if time.Since(lastAt) > 20*time.Second && counter > 0 {
+			if clock.Now().Sub(lastAt) > 20*time.Second && counter > 0 {
 				return fmt.Errorf("refresh stream stalled")
 			}
 			counter++
-			eid := fmt.Sprintf("t-%d-%d", id, counter)
-			entity := fmt.Sprintf("%08x-0000-4000-8000-%012x", id, counter)
-			select {
-			case <-writeGate: // one global write token
-			case <-ctx.Done():
-				return nil
+			sequence := ledger.NextSequence(id)
+			eid := fmt.Sprintf("t-%d-%d", id, sequence)
+			entity := fmt.Sprintf("%08x-0000-4000-8000-%012x", id, sequence)
+
+			if writeGate != nil {
+				select {
+				case <-writeGate: // one global write token
+				case <-ctx.Done():
+					break writeLoop
+				case err := <-readErr:
+					return err
+				}
 			}
-			atomic.AddInt32(&pendingTxs, 1)
+
+			// EV-001a: Record submit in deterministic ledger
+			if _, err := ledger.RecordSubmit(eid, id); err != nil {
+				return err
+			}
+
 			if err := send(map[string]any{
 				"op": "transact",
 				"tx-steps": []any{
-					[]any{"add-triple", entity, *attr, fmt.Sprintf("soak %d %d", id, counter)},
+					[]any{"add-triple", entity, attrVal, fmt.Sprintf("soak %d %d", id, counter)},
 				},
 				"client-event-id": eid,
 			}); err != nil {
+				_ = ledger.RecordError(eid, err.Error())
 				return err
 			}
-			mu.Lock()
-			lastTxAt = time.Now()
-			mu.Unlock()
-			transacts.Add(1)
+			if transacts != nil {
+				transacts.Add(1)
+			}
 		}
+	}
+
+	// EV-001d: Bounded quiescence window: wait for all in-flight transacts for this session to resolve.
+	quiesceCtx, qcancel := context.WithTimeout(context.Background(), quiescence)
+	defer qcancel()
+
+	quiesceCh := make(chan error, 1)
+	go func() {
+		quiesceCh <- ledger.QuiesceSession(quiesceCtx, id, quiescence)
+	}()
+
+	select {
+	case err := <-readErr:
+		return err
+	case err := <-quiesceCh:
+		if err != nil {
+			return err
+		}
+		return nil
+	case <-quiesceCtx.Done():
+		return fmt.Errorf("quiescence timeout: %d unresolved transactions remaining", ledger.UnresolvedCountForSession(id))
 	}
 }
 
