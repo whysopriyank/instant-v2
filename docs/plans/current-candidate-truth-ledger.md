@@ -117,7 +117,7 @@ object-store injection (DA-001); unwired backup object paths 503
 | OAuth local lifecycle | Historically verified (pass-1 A1–A2); current-candidate acceptance pending | Local-provider tests cited; not re-executed here | No v1/provider claim | Not claimed | Not claimed |
 | Metrics/config | Historically verified (pass-1 M1/G1); current-candidate acceptance pending | Package tests cited; not re-executed here | N/A | Not claimed | Not claimed |
 | Signup-rule assembly | Present in source; acceptance pending | Acceptance pending on this candidate | Matrix rows pending | Not claimed | Not claimed |
-| COPY semantics | Present, no production caller | No PG-backed acceptance | Deferred/unselected (no approved exclusion; CF-001 owns) | Not claimed | Not claimed |
+| COPY semantics | Present, no production caller | Owned-PostgreSQL COPY acceptance passed | Local COPY/Insert parity accepted; no v1 claim | Not claimed | Not claimed |
 | Sync/stream operations | 501 exclusion path present | Covered by unit test only | Deferred/unselected (no approved exclusion) | Not claimed | Not claimed |
 | Magic-code delivery | Fail-closed only | No provider acceptance | No claim | Not claimed | Not claimed |
 | Corpus recording | Unavailable (`record unavailable`) | N/A | CF-002 owns | Not claimed | Not claimed |
@@ -129,19 +129,24 @@ object-store injection (DA-001); unwired backup object paths 503
 
 Rule applied throughout: `TESTS_EXIST` and old-report prose are observations,
 never completion states. "Historically verified" cites the pass-1 bounded
-contract only; it does not establish current-candidate acceptance. Rows marked
-"deferred/unselected" above became enforceable exclusions at the DEC-001
-approval (`2026-09-05T08:35:12Z`); enforcement in code, docs, corpus, and gate
-is owned by their respective packets (RT-003, DA-001/004V/008A, CF-001/004/005,
-OP-001/002/004, QR-002/004).
+contract only; it does not establish current-candidate acceptance. DEC-001
+approval froze the single-node-alpha policy and retained the packet ledger's
+REQUIRED/DEFERRED selections. Approval did not by itself convert any DEFERRED
+or proposed-exclusion row into an enforced EXCLUDED status. Those restrictions
+become eligible for EXCLUDED only after their owning packets establish
+consistent product, documentation, corpus, and release-gate enforcement. Until
+then they remain deferred/unselected and unavailable as release claims.
 
 ## Corpus counts (manifest is authority, verified by execution)
 
-- `corpus/manifest.json`: 18 scenarios; 31 surfaces (22 covered, 7 gaps,
-  2 unsupported); 25-row coverage matrix (9 covered, 15 gaps, 1 unsupported).
-- `corpus/README.md:58-60` agrees (25 entries: 9/15/1). Zero v1 captures.
-- FR-001's cited `18/22/7/2` and `9/15/1` figures match the manifest; no stale
-  prose was copied.
+Historical note: the 2026-09-05 capture recorded 18 scenarios; 31 surfaces
+(22 covered, 7 gaps, 2 unsupported); 25-row matrix (9 covered, 15 gaps,
+1 unsupported), matching `corpus/README.md:58-60` at that time. The committed
+DA-004V exclusion work changed the manifest: it is now 18 scenarios;
+31 surfaces (22 covered, 6 gaps, 3 unsupported); 26-row matrix (9 covered,
+13 gaps, 4 unsupported) per `corpus/README.md` and
+`go run ./cmd/corpusctl --mode validate` (this stabilization, exit 0).
+Zero v1 captures.
 
 ## F-001d — historical scoping
 
@@ -163,9 +168,8 @@ DA-008A/B (03); EV-001–006 (04); CF-001–005 (05); OP-001–006 (06); QR-001�
 PERF/D/REL → finish-up owners is taken from the manifest unchanged. DEC-001
 (`docs/reference/release-envelope.md`, `DEC-001-single-node-alpha-20260905`)
 was `APPROVED` by Priyank, project owner, at `2026-09-05T08:35:12Z`
-(superseding `DEC-001-dev-checkpoint-20260904`); proposed exclusions in this
-ledger became enforceable exclusions at that timestamp. No `AUTH-*` authority
-has been granted.
+(superseding `DEC-001-dev-checkpoint-20260904`); its REQUIRED/DEFERRED packet
+selections remain the governing policy. No `AUTH-*` authority has been granted.
 
 ## Validation performed
 
@@ -240,3 +244,482 @@ Dirty fingerprint (post-repair): `93745bf01e222d5a00d37bc7ff2fd4dae76717c95eddc0
 - H-03: no repair needed; 5 required tests green -race x2; new barrier `TestDiskBackendSecondUploadWaitsForRootConfirmation` pins ordering; external-dir trust + single-process scope documented.
 - H-04: six packages -race green, vet + diff-check clean; corpus 05 PASS, 11/17 FAIL preserved pre-existing (instaql/CF, untouched).
 - DEC-001 `DEC-001-single-node-alpha-20260905` APPROVED scope unchanged; no new decision; every AUTH-* remains NOT_GRANTED; FR-002 still requires clean tree + owner-approved grouping.
+
+## Batch-2 packet refresh (2026-09-08, HEAD 85298d3, main)
+
+The approved DEC-001 batch `DA-002 + DA-004V + DA-007` was implemented with
+disjoint leases and independently reviewed where noted. This refresh does not
+close Phase 03 or select an immutable release candidate.
+
+- RT-002 bounded repair: missing raw transports now detach/close explicitly;
+  admin SSE backpressure now terminates the stream and deferred teardown removes
+  the subscription. New regressions passed with PostgreSQL and `-race` (overflow
+  teardown 10x; focused delivery/reconnect matrix 2x), followed by the full
+  sync/reactive/instantd race suite and vet. Sol accepted the implementation and
+  test repair. Status remains `PARTIAL`: live SSE reconnect, live delta
+  reconnect, and pinned-SDK corrective-frame application are still unproven.
+
+- DA-002 upload integrity: `internal/storageapi` now binds the presigned
+  filename, uses non-overwriting `PutIfAbsent`, serializes same-key retries
+  and authorized deletes, cleans only objects created by the current request,
+  and joins cleanup failures for reconciliation. Focused, package, and
+  live-PostgreSQL `go test -race` passed, including `TestDuplicateFilename409`
+  with exact orphan removal and `TestFilesTriples`. Repaired Sol
+  data-integrity re-review returned ACCEPT. Status: COMPLETE for the bounded
+  single-node packet; no immutable release candidate is selected.
+- DA-004V dynamic view exclusion: `internal/perms/viewgate_test.go` pins the
+  exact open/closed/dynamic classification and fallback chain; sync gate tests
+  passed with `-race`. The DB-backed `internal/instaql` dynamic query test
+  passed with the local PostgreSQL environment. Corpus/release-gate
+  composition was not executed. Status: PARTIAL; package/runtime evidence is
+  green, phase acceptance remains open.
+- DA-007 rate-limit saturation: new identities fail closed at a saturated
+  local bucket cap; overflow retry is tied to earliest idle-bucket eviction,
+  bounded to one minute, and existing-key fairness plus cancellation,
+  middleware, memory, and concurrent-admission tests pass with `-race`.
+  Sol-advisor review found no lock/counter defect and required the retry
+  repair now present. Final Sol packet gate returned ACCEPT after focused
+  `-race -count=20` evidence. Status: COMPLETE for the bounded single-node
+  packet; no multi-node claim is made.
+- Verification executed: `go test -race ./internal/storageapi
+  ./internal/ratelimit ./internal/perms -count=1`, focused DA-002/DA-007
+  reruns at `-count=2`, sync gate tests, and `go vet` for changed packages;
+  all completed green, including the live DB rows above.
+- Earlier preflight reported no PostgreSQL response; a later owner-local
+  preflight reported `localhost:5432 - accepting connections`, and the
+  database-backed rows above passed. No database service was started or
+  changed by this run.
+
+## Batch-3 evidence tooling refresh (2026-09-08, HEAD 85298d3, dirty)
+
+The approved evidence batch `EV-001 + EV-004 + EV-005` was implemented with
+disjoint leases and then subjected to focused review, repair, and final Sol
+acceptance. This refresh closes only the bounded tooling packets; it does not
+claim a live soak, chaos campaign, benchmark campaign, compatibility matrix,
+qualification, recovery, or release acceptance.
+
+- EV-001 soak transaction ledger: the harness now records real client-event
+  IDs, transaction IDs, processed transaction-ID watermarks, reconnect-safe
+  event identity, and terminal protocol errors. Watermarks are monotonic,
+  idempotent for equal values, coalescing for skipped intermediate values, and
+  scoped to the submitting session. `go test -race ./cmd/soak -count=1` passed;
+  focused watermark, timestamp, reconnect, identity, and concurrent-error
+  tests also passed. Final Sol gate: ACCEPT. Status: COMPLETE for the bounded
+  harness contract; short real soak evidence remains outstanding.
+- EV-004 chaos provenance: process identities now bind kernel start tokens and
+  executable hashes, restart identities must differ, report publication is
+  non-overwriting, and `instantdInstance.Stop` refuses to kill a PID whose
+  kernel start token no longer matches. The PID-reuse regression and the full
+  `go test -race ./cmd/chaos -count=1` suite passed. Final Sol gate: ACCEPT.
+  Status: COMPLETE for the bounded harness contract; no real chaos campaign is
+  claimed.
+- EV-005 benchmark evidence: required database measurements fail closed,
+  unsupported fields are rejected, bundle finalization and approval are
+  write-once with atomic index publication, interrupted approval recovery now
+  requires a valid detached signature, and invalid-signature recovery is
+  covered by regression tests. The full
+  `go test -race ./internal/benchrun -count=1` suite passed (202.457s), as did
+  focused integrity tests and `go vet`. Final Sol gate: ACCEPT. Status:
+  COMPLETE for the bounded bundle contract; no live benchmark acceptance is
+  claimed.
+- Cross-batch verification: `go test -race ./cmd/soak ./cmd/chaos
+  ./internal/benchrun -count=1`, `go vet ./cmd/soak ./cmd/chaos
+  ./internal/benchrun`, `git diff --check`, and the affected product
+  regression suite (`internal/storageapi`, `internal/ratelimit`,
+  `internal/perms`, `internal/sync`, `internal/reactive`, `cmd/instantd`) all
+  passed. `gofmt -l` reported no files.
+
+## Phase-4 evidence tooling refresh (2026-09-08, HEAD 85298d3, dirty)
+
+The remaining Phase 04 implementation lanes `EV-002 + EV-003 + EV-006` were
+completed with disjoint ownership, focused worker tests, coordinator checks,
+and final Sol review. This closes the bounded tooling contracts only; it does
+not claim a live soak, chaos campaign, benchmark campaign, compatibility
+matrix, qualification, recovery, or release acceptance.
+
+- EV-002 soak evidence output: `cmd/soak` now publishes file and directory
+  evidence without replacement, rejects symlinked or pre-existing
+  destinations, writes completion metadata only after the evidence and
+  manifest are durable, and retains incomplete evidence for diagnosis when a
+  later publication step fails. Pprof is required rather than silently
+  disabled. The focused `go test -race ./cmd/soak -count=1` suite passed,
+  including injected publication failures, manifest collisions, racing target
+  creation, destination validation, and failed-run non-publication. Final Sol
+  review returned ACCEPT after the publication repairs.
+- EV-003 soak process identity: the native shell harness now fails closed on
+  unsupported platforms, stale or replaced PIDs, executable/hash mismatch,
+  endpoint mismatch, and configuration-digest mismatch. The 14-case native
+  identity suite passed, including a real `instantd` bind and same-port/
+  wrong-address rejection; shell syntax checks passed.
+- EV-006 benchsmoke wiring: the historical `cmd/benchsmoke` entrypoint is
+  excluded from supported build and acceptance targets, has an explicit
+  historical build target, and the supported smoke mapping points to
+  `cmd/soaksetup`. Mapping tests, `go vet`, and dry-run Makefile checks passed.
+
+Verification for this refresh: `gofmt -l cmd/soak cmd/benchsmoke`,
+`git diff --check`, `go vet ./cmd/soak ./cmd/benchsmoke`,
+`go test -race ./cmd/soak ./cmd/benchsmoke -count=1`, shell syntax checks, and
+the complete EV-003 identity suite all passed. No commit, push, deployment,
+or live qualification campaign was performed.
+
+Phase 04 implementation packets are now bounded-green, but its final evidence
+gate remains open wherever the plan requires real-environment evidence (in
+particular the short real EV-001 soak). Phase 05 compatibility/recorder work,
+Phase 06 Linux and recovery qualification, Phase 07 qualified soak/performance
+and release-gate work, and Phase 08 clean-SHA independent acceptance remain
+pending or dependency-blocked.
+
+## Phase-5 recorder refresh (2026-09-08, HEAD 85298d3, dirty)
+
+CF-002 now has a bounded HTTP/SSE recording implementation and a final Sol
+acceptance for its local capture contract. The program status remains PARTIAL:
+the CLI does not provision or reset external fixtures, and endpoint/source/
+fixture identities are caller assertions rather than proof of the remote
+candidate or database state.
+
+- `corpusctl --mode record --transport http|sse` requires a target, fresh
+  private output directory, endpoint/source/fixture identity metadata, and
+  bounded capture settings. WebSocket recording remains explicitly unsupported.
+- HTTP and SSE evidence retains raw transport material alongside canonical
+  forms, applies path-scoped header redaction, preserves bounded quiescence and
+  size/time limits, and fails closed on transport, incomplete-stream, or extra-
+  record errors. Fixture reset is recorded as caller-owned; it is not verified.
+- Output publication is descriptor-relative on Darwin/Linux: fresh 0700
+  reservation with no-follow traversal, 0600 same-directory temporary files,
+  fsync/close, kernel no-replace publication, and directory fsync. Non-Unix
+  platforms fail closed. Failed publication never performs ambiguous named-file
+  deletion; private temporary/final residue may remain untrusted, and only a
+  successful return makes evidence eligible.
+- Verification: native `go test -race ./internal/corpus ./cmd/corpusctl
+  -count=1`, `go vet` for both packages, `git diff --check`, Linux and Windows
+  cross-compiled test binaries, focused reservation TOCTOU/write-once/failure
+  tests, and stale-claim scans all passed. Final Sol gate: ACCEPT.
+
+CF-002 does not close CF-003 matrix coverage, CF-004 pinned-v1 environment
+qualification, or CF-005 differential acceptance. SDK/WS capture, external
+endpoint lifecycle proof, and real v1/v2 evidence remain separate gates.
+
+## Fast Batch A refresh (2026-09-08, HEAD 85298d3, dirty)
+
+Three bounded lanes were reconciled against the current dirty candidate:
+
+- RT-003 is accepted hermetically. Depth-one fill/shed/drain/resume tests, the
+  reactive race package, vet, and diff checks passed.
+- DA-004 is accepted for the selected local admin permission-check contract.
+  DB-backed race tests cover rollback-only transaction evaluation, runtime
+  entity/attribute ordering, original-image create/update classification,
+  explicit versus persisted rule provenance, fail-closed null/missing rules,
+  and root/nested denied-data non-leakage. Full affected race packages and vet
+  passed; final Sol boundary review returned ACCEPT.
+- DA-004V is only partial. Runtime/corpus/document exclusion is enforced and an
+  explicit-path `validate-release` component passes 18 scenarios/26 coverage
+  rows, but QR-003 has not yet composed the complete clean-candidate release
+  gate. No compatibility support claim is made for dynamic view rules.
+
+The working tree remains dirty. No immutable candidate, commit, push,
+deployment, external provider action, or release acceptance is claimed.
+
+## CF-003 pagination repair refresh (2026-09-09, HEAD 85298d3, dirty)
+
+The previously reproduced corpus failures in `11-query-pagination` and
+`17-after-cursor` are repaired. A paginated namespace without an ID triple now
+falls back to ID ordering and emits/accepts the legacy three-part ID cursor;
+the fallback is applied through a copied private query option and cannot alter
+explicit order behavior. The owned-PostgreSQL full corpus replay passed all 18
+scenarios, focused pagination/cursor/order tests passed twice with race
+detection, the full `internal/instaql` race package and vet passed, and an
+independent Sol compatibility gate returned ACCEPT.
+
+Status: `PARTIAL / PAGINATION_REPAIR_ACCEPTED_MATRIX_PENDING`. The repair does
+not supply the 15 still-open CF-003 transport, lifecycle, and concurrency matrix
+families and does not establish pinned-v1 parity.
+
+The combined Batch A DB-backed race run passed `internal/reactive`,
+`internal/transact`, `internal/adminapi`, and `internal/perms`. It also reproduced
+the previously recorded CF-003 pagination blocker: InstaQL integration tests and
+corpus scenarios 11/17 reject entities without an ID triple when constructing
+the default `serverCreatedAt` cursor. That compatibility failure is not caused
+by, fixed by, or waived for Batch A; CF-003 remains responsible for it.
+
+## Batch-B admin atomicity refresh (2026-09-08, HEAD 85298d3, dirty)
+
+DA-005 is COMPLETE / ACCEPTED_DB_ATOMICITY_REVIEWED. High-level missing
+attributes are emitted as `add-attr` steps in the same transaction as their
+requested data writes; a later mutation failure rolls back attrs, idents,
+triples, journal state, cache visibility, and callbacks. A bounded single retry
+handles concurrent attr/ident naming conflicts by reloading the winning catalog
+and re-lowering the original request.
+
+Evidence: the failure-atomicity regression passed under race three times; the
+two-request same-attribute convergence test passed under race ten times; the
+full DB-backed admin/sync/reactive/transact/daemon race batch, vet, and diff
+check passed. Sol returned ACCEPT. No commit or external mutation was made.
+
+## Phase-01 status reconciliation (2026-09-08T12:40:03Z)
+
+F-001: COMPLETE / ACCEPTED_SOURCE_BACKED_LEDGER.
+F-002: COMPLETE / OWNER_APPROVED_POLICY_DECISION, evidenced by
+`DEC-001-single-node-alpha-20260905`, approved by Priyank at
+`2026-09-05T08:35:12Z`.
+
+Working candidate: `85298d365d744e3a5c4f7abea2f3fabb014e8177` on `main`, dirty at
+capture. The tracked diff fingerprint captured before this reconciliation was
+`5a98014b0910bd1ac4655723f49d2613712851598656d9b3c7c096f26f3a39ed` using
+`git diff --no-ext-diff --unified=0 | shasum -a 256`. The contemporaneous
+untracked-path inventory was:
+`cmd/benchsmoke/mapping_test.go`, `cmd/chaos/postmaster_pid_other.go`,
+`cmd/chaos/postmaster_pid_unix.go`, `cmd/chaos/process_identity_darwin.go`,
+`cmd/chaos/process_identity_linux.go`, `cmd/chaos/process_identity_other.go`,
+`cmd/soak/evidence.go`, `cmd/soak/evidence_test.go`, `cmd/soak/ledger.go`,
+`cmd/soak/ledger_test.go`, `docs/plans/finish-up/review-fix-85298d3.md`,
+`internal/benchrun/ev005_integrity_test.go`,
+`internal/corpus/atomic_rename_darwin.go`,
+`internal/corpus/atomic_rename_linux.go`, `internal/corpus/atomic_rename_other.go`,
+`internal/corpus/fs_other.go`, `internal/corpus/fs_unix.go`,
+`internal/corpus/http_other_test.go`, `internal/corpus/http_unix_test.go`,
+`internal/perms/viewgate_test.go`, `internal/storageapi/atomicity_test.go`,
+`internal/sync/admission_regression_test.go`, `internal/sync/sse_delivery_test.go`,
+`scripts/soak-process-identity.sh`, `scripts/test-quality-soak-identity.sh`.
+
+No immutable release candidate is selected. FR-002 remains blocked on a clean,
+owner-approved candidate and independent acceptance. Packet exclusions and
+deferred-row enforcement remain owned by their existing packets; this
+reconciliation changes no product packet status.
+
+## Batch-4 auth/backup repair refresh (2026-09-08, dirty working tree)
+
+This refresh records bounded implementation progress only; it does not grant
+AUTH-RUNTIME-001, provider authority, object-store authority, or release
+acceptance.
+
+- DA-006A OAuth local contract: Google OIDC and GitHub OAuth authorization-code
+  flows now enforce non-empty PKCE, one-time state/code expiry and consumption,
+  committed state burn before provider I/O, one shared provider deadline,
+  Google nonce binding, mandatory RS256/JWK/kid/issuer/audience/expiry checks,
+  and one forced JWKS refresh for an unknown kid. Provider credentials are
+  captured by config and all four selected-provider values are required for a
+  database-backed daemon. The direct ID-token route returns explicit 501 before
+  parsing. Focused owned-PostgreSQL auth/OAuth tests passed with `-race` three
+  times; config race tests passed three times; daemon assembly passed twice;
+  vet and diff checks passed. Sol rejected five concrete defects, all were
+  repaired, and the second review returned ACCEPT. Status: COMPLETE for the
+  local contract. DA-006B real-provider acceptance remains BLOCKED and no real
+  provider claim is made.
+
+- DA-003 backup fail-closed: object PUT now stages under a private namespace,
+  promotes only after export/upload success, rejects staging keys on public
+  GET/PUT/restore routes, and reports successful publication as success even if
+  post-promotion staging cleanup fails. Focused backup race tests, `go vet`,
+  and `git diff --check` passed with integration disabled. A later owned-
+  PostgreSQL race run accepted DB-backed export/restore rollback, checksum and
+  truncation rejection, and staged publication. Real object-store behavior and
+  the recovery campaign remain open. Status: PARTIAL /
+  LOCAL_DB_ACCEPTED_EXTERNAL_PENDING.
+- DA-008A magic-code local contract: catalog/schema validation precedes
+  delivery; codes remain unpublished until mailer success; resend ownership is
+  conditional; failed verification resets preserve `last_sent`; throttle
+  lookup errors fail closed to a stable 503; and future email keys are
+  normalized while legacy mixed-case codes/users remain usable. Exact TTL
+  equality is expired and concurrent consumption requires exactly one winner.
+  The focused DB-backed magic-code race matrix passed three times, its highest-
+  risk compatibility/expiry/atomic-burn slice passed five times, and the full
+  authn race package, vet, and diff check passed. Sol returned ACCEPT. Status:
+  COMPLETE / ACCEPTED_DB_SECURITY_REVIEWED. DA-008B real delivery remains
+  blocked and the no-mailer runtime route remains a stable non-enumerating 503.
+- DA-004 admin permission fidelity: Sol review supplied a coordinator-owned
+  rollback-only evaluator contract; no product code was accepted for this
+  packet in this refresh. The current admin-side approximation remains
+  unaccepted and must not be used as a runtime authorization oracle.
+
+Verification for the refresh: `go vet ./internal/authn`, `go vet
+./internal/backup`, `go test -race -count=1 ./internal/authn
+./internal/backup ./internal/adminapi` with `INSTANT_TEST_INTEGRATION=0` and
+empty `DATABASE_URL`, plus `git diff --check`. No commit, push, deployment,
+provider contact, or live object-store/DB acceptance campaign was performed.
+
+## DA-001 assembly repair refresh (2026-09-08, dirty working tree)
+
+`cmd/instantd.mountRoutes` now validates and constructs the configured durable
+disk backend before starting auth maintenance, constructing realtime handlers,
+or registering routes. The invalid-root test asserts that no handlers are
+returned, notifier side effects are not rebound, and the supplied mux has no
+assembly routes. Focused race tests for `cmd/instantd`, `internal/config`,
+`internal/storageapi`, and `internal/backup`, plus `go vet ./cmd/instantd`
+and `git diff --check`, passed with integration disabled.
+
+Status: DA-001 PARTIAL / LOCAL_REOPEN_ACCEPTED_ENV_PENDING. Local disk reopen,
+namespace persistence, concurrent first upload, and root-confirmation failure
+behavior passed under race detection against the owned PostgreSQL fixture.
+Full daemon crash/restart durability, container mount qualification, and
+selected external object-store assembly remain unproven; the current release
+envelope still keeps object backup unwired and explicitly 503.
+
+## QR-003 composed release-gate refresh (2026-09-09, HEAD 85298d3, dirty)
+
+QR-003 is complete for its bounded implementation contract. `make test-release`
+now validates an exact DEC-001 manifest and candidate identity, required packet
+handoffs, native-Linux/recovery/soak records, nested artifact size and hashes,
+campaign freshness, private snapshot integrity, final source stability, selected
+target order, non-skipped test execution, and built-binary identity. It fails
+closed on production test seams, unsafe paths or symlinks, dirty candidates,
+missing evidence, wrong types, zero tests, final skips, and child failures.
+
+The 21-case hermetic contract suite passed. The actual Make discovery boundary
+also passed under inherited `GOFLAGS=-json`; release-corpus validation reported
+18 scenarios and 26 rows; focused corpus/InstaQL race tests, shell syntax, and
+`git diff --check` passed. Sol and Muse independently returned ACCEPT after two
+Sol-found blockers were repaired. Status: `COMPLETE /
+ACCEPTED_CONTRACT_GATE`.
+
+This does not claim a release: no clean immutable candidate, completed external
+evidence bundle, or FR-002 run exists. FR-002 remains blocked. The accepted gate
+does invoke the enforced dynamic-view exclusion validator, so DA-004V's former
+gate-pending condition is now closed as `COMPLETE /
+EXCLUSION_ENFORCED_GATE_ACCEPTED` without changing the exclusion's scope.
+
+## CF-003 assembled HTTP and QR-005 supply-chain refresh (2026-09-09)
+
+CF-003 now has accepted local assembled-route evidence for a bounded subset of
+the selected HTTP matrix. Nine hermetic denial/boundary cases and an owned-
+PostgreSQL positive/denial lifecycle passed under race detection. The DB leg
+proves exact admin-to-runtime state, guest refresh-token revocation and replay
+denial, destructive backup restore and exact recovered query state, object-store
+disabled behavior, and disk storage upload/download plus denied-delete
+preservation. Sol's first review rejected two false positives; the repair made
+restore destructive and corrected `SignOut` to delete the complete token entity
+atomically. The new auth regression proves zero remaining token triples, sibling
+token preservation, replay denial, and unknown-token idempotence. The second Sol
+review returned ACCEPT. CF-003 remains `PARTIAL /
+HTTP_ASSEMBLY_ACCEPTED_MATRIX_PENDING`; this is not corpus-wide closure, SSE or
+multi-client evidence, real object-store acceptance, or v1 parity.
+
+QR-005 now has an accepted offline inventory/preflight milestone. The read-only
+script hashes the selected local build inputs, emits deterministic canonical
+JSON, recognizes multiline Docker commands and runner arrays, and fails closed
+on mutable actions/images/runners/tools, unhashed local actions, malformed or
+missing inputs, and unclassified acquisitions. Its 22-case hermetic contract,
+module verification, generated-file check, shell syntax, and diff checks passed;
+Sol returned ACCEPT after four parser bypasses were repaired. The current tree
+correctly fails preflight because authoritative action commits, image digests,
+runner identity, and installed-tool content bindings are absent. Status remains
+`PARTIAL / INVENTORY_PREFLIGHT_ACCEPTED_PINS_PENDING`; no digest was invented and
+no workflow, image, dependency, signing, publication, or QR-003 evidence schema
+was changed.
+
+## CF-003 assembled SSE refresh and OP-005 producer audit (2026-09-09)
+
+CF-003 now includes accepted owned-PostgreSQL evidence through the actual
+production-mounted GET/POST SSE routes and notifier. The test pins complete
+handshake/init/query frames, exact initial state, a transaction-driven refresh
+with exact attribute identities and positive watermark, exact POST responses,
+old-session rejection, distinct reconnect credentials, converged reconnect
+state, and joined notifier teardown. Three consecutive race runs, vet,
+formatting, diff checks, and the repaired Sol review passed. Status advances to
+`PARTIAL / HTTP_SSE_ASSEMBLY_ACCEPTED_MATRIX_PENDING`; permission revocation,
+multi-client fanout, delta, external-v1 parity, and the rest of CF-003 are not
+claimed.
+
+The OP-005 audit found no producer for QR-003's exact seven-outcome recovery
+record. Existing chaos, sync, and soak evidence covers only fragments and uses
+different report schemas. Native Linux qualification, explicit fault authority,
+owned disposable fixtures, frozen recovery/drain budgets, and record-producer
+ownership remain unresolved. QR-003 contract acceptance therefore remains a
+validator implementation result, not recovery-campaign evidence; OP-005 and
+FR-002 stay blocked.
+
+## CF-003 SSE permission and multi-client refresh (2026-09-09)
+
+CF-003 now also has accepted assembled-route evidence for persisted permission
+allow/deny/restore and two simultaneous SSE clients sharing a query. Exact
+refresh envelopes are bound to the admin transaction that triggered each
+refresh. The denied frame contains an exact empty result; closing one client
+invalidates only that session while the sibling receives the next exact state.
+Database operations and notifier teardown are bounded.
+
+The focused combined race test passed three consecutive runs; vet, formatting,
+and diff checks passed. Sol's initial rejection was repaired and its re-review
+returned ACCEPT. Status is `PARTIAL /
+HTTP_SSE_PERMISSION_MULTICLIENT_ACCEPTED_MATRIX_PENDING`. The test harness
+explicitly invalidates the rule cache after direct persisted rule changes; it
+does not claim an external rule-management route. Delta convergence, assembled
+room/admin presence, the transaction matrix, external-v1 parity, and remaining
+selected matrix rows remain open.
+
+## CF-003 assembled transaction matrix (2026-09-09)
+
+The mounted admin/runtime HTTP surface now has accepted owned-PostgreSQL
+evidence for rollback, cardinality-one replacement, deep merge, lookup
+contention convergence, and delete-by-lookup. The concurrency oracle accepts
+only success or a decoded unique-constraint failure, then requires exact whole
+query state so losing ID/title orphan entities cannot be hidden by a slug-only
+filter. Exact winner removal is proven after deletion.
+
+The focused race test passed ten consecutive runs. Sol rejected the first
+oracle, the repair closed all three findings, and re-review returned ACCEPT.
+Status is `PARTIAL /
+HTTP_SSE_PERMISSION_MULTICLIENT_TRANSACTION_ACCEPTED_MATRIX_PENDING`. This is
+not a deterministic database-overlap campaign and does not close delta,
+assembled room/admin presence, external-v1 parity, or remaining matrix rows.
+
+## CF-003 assembled room lifecycle (2026-09-09)
+
+The production-mounted runtime WebSocket route now has accepted owned-
+PostgreSQL evidence for two-client join, exact unsolicited presence fanout,
+explicit sibling convergence, presence update, peer-only broadcast, and leave.
+The sender-broadcast absence check is intentionally bounded to 100 ms after the
+exact ACK and peer delivery; later absence is not claimed.
+
+The focused race test passed ten consecutive runs. Two Sol-found lossy-frame
+oracles were repaired and final review returned ACCEPT. Status is `PARTIAL /
+HTTP_SSE_PERMISSION_MULTICLIENT_TRANSACTION_ROOM_ACCEPTED_MATRIX_PENDING`.
+No separate admin-presence route, delta convergence, external-v1 parity, or
+remaining selected rows are claimed.
+
+## CF-003 assembled delta convergence (2026-09-09)
+
+The mounted runtime WebSocket path now has accepted owned-PostgreSQL evidence
+for old-client full refresh versus negotiated new-client structural delta at
+the exact same triggering transaction. Baseline watermarks/result metadata are
+equal, the trigger advances the baseline, malformed or wrong refresh frames are
+observable, and the parsed wire delta applied to the captured baseline equals
+the parsed full final state and exact expected entity map.
+
+The focused race test passed ten consecutive runs. Muse rejected four oracle
+gaps, all were repaired, and bounded re-review returned ACCEPT. Status is
+`PARTIAL /
+HTTP_SSE_PERMISSION_MULTICLIENT_TRANSACTION_ROOM_DELTA_ACCEPTED_MATRIX_PENDING`.
+Duplicate-frame absence is bounded to 100 ms; external-v1 parity and any
+remaining selected rows stay open.
+
+## CF-001 PostgreSQL COPY acceptance (2026-09-09)
+
+CF-001 is `COMPLETE / ACCEPTED_POSTGRES_COPY`. Owned-PostgreSQL tests prove JSON
+null versus string `"null"`, deterministic last-input cardinality-one behavior,
+mixed cardinality-many retention, and exact local parity with the non-COPY
+insert path across encoded value, MD5, flags, and checked datatype. A unique
+cardinality-many failure in COPY's second insert statement rolls back the
+successful first statement and leaves only the exact preexisting triple.
+
+The focused COPY race suite passed ten consecutive runs. Sol rejected the
+first rollback fixture because it proved only statement atomicity; the repaired
+cross-statement fixture received ACCEPT. No production caller or v1 parity is
+claimed.
+
+## Stabilization reconciliation (2026-09-16, old candidate 85298d3 → new candidate on commit)
+
+The dirty candidate described across the refresh sections above (HEAD
+`85298d365d744e3a5c4f7abea2f3fabb014e8177`, 98 modified + 46 untracked paths,
+tracked-diff fingerprint
+`a74a2d54acc21e314c762737e933c574036c5e3e1f08b9c6884fc515b0482ec5`) was
+stabilized into focused local commits in dependency order (realtime; storage/
+backup/config; auth/rate-limit; admin/permissions/transaction; evidence
+tooling; corpus/matrix; release-gate/preflight; ledger reconciliation), with no
+reset, checkout, clean, stash, push, deployment, or discarded change. Packet
+states are unchanged from the program manifest (canonical): COMPLETE rows stay
+COMPLETE, PARTIAL/BLOCKED/NOT_SELECTED/DEFERRED rows stay as recorded; the only
+ledger bookkeeping change is the DA-001-R SUPERSEDED note in
+`execution-ledger.md` plus the corpus-counts update above. No external, Linux,
+provider, recovery, soak-campaign, or clean-candidate evidence is claimed by
+this reconciliation; the config-test ambient-`DATABASE_URL` isolation caveat is
+recorded in `execution-ledger.md`. New candidate SHA and final tree state are
+recorded in the execution ledger's stabilization section.

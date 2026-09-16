@@ -61,6 +61,10 @@ Ephemeral container storage loses blobs on restart; object-backup routes stay
 | `INSTANT_V2_INVALIDATION_BUS` | `none` | `postgres` enables LISTEN/NOTIFY invalidation across nodes — required when running >1 instantd against one DB (docs/09 §T2.4) |
 | `INSTANT_V2_NODE_ID` | hostname | Node identity in logs and `/health` |
 | `INSTANT_V2_METRICS_ADDR` | `127.0.0.1:9465` | Prometheus scrape endpoint (`/metrics`); set empty to disable |
+| `INSTANT_OAUTH_GOOGLE_CLIENT_ID` | _(required)_ | Google authorization-code client ID |
+| `INSTANT_OAUTH_GOOGLE_CLIENT_SECRET` | _(required)_ | Google authorization-code client secret |
+| `INSTANT_OAUTH_GITHUB_CLIENT_ID` | _(required)_ | GitHub authorization-code client ID |
+| `INSTANT_OAUTH_GITHUB_CLIENT_SECRET` | _(required)_ | GitHub authorization-code client secret |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | _(unset)_ | Enables OTLP/HTTP trace export for the transact→commit→fanout chain |
 
 ## Creating an app

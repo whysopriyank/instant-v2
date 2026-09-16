@@ -99,12 +99,13 @@ must challenge rule-source substitution and denied-data leakage.
 
 **Goal objective:** `Implement the DEC-001-selected runtime semantics for data-dependent view permissions, or enforceably exclude those rules without leaking data or implying compatibility.`
 
-Current runtime behavior safely rejects rules that require per-record SQL
-filtering. This is a compatibility gap, not an authorization bypass, unless the
-release claims those rules are supported.
+DEC-001 selects an explicit exclusion, not support. Runtime behavior safely
+rejects rules that require per-record SQL filtering before protected rows are
+fetched or returned. This remains a compatibility exclusion, not an
+authorization bypass, and the release must not claim those rules are supported.
 
-Before implementation, DEC-001 must choose support or explicit exclusion. If
-supported, architecture/security review must define rule-to-query pushdown,
+If support is selected in a future decision, architecture/security review must
+define rule-to-query pushdown,
 relationship traversal, missing attributes, nulls, pagination before or after
 filtering, count/aggregate leakage, and fail-closed behavior for rules that
 cannot be translated. Tests compare exact runtime results under allow, deny, and

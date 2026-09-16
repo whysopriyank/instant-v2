@@ -38,7 +38,7 @@ section. Small cohesive packages deliberately remain small single-file packages.
 |---|---:|---|---|
 | `cmd/benchreport` | 1 / 32 | `main.go` 32 | Thin report entrypoint; analysis belongs to `benchrun`. |
 | `cmd/benchrun` | 1 / 281 | `main.go` 281 | CLI validation and runner invocation; benchmark policy remains in the library. |
-| `cmd/benchsmoke` | 15 / 2115 | `namespace.go` 308 | Workloads, setup, protocol and measurements separated; live performance claims require designated runs. |
+| `cmd/benchsmoke` | 15 / 2115 | `namespace.go` 308 | Historical diagnostic code only (unsupported acceptance entrypoint per DEC-001 / EV-006); preserved for non-claimable live diagnostic probing. Supported soak/benchmark workflows map to cmd/soaksetup, cmd/soak, cmd/benchrun. |
 | `cmd/chaos` | 10 / 1100 | `run.go` 349 | Process, PostgreSQL, WAL observations and reporting separated; C1/C2 remain consequential. |
 | `cmd/corpusctl` | 1 / 220 | `main.go` 220 | Mode/flag dispatch over shared corpus mechanics; Q3 limits parity claims. |
 | `cmd/instantd` | 10 / 971 | `routes.go` 196 | Runtime assembly, routes, middleware, health, invalidation and serving separated; lifecycle retained. |

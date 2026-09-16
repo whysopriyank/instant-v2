@@ -20,11 +20,11 @@ rewriting historical evidence.
 
 | Row | Invariant | Evidence | Status |
 |---|---|---|---|
-| F-001a | Revision, branch, dirty-tree fingerprint and timestamp identify the audited candidate. | Git baseline and diff inventory | `PENDING` |
-| F-001b | Every old red item is reconciled against current source and its latest executed evidence. | Current code, tests, prior handoffs | `PENDING` |
-| F-001c | Implementation completion is distinct from integration, compatibility, production, and release acceptance. | Status matrix with evidence class | `PENDING` |
-| F-001d | Historical results remain preserved and are clearly scoped to their candidate/date. | Link audit | `PENDING` |
-| F-001e | Every newly discovered gap has one stable packet ID and owning phase. | Finish-up cross-reference audit | `PENDING` |
+| F-001a | Revision, branch, dirty-tree fingerprint and timestamp identify the audited candidate. | Git baseline and diff inventory | `GREEN` |
+| F-001b | Every old red item is reconciled against current source and its latest executed evidence. | Current code, tests, prior handoffs | `GREEN` |
+| F-001c | Implementation completion is distinct from integration, compatibility, production, and release acceptance. | Status matrix with evidence class | `GREEN` |
+| F-001d | Historical results remain preserved and are clearly scoped to their candidate/date. | Link audit | `GREEN` |
+| F-001e | Every newly discovered gap has one stable packet ID and owning phase. | Finish-up cross-reference audit | `GREEN` |
 
 ### Ownership and method
 
@@ -96,6 +96,11 @@ finish-up packet: `REQUIRED`, `EXCLUDED`, or `DEFERRED`.
 
 An exclusion is valid only when the path is inaccessible or fails explicitly,
 the corpus and docs agree, and the release gate enforces the exclusion.
+
+Current status (2026-09-08): F-001 is complete as a source-backed ledger; F-002
+is complete because `DEC-001-single-node-alpha-20260905` is owner-approved. This
+freezes policy scope only; the working tree remains dirty and no immutable
+release candidate or downstream packet is accepted.
 
 ### Stop conditions
 

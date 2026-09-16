@@ -1,4 +1,4 @@
-# Proposed release envelope
+# Approved release envelope
 
 Decision ID: `DEC-001-single-node-alpha-20260905`
 Status: `APPROVED` — single-node alpha release profile
@@ -20,10 +20,11 @@ This is the durable proposed output for
 [DEC-001](../plans/gaps-backlog-precision-build-contract.md#dec-001--supported-release-envelope-and-policy-freeze)
 and [F-002](../plans/finish-up/01-scope-and-decisions.md). It selects the
 smallest defensible first release: **single-node alpha** on primary
-PostgreSQL. It does not authorize production use, accept an exception, or
-select a later packet. An agent must not treat any `DEFERRED` row as
-`EXCLUDED`, nor treat this approved profile as broader than its rows:
-approval covers exactly the selections above, nothing implied.
+PostgreSQL. It does not authorize production use or select a later packet. The
+approved profile explicitly excludes DA-004V dynamic data-dependent view rules.
+An agent must not treat any other `DEFERRED` row as `EXCLUDED`, nor treat this
+approved profile as broader than its rows: approval covers exactly the
+selections above, nothing implied.
 
 ## Decision schema and change control
 
@@ -36,9 +37,10 @@ new owner-approved decision.
 
 `EXCLUDED` is valid only when the approved decision names the exact surface and
 the source, support documentation, corpus matrix, and release gate enforce the
-failure/inaccessibility. This proposal has no accepted exclusions: rows marked
-"proposed exclusion" become `EXCLUDED` only on approval. `DEFERRED`
-means unselected and unavailable as a release claim, not silently unsupported.
+failure/inaccessibility. DA-004V is the approved explicit exclusion in this
+profile. Other rows marked "proposed exclusion" remain unselected until a new
+owner-approved decision changes them. `DEFERRED` means unselected and
+unavailable as a release claim, not silently unsupported.
 
 ## Evidence basis
 
@@ -73,6 +75,26 @@ means unselected and unavailable as a release claim, not silently unsupported.
 | Harnesses | `cmd/benchsmoke` declared historical (EV-006 removes false claims); soak/chaos/bench entrypoints supported for dev use with mandatory artifacts per EV repairs |
 | Delivery | No tag/publish/sign/SBOM/canary; only a named owner may authorize external mutations |
 
+## DA-004V exclusion
+
+Decision: `EXCLUDED` for dynamic data-dependent view rules under
+`DEC-001-single-node-alpha-20260905`.
+
+Runtime behavior is fail-closed: a non-literal dynamic view rule is rejected.
+Rejection is enforced before protected rows are fetched or returned. This exclusion does not add
+CEL-to-SQL pushdown or a post-filter path. Authorized admin reads retain their
+existing bypass semantics; no general dynamic-view compatibility or v1-parity
+claim is made.
+
+The corpus records the exclusion at surface
+`ws.permissions.dynamic` and coverage row
+`permissions-ws-dynamic-view-exclusion` with status `unsupported`, without a
+scenario or fetched-row evidence. The corpus verifier rejects a candidate that
+marks that surface or any of its rows as supported, or that omits the explicit
+exclusion row. Package/runtime and DB-backed tests are implementation evidence
+only; they are not release or compatibility acceptance by themselves. The
+release gate must compose this manifest assertion with the envelope evidence.
+
 ## Proposed alpha qualification envelope
 
 Guardrails for the alpha (not production SLOs):
@@ -106,10 +128,9 @@ approval reference. A missing entry is a discrepancy, not an implicit exception.
 ## Packet selection ledger
 
 All rows are scoped to the candidate above. `REQUIRED` means required to finish
-the proposed alpha. `DEFERRED` means no work is selected by this proposal; rows
-marked "proposed exclusion" are enforced as exclusions only on approval. No row
-is `EXCLUDED` because an unapproved proposal cannot create an enforceable
-support restriction.
+the approved alpha. `DEFERRED` means no work is selected by this decision; rows
+marked "proposed exclusion" are enforced as exclusions only on approval.
+DA-004V is the approved `EXCLUDED` surface; no other row is excluded.
 
 | Packet | Selection | Exact surface / rationale |
 |---|---|---|
@@ -121,7 +142,7 @@ support restriction.
 | DA-001 | `REQUIRED` | Durable local storage assembly; object backup proposed exclusion |
 | DA-002 | `REQUIRED` | Upload atomicity and signed metadata |
 | DA-003 | `REQUIRED` | Backup fail-closed (local paths; object paths stay 503) |
-| DA-004V | `REQUIRED` | Dynamic view rules: enforce exclusion consistently |
+| DA-004V | `REQUIRED` | Dynamic view rules: enforce the approved explicit exclusion consistently |
 | DA-004 | `REQUIRED` | Admin permission-check fidelity |
 | DA-005 | `REQUIRED` | Admin provisioning/mutation atomicity |
 | DA-006A | `REQUIRED` | OAuth local lifecycle contract (no provider claim) |

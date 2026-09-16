@@ -43,7 +43,7 @@ cmd/
   schemagen/             protocol schema validation and generated Go/TS artifacts
   benchrun/              benchmark execution CLI
   benchreport/           offline benchmark verification/report CLI
-  benchsmoke/            bounded live smoke and evidence CLI
+  benchsmoke/            historical diagnostic smoke CLI (unsupported acceptance entrypoint; DEC-001)
   soak/                  sustained-load correctness harness
   soaksetup/             explicit disposable benchmark fixture setup
   chaos/                 process-failure and recovery harness
@@ -206,5 +206,5 @@ arbitrary-node writes safe for semantics that require serialization.
 | WAL/checkpoint | `internal/waltail` decodes pgoutput, checks `wal_level`, and coalesces durable checkpoint writes. | Live PG17 logical-decoding tests exist; production wiring and pcap corpus remain follow-up work. |
 | Rooms/presence | `internal/sync.RoomHub` provides bounded, full-snapshot in-process fan-out. | Cross-node rooms are unsupported; sticky routing is an operational requirement for multi-node room use. |
 | Admin presence | `/admin/rooms/presence` is authenticated but returns an empty object because `adminapi` cannot import `sync.RoomHub`. | Wiring a read-only presence projection is still open. |
-| Auth | Magic code/guest flows plus injected-provider and direct id-token test paths are covered; JWKS verification and Apple ES256 signer loading are tested. | The main assembly does not configure builtin Google/GitHub/custom OIDC auth-code exchange; builtin token/userinfo URLs are absent from runtime configuration, and auth-code nonce generation/validation is deferred. |
+| Auth | Guest and bounded local Google/GitHub authorization-code flows are assembled; PKCE, one-time state/code, Google nonce/JWKS verification, provider timeout, and configuration failure are covered locally. | Real-provider acceptance is not established; direct ID-token exchange and Apple/custom providers are unsupported; magic-code delivery is excluded for the alpha. |
 | Required attributes | Catalog persistence, wire `required?`, tx validation, update-attr required-only patch, and backup compatibility are implemented. | Broader frozen corpus coverage is still incomplete. |

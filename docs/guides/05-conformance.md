@@ -24,7 +24,7 @@ backups, WS/SSE flows, rooms, delta/incremental refresh, and live pgoutput.
 | Dimension | Current status | Limitation |
 |---|---|---|
 | Protocol/canonicalization | Validated manifest and real v2 WS replay | Narrow implemented-surface coverage, not full v1 parity. |
-| Auth/OAuth | Focused tests | Injected-provider/direct id-token, JWKS, and Apple signer paths are tested; builtin auth-code provider configuration and Apple end-to-end exchange remain incomplete. |
+| Auth/OAuth | Focused and live-DB local-provider tests | Google/GitHub authorization-code lifecycle, PKCE, nonce/JWKS, replay, expiry, and startup configuration are covered locally; real-provider acceptance is absent, and direct ID-token plus Apple/custom flows are unsupported. |
 | Queries/transactions/perms | Focused and live-DB tests | Full v1 scenario matrix and JS optimistic-evaluation harness are not checked in. |
 | WAL/invalidation | Live PG17 pgoutput test plus direct-notify/bus tests | Production assembly uses post-commit notification; tailer-driven ack ordering is not the running path. |
 | Presence/rooms | In-process WS tests | No cross-node ephemeral-state bus; admin presence endpoint currently returns `{}`. |
