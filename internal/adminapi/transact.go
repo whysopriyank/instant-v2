@@ -2,6 +2,7 @@ package adminapi
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 
@@ -38,23 +40,39 @@ func (h *Handler) handleTransact(w http.ResponseWriter, r *http.Request, a *auth
 	if v, ok := a.body["throw-on-missing-attrs?"].(bool); ok {
 		throwOnMissing = v
 	}
-	cat := a.cat
-	if transact.HasHighLevelOps(stepsRaw) {
-		var lerr error
-		stepsRaw, cat, lerr = h.lowerAdminSteps(ctx, a, stepsRaw, throwOnMissing)
-		if lerr != nil {
-			writeErr(w, http.StatusBadRequest, lerr.Error())
-			return
+	highLevel := transact.HasHighLevelOps(stepsRaw)
+	attempt := func(base *platform.AttrCatalog) (transact.Result, []transact.Step, *platform.AttrCatalog, error) {
+		lowered := stepsRaw
+		cat := base
+		if highLevel {
+			request := *a
+			request.cat = base
+			var err error
+			lowered, cat, err = h.lowerAdminSteps(ctx, &request, stepsRaw, throwOnMissing)
+			if err != nil {
+				return transact.Result{}, nil, nil, err
+			}
 		}
-	}
-	steps, err := transact.ParseSteps(stepsRaw)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
-		return
+		steps, err := transact.ParseSteps(lowered)
+		if err != nil {
+			return transact.Result{}, nil, nil, err
+		}
+		res, err := transact.Transact(ctx, h.DB, cat, a.appID, steps, transact.Options{Admin: true}, nil)
+		return res, steps, cat, err
 	}
 	started := time.Now()
-	res, err := transact.Transact(ctx, h.DB, cat, a.appID, steps,
-		transact.Options{Admin: true}, nil)
+	res, steps, cat, err := attempt(a.cat)
+	if err != nil && highLevel && isAttrProvisioningConflict(err) {
+		// A concurrent request may have committed the same missing identity
+		// after this request lowered its steps. The failed transaction is fully
+		// rolled back; reload once and lower against the winning attr.
+		h.Catalogs.Invalidate(a.appStr)
+		if fresh, loadErr := h.Catalogs.For(ctx, a.appStr); loadErr == nil {
+			res, steps, cat, err = attempt(fresh)
+		} else {
+			err = loadErr
+		}
+	}
 	metrics.TransactDuration.WithLabelValues("admin").Observe(time.Since(started).Seconds())
 	if err != nil {
 		h.logger().Error("adminapi: transact", "err", err)
@@ -83,20 +101,34 @@ func (h *Handler) handleTransact(w http.ResponseWriter, r *http.Request, a *auth
 	writeJSON(w, http.StatusOK, map[string]any{"tx-id": res.TxID})
 }
 
+func isAttrProvisioningConflict(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	if pgErr.Code == "P0001" && pgErr.Message == "trigger violation trg_attrs_unique_names" {
+		return true
+	}
+	if pgErr.Code != "23505" {
+		return false
+	}
+	switch pgErr.ConstraintName {
+	case "attrs_etype_label_unique", "attrs_reverse_etype_label_unique", "app_ident_uq":
+		return true
+	default:
+		return false
+	}
+}
+
 // lowerAdminSteps runs the instant.admin.model lowering (see
-// internal/transact/highlevel.go): it resolves lookup eids against committed
-// state and provisions missing attrs via platform.GetOrCreateAttr(+Rev),
-// mirroring how authn creates system attrs. Provisioning commits in its own
-// transaction and the catalog cache is invalidated + reloaded so Transact's
-// parseTripleArgs sees the fresh attr ids. Pure-low-level batches never reach
+// internal/transact/highlevel.go). Missing attrs become ordinary add-attr
+// steps in the same Transact call as the requested writes, so schema and data
+// either commit together or both roll back. Pure-low-level batches never reach
 // this path.
 func (h *Handler) lowerAdminSteps(
 	ctx context.Context, a *authedReq, raw []json.RawMessage, throwOnMissing bool,
 ) ([]json.RawMessage, *platform.AttrCatalog, error) {
-	var (
-		tx      pgx.Tx
-		created int
-	)
+	var provision []json.RawMessage
 	hooks := transact.LowerHooks{
 		ResolveUnique: func(ctx context.Context, appID [16]byte, attrID [16]byte, value json.RawMessage) ([16]byte, bool, error) {
 			var eid [16]byte
@@ -126,49 +158,63 @@ func (h *Handler) lowerAdminSteps(
 			return true, nil
 		},
 		CreateAttr: func(ctx context.Context, appID [16]byte, spec transact.AttrSpec) (platform.Attr, error) {
-			if tx == nil {
-				var err error
-				tx, err = h.Pool.Begin(ctx)
+			attrID, err := newAdminUUID()
+			if err != nil {
+				return platform.Attr{}, err
+			}
+			forwardID, err := newAdminUUID()
+			if err != nil {
+				return platform.Attr{}, err
+			}
+			payload := map[string]any{
+				"id":               platform.UUIDToStr(attrID),
+				"forward-identity": []string{platform.UUIDToStr(forwardID), spec.Etype, spec.Label},
+				"value-type":       spec.ValueType,
+				"cardinality":      spec.Cardinality,
+				"unique?":          spec.Unique,
+				"index?":           spec.Indexed,
+			}
+			attr := platform.Attr{
+				ID: attrID, AppID: appID, ValueType: spec.ValueType,
+				Cardinality: spec.Cardinality, IsUnique: spec.Unique,
+				IsIndexed: spec.Indexed || spec.Unique, ForwardIdent: forwardID,
+			}
+			etype, label := spec.Etype, spec.Label
+			attr.Etype, attr.Label = &etype, &label
+			if spec.ReverseEtype != nil && spec.ReverseLabel != nil {
+				reverseID, err := newAdminUUID()
 				if err != nil {
 					return platform.Attr{}, err
 				}
+				reverseEtype, reverseLabel := *spec.ReverseEtype, *spec.ReverseLabel
+				payload["reverse-identity"] = []string{platform.UUIDToStr(reverseID), reverseEtype, reverseLabel}
+				attr.ReverseIdent = &reverseID
+				attr.ReverseEtype, attr.ReverseLabel = &reverseEtype, &reverseLabel
 			}
-			created++
-			if spec.Ref {
-				return platform.GetOrCreateAttrRev(ctx, tx, appID,
-					spec.Etype, spec.Label, spec.ReverseEtype, spec.ReverseLabel,
-					spec.ValueType, spec.Cardinality, spec.Unique, spec.Indexed)
+			step, err := json.Marshal([]any{"add-attr", payload})
+			if err != nil {
+				return platform.Attr{}, err
 			}
-			return platform.GetOrCreateAttr(ctx, tx, appID,
-				spec.Etype, spec.Label, spec.ValueType, spec.Cardinality,
-				spec.Unique, spec.Indexed)
+			provision = append(provision, step)
+			return attr, nil
 		},
 	}
 
 	lowered, err := transact.LowerAdminSteps(ctx, a.appID, a.cat, raw, hooks, throwOnMissing)
-	if tx != nil {
-		if err != nil {
-			_ = tx.Rollback(ctx)
-			return nil, nil, err
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return nil, nil, err
-		}
-	}
 	if err != nil {
 		return nil, nil, err
 	}
-	if created == 0 {
-		return lowered, a.cat, nil
+	return append(provision, lowered...), a.cat, nil
+}
+
+func newAdminUUID() ([16]byte, error) {
+	var id [16]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		return id, err
 	}
-	// Attrs were provisioned: drop the stale cached catalog and reload so the
-	// freshly minted attr ids resolve inside Transact.
-	h.Catalogs.Invalidate(a.appStr)
-	fresh, err := h.Catalogs.For(ctx, a.appStr)
-	if err != nil {
-		return nil, nil, err
-	}
-	return lowered, fresh, nil
+	id[6] = (id[6] & 0x0f) | 0x40
+	id[8] = (id[8] & 0x3f) | 0x80
+	return id, nil
 }
 
 func stepsFromBody(body map[string]any) ([]json.RawMessage, error) {

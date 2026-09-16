@@ -18,6 +18,11 @@ type appliedEffects struct {
 	cascadeTouched  [][16]byte
 }
 
+type indexedStep struct {
+	index int
+	step  Step
+}
+
 func applyOperations(ctx context.Context, tx pgx.Tx, db *storage.DB, appID [16]byte, txCat *platform.AttrCatalog, steps []Step, opts Options, ruleDoc *perms.RuleDoc) (appliedEffects, error) {
 	var effects appliedEffects
 
@@ -33,7 +38,7 @@ func applyOperations(ctx context.Context, tx pgx.Tx, db *storage.DB, appID [16]b
 			// same-batch triples resolve); nothing left to do here.
 
 		case "update-attr":
-			updates, err := applyRequiredAttrUpdates(ctx, tx, appID, txCat, batch, opts, ruleDoc)
+			updates, err := applyRequiredAttrUpdates(ctx, tx, appID, txCat, filterIndexedSteps(steps, op), opts, ruleDoc, nil)
 			if err != nil {
 				return appliedEffects{}, err
 			}
@@ -41,7 +46,7 @@ func applyOperations(ctx context.Context, tx pgx.Tx, db *storage.DB, appID [16]b
 
 		case "delete-attr":
 			if !opts.Admin {
-				return appliedEffects{}, fmt.Errorf("transact: attrs.delete denied (admin only in Phase 2)")
+				return appliedEffects{}, deleteAttrDenied()
 			}
 
 		case "add-triple":
@@ -74,6 +79,29 @@ func applyOperations(ctx context.Context, tx pgx.Tx, db *storage.DB, appID [16]b
 	return effects, nil
 }
 
+func evaluateAttributeOperations(ctx context.Context, tx pgx.Tx, appID [16]byte, txCat *platform.AttrCatalog, steps []Step, opts Options, ruleDoc *perms.RuleDoc, evaluation *PermissionEvaluation) error {
+	for _, op := range orderSteps(steps) {
+		batch := filterIndexedSteps(steps, op)
+		switch op {
+		case "update-attr":
+			if _, err := applyRequiredAttrUpdates(ctx, tx, appID, txCat, batch, opts, ruleDoc, evaluation); err != nil {
+				return err
+			}
+		case "delete-attr":
+			if !opts.Admin && len(batch) > 0 {
+				err := deleteAttrDenied()
+				recordPermissionCheck(evaluation, batch[0].index, "attrs", "delete", false, err, permBindings(opts, nil, nil))
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func deleteAttrDenied() error {
+	return fmt.Errorf("transact: attrs.delete denied (admin only in Phase 2)")
+}
+
 func orderSteps(steps []Step) []string {
 	seen := make(map[string]struct{})
 	var order []string
@@ -91,6 +119,16 @@ func filterSteps(steps []Step, op string) []Step {
 	for _, s := range steps {
 		if s.Op == op {
 			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func filterIndexedSteps(steps []Step, op string) []indexedStep {
+	var out []indexedStep
+	for index, step := range steps {
+		if step.Op == op {
+			out = append(out, indexedStep{index: index, step: step})
 		}
 	}
 	return out

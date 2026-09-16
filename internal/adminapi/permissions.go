@@ -1,34 +1,80 @@
 package adminapi
 
 import (
-	"context"
+	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
-	"strings"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/instant-v2/instant-v2/internal/instaql"
 	"github.com/instant-v2/instant-v2/internal/perms"
-	"github.com/instant-v2/instant-v2/internal/platform"
-	"github.com/instant-v2/instant-v2/internal/storage"
 	"github.com/instant-v2/instant-v2/internal/transact"
 )
 
 // ---- Perms checks (dry-run) ------------------------------------------------
 
-// rulesFromBody parses the optional "rules" JSON object. DEVIATION: v1 loads
-// persisted rules and accepts "rules-override"; v2 Phase 5 has no rules
-// persistence, so evaluation runs solely against this body-passed doc,
-// defaulting to the permissive empty doc.
-func rulesFromBody(body map[string]any) (*perms.RuleDoc, error) {
+type selectedRules struct {
+	doc     *perms.RuleDoc
+	source  string
+	version any
+}
+
+// rulesForCheck uses an explicit request rule document when present; otherwise
+// it loads the persisted document and version. Missing and explicit-null rules
+// fail closed because a permission-check endpoint must never silently switch to
+// default-open behavior.
+func (h *Handler) rulesForCheck(r *http.Request, a *authedReq) (selectedRules, error) {
+	body := a.body
 	v, present := body["rules"]
-	if !present || v == nil {
-		return perms.ParseRuleDoc(nil)
+	if present {
+		if v == nil {
+			return selectedRules{}, errors.New("explicit `rules` must not be null")
+		}
+		raw, err := json.Marshal(v)
+		if err != nil {
+			return selectedRules{}, err
+		}
+		doc, err := perms.ParseRuleDoc(raw)
+		return selectedRules{doc: doc, source: "request-override"}, err
 	}
-	raw, err := json.Marshal(v)
+
+	var raw []byte
+	var version int
+	err := h.Pool.QueryRow(r.Context(),
+		`SELECT code, version FROM rules WHERE app_id=$1::uuid`, a.appID,
+	).Scan(&raw, &version)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return selectedRules{}, errors.New("no persisted rules for app")
+	}
 	if err != nil {
-		return nil, err
+		return selectedRules{}, err
 	}
-	return perms.ParseRuleDoc(raw)
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return selectedRules{}, errors.New("persisted rules must not be null")
+	}
+	doc, err := perms.ParseRuleDoc(raw)
+	return selectedRules{doc: doc, source: "persisted", version: version}, err
+}
+
+func appendViewChecks(forms []*instaql.Form, doc *perms.RuleDoc, checks *[]map[string]any) bool {
+	allOpen := true
+	for _, f := range forms {
+		mode := perms.ViewGate(doc, f.Etype)
+		entry := map[string]any{"etype": f.Etype, "action": "view", "allowed": mode == perms.ViewOpen}
+		if mode == perms.ViewDynamic {
+			entry["error"] = (&instaql.ErrRuleFilterUnsupported{Etype: f.Etype}).Error()
+		}
+		*checks = append(*checks, entry)
+		if mode != perms.ViewOpen {
+			allOpen = false
+		}
+		if !appendViewChecks(f.Children, doc, checks) {
+			allOpen = false
+		}
+	}
+	return allOpen
 }
 
 // handleQueryPermsCheck ports query-perms-check: evaluate the view rule per
@@ -37,9 +83,9 @@ func rulesFromBody(body map[string]any) (*perms.RuleDoc, error) {
 // identity overrides, ip/origin overrides and a rule-wheres echo; none of
 // those inputs exist yet, so bindings are empty and rule-wheres is omitted.
 func (h *Handler) handleQueryPermsCheck(w http.ResponseWriter, r *http.Request, a *authedReq) {
-	doc, err := rulesFromBody(a.body)
+	rules, err := h.rulesForCheck(r, a)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid `rules`: "+err.Error())
+		writeErr(w, http.StatusBadRequest, "invalid rules: "+err.Error())
 		return
 	}
 	raw, _ := a.body["query"].(map[string]any)
@@ -54,83 +100,37 @@ func (h *Handler) handleQueryPermsCheck(w http.ResponseWriter, r *http.Request, 
 	}
 
 	checks := make([]map[string]any, 0, len(q.Forms))
-	for _, f := range q.Forms {
-		allowed, cerr := perms.Check(f.Etype, "view", doc, perms.Bindings{})
-		entry := map[string]any{"etype": f.Etype, "action": "view", "allowed": allowed}
-		if cerr != nil {
-			entry["error"] = cerr.Error()
-		}
-		checks = append(checks, entry)
+	response := map[string]any{
+		"check-results": checks,
+		"rule-source":   rules.source,
+		"rule-version":  rules.version,
 	}
-	res, err := (&instaql.Executor{DB: h.Pool, Admin: true}).Run(r.Context(), q, a.cat, a.appID)
+	if !appendViewChecks(q.Forms, rules.doc, &checks) {
+		response["check-results"] = checks
+		writeJSON(w, http.StatusOK, response)
+		return
+	}
+	res, err := (&instaql.Executor{DB: h.Pool, Rules: rules.doc}).Run(r.Context(), q, a.cat, a.appID)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"check-results": checks,
-		"result":        res.Data, // object-tree, matching v1's :result
-	})
-}
-
-// tripleAction maps one wire step to the permission action v1 evaluates.
-// add-triple resolves to update vs create by probing current state, mirroring
-// permissioned-tx's data-dependent choice.
-func (h *Handler) tripleAction(ctx context.Context, a *authedReq, op, eidStr, attrStr string) (etype, action string) {
-	switch op {
-	case "add-triple", "deep-merge-triple":
-		action = "create"
-		var attrID [16]byte
-		if platform.ScanUUID(strings.Trim(attrStr, `"`), &attrID) == nil {
-			if at, ok := a.cat.ByID(attrID); ok && at.Etype != nil {
-				etype = *at.Etype
-			}
-			var eid [16]byte
-			if platform.ScanUUID(strings.Trim(eidStr, `"`), &eid) == nil {
-				rows, err := h.DB.FetchTriples(ctx, a.appID, storage.FetchFilter{
-					EntityIDs: [][16]byte{eid}, AttrIDs: [][16]byte{attrID},
-				})
-				if err == nil && len(rows) > 0 {
-					action = "update"
-				}
-			}
-		}
-	case "retract-triple":
-		action = "delete"
-		var attrID [16]byte
-		if platform.ScanUUID(strings.Trim(attrStr, `"`), &attrID) == nil {
-			if at, ok := a.cat.ByID(attrID); ok && at.Etype != nil {
-				etype = *at.Etype
-			}
-		}
-	case "delete-entity":
-		action = "delete"
-	case "add-attr", "restore-attr":
-		return "attrs", "create"
-	case "update-attr":
-		return "attrs", "update"
-	case "delete-attr":
-		return "attrs", "delete"
-	default:
-		return "", "" // rule-params and unknown ops carry no permission gate
-	}
-	if etype == "" {
-		etype = "$default"
-	}
-	return etype, action
+	response["check-results"] = checks
+	response["result"] = res.Data // object-tree, matching v1's :result
+	writeJSON(w, http.StatusOK, response)
 }
 
 // handleTransactPermsCheck ports transact-perms-check as a pure dry-run: it
-// validates the steps and evaluates the resolved permission programs WITHOUT
-// committing anything. DEVIATION: v1 honors "dangerously-commit-tx" to run the
-// permissioned transaction for real; that flag is deliberately ignored here —
-// committing belongs to the wired permission layer, not the admin plane.
+// validates the steps and evaluates them through the transact coordinator,
+// which always rolls back. DEVIATION: v1 honors "dangerously-commit-tx" to run
+// the permissioned transaction for real; that flag is deliberately ignored
+// here — committing belongs to the wired permission layer, not the admin plane.
 // Response mirrors v1's cleaned-result envelope ({tx-id, all-checks-ok?,
 // committed?, check-results}) with tx-id null and committed? false.
 func (h *Handler) handleTransactPermsCheck(w http.ResponseWriter, r *http.Request, a *authedReq) {
-	doc, err := rulesFromBody(a.body)
+	rules, err := h.rulesForCheck(r, a)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid `rules`: "+err.Error())
+		writeErr(w, http.StatusBadRequest, "invalid rules: "+err.Error())
 		return
 	}
 	stepsRaw, err := stepsFromBody(a.body)
@@ -144,41 +144,29 @@ func (h *Handler) handleTransactPermsCheck(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	ctx := r.Context()
-	checks := []map[string]any{}
-	seen := map[[2]string]bool{}
-	allOK := true
-	for _, st := range steps {
-		var eidStr, attrStr string
-		if len(st.Args) > 0 {
-			_ = json.Unmarshal(st.Args[0], &eidStr)
+	evaluation, err := transact.EvaluatePermissions(r.Context(), h.DB, a.cat, a.appID, steps, transact.Options{}, rules.doc)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	checks := make([]map[string]any, 0, len(evaluation.Checks))
+	for _, check := range evaluation.Checks {
+		entry := map[string]any{
+			"etype":   check.Etype,
+			"action":  check.Action,
+			"allowed": check.Allowed,
 		}
-		if len(st.Args) > 1 {
-			_ = json.Unmarshal(st.Args[1], &attrStr)
-		}
-		etype, action := h.tripleAction(ctx, a, st.Op, eidStr, attrStr)
-		if action == "" {
-			continue
-		}
-		key := [2]string{etype, action}
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		allowed, cerr := perms.Check(etype, action, doc, perms.Bindings{})
-		if cerr != nil || !allowed {
-			allOK = false
-		}
-		entry := map[string]any{"etype": etype, "action": action, "allowed": allowed}
-		if cerr != nil {
-			entry["error"] = cerr.Error()
+		if check.Err != nil {
+			entry["error"] = check.Err.Error()
 		}
 		checks = append(checks, entry)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"tx-id":          nil,
-		"all-checks-ok?": allOK,
+		"all-checks-ok?": evaluation.AllAllowed,
 		"committed?":     false,
 		"check-results":  checks,
+		"rule-source":    rules.source,
+		"rule-version":   rules.version,
 	})
 }

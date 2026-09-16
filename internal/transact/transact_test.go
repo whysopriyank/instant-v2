@@ -721,6 +721,45 @@ func TestPermissionSecurityDuplicateManyAddCollectionSize(t *testing.T) {
 	}
 }
 
+func TestPermissionSecurityBatchAddCannotMaskOriginalEntityRemoval(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	appID, _, _ := seed(t, db)
+
+	var tagsAttr platform.Attr
+	if err := db.WithTx(ctx, func(tx pgx.Tx) error {
+		var err error
+		tagsAttr, err = platform.GetOrCreateAttr(ctx, tx, appID, "todos", "tags", "blob", "many", false, false)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cat, err := reloadCatalog(t, db, appID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	e := rand16()
+	seedSteps := parseSteps(t, mustJSON(t, []any{"add-triple", uuidStr(e), uuidToStr(tagsAttr.ID), "original"}))
+	if _, err := transact.Transact(ctx, db, cat, appID, seedSteps, transact.Options{Admin: true}, nil); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := perms.ParseRuleDoc([]byte(`{"todos":{"allow":{"update":"true","create":"false"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	batch := parseSteps(t,
+		mustJSON(t, []any{"add-triple", uuidStr(e), uuidToStr(tagsAttr.ID), "batch-value"}),
+		mustJSON(t, []any{"retract-triple", uuidStr(e), uuidToStr(tagsAttr.ID), "original"}),
+		mustJSON(t, []any{"add-triple", uuidStr(e), uuidToStr(tagsAttr.ID), "later-value"}),
+	)
+	_, err = transact.Transact(ctx, db, cat, appID, batch, transact.Options{}, doc)
+	if err == nil || !strings.Contains(err.Error(), "permission denied (create todos)") {
+		t.Fatalf("batch-added value must not preserve update authorization after original removal: %v", err)
+	}
+}
+
 // 4. Many-value deep merge followed by a rule based on collection membership/shape.
 func TestPermissionSecurityManyDeepMergeCollectionMembershipAndShape(t *testing.T) {
 	db := testDB(t)

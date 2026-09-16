@@ -3,6 +3,8 @@ package adminapi_test
 import (
 	"context"
 	"fmt"
+	"reflect"
+	"sync"
 	"testing"
 
 	"github.com/instant-v2/instant-v2/internal/adminapi"
@@ -245,5 +247,147 @@ func TestThrowOnMissingAttrs(t *testing.T) {
 		[]any{[]any{"update", "todos", uuidStr(newUUID()), map[string]any{"ghost": "v"}}})
 	if code != 200 {
 		t.Fatalf("default path should create attrs: %d %v", code, resp)
+	}
+}
+
+func TestHighLevelProvisioningMutationFailureIsAtomic(t *testing.T) {
+	h, db, appID, token, cleanup := env(t)
+	defer cleanup()
+	ctx := context.Background()
+	appStr := uuidStr(appID)
+
+	snapshot := func(query string) []string {
+		t.Helper()
+		rows, err := db.Pool.Query(ctx, query, appID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var out []string
+		for rows.Next() {
+			var value string
+			if err := rows.Scan(&value); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, value)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	attrsBefore := snapshot(`
+		SELECT id::text || '|' || coalesce(etype, '') || '|' || coalesce(label, '') || '|' ||
+		       value_type || '|' || cardinality || '|' || is_unique::text || '|' || is_indexed::text
+		  FROM attrs WHERE app_id=$1 ORDER BY id`)
+	identsBefore := snapshot(`
+		SELECT id::text || '|' || attr_id::text || '|' || etype || '|' || label
+		  FROM idents WHERE app_id=$1 ORDER BY id`)
+	triplesBefore := snapshot(`
+		SELECT entity_id::text || '|' || attr_id::text || '|' || coalesce(value::text, 'null')
+		  FROM triples WHERE app_id=$1 ORDER BY entity_id, attr_id, value_md5`)
+	journalBefore := snapshot(`
+		SELECT id::text FROM transactions WHERE app_id=$1 ORDER BY id`)
+	catBefore, err := h.Catalogs.For(ctx, appStr)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var commitCalls int
+	h.OnCommit = func(context.Context, [16]byte, []string, int64, bool) {
+		commitCalls++
+	}
+
+	missingAttr := "ghost"
+	unknownAttr := uuidStr(newUUID())
+	code, resp := transactHTTP(t, h, appID, token, nil, []any{
+		[]any{"update", "todos", uuidStr(newUUID()), map[string]any{missingAttr: "value"}},
+		[]any{"add-triple", uuidStr(newUUID()), unknownAttr, "must fail"},
+	})
+	if code != 400 {
+		t.Fatalf("expected failed mutation, got %d %v", code, resp)
+	}
+	if _, ok := resp["tx-id"]; ok {
+		t.Fatalf("failed mutation returned tx-id: %v", resp)
+	}
+
+	attrsAfter := snapshot(`
+		SELECT id::text || '|' || coalesce(etype, '') || '|' || coalesce(label, '') || '|' ||
+		       value_type || '|' || cardinality || '|' || is_unique::text || '|' || is_indexed::text
+		  FROM attrs WHERE app_id=$1 ORDER BY id`)
+	identsAfter := snapshot(`
+		SELECT id::text || '|' || attr_id::text || '|' || etype || '|' || label
+		  FROM idents WHERE app_id=$1 ORDER BY id`)
+	triplesAfter := snapshot(`
+		SELECT entity_id::text || '|' || attr_id::text || '|' || coalesce(value::text, 'null')
+		  FROM triples WHERE app_id=$1 ORDER BY entity_id, attr_id, value_md5`)
+	journalAfter := snapshot(`
+		SELECT id::text FROM transactions WHERE app_id=$1 ORDER BY id`)
+	if !reflect.DeepEqual(attrsAfter, attrsBefore) ||
+		!reflect.DeepEqual(identsAfter, identsBefore) ||
+		!reflect.DeepEqual(triplesAfter, triplesBefore) ||
+		!reflect.DeepEqual(journalAfter, journalBefore) {
+		t.Fatalf("failed mutation left DB state:\nattrs: %v -> %v\nidents: %v -> %v\ntriples: %v -> %v\njournal: %v -> %v",
+			attrsBefore, attrsAfter, identsBefore, identsAfter, triplesBefore, triplesAfter, journalBefore, journalAfter)
+	}
+	catAfter, err := h.Catalogs.For(ctx, appStr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if catAfter != catBefore || catAfter.Len() != catBefore.Len() {
+		t.Fatalf("failed mutation changed cached schema: before=%p/%d after=%p/%d", catBefore, catBefore.Len(), catAfter, catAfter.Len())
+	}
+	if commitCalls != 0 {
+		t.Fatalf("failed mutation fired %d post-commit callbacks", commitCalls)
+	}
+}
+
+func TestHighLevelConcurrentMissingAttrProvisioningConverges(t *testing.T) {
+	h, db, appID, token, cleanup := env(t)
+	defer cleanup()
+
+	type outcome struct {
+		code int
+		resp map[string]any
+	}
+	start := make(chan struct{})
+	results := make(chan outcome, 2)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			code, resp := transactHTTP(t, h, appID, token, nil, []any{
+				[]any{"update", "todos", uuidStr(newUUID()), map[string]any{"shared": i}},
+			})
+			results <- outcome{code: code, resp: resp}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	for result := range results {
+		if result.code != 200 {
+			t.Fatalf("concurrent provisioning failed: %d %v", result.code, result.resp)
+		}
+	}
+
+	var attrs, triples int
+	if err := db.Pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM attrs WHERE app_id=$1 AND etype='todos' AND label='shared'`, appID,
+	).Scan(&attrs); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Pool.QueryRow(context.Background(), `
+		SELECT count(*)
+		  FROM triples t JOIN attrs a ON a.id=t.attr_id AND a.app_id=t.app_id
+		 WHERE t.app_id=$1 AND a.etype='todos' AND a.label='shared'`, appID,
+	).Scan(&triples); err != nil {
+		t.Fatal(err)
+	}
+	if attrs != 1 || triples != 2 {
+		t.Fatalf("concurrent provisioning did not converge: attrs=%d triples=%d", attrs, triples)
 	}
 }

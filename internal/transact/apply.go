@@ -87,7 +87,7 @@ func Transact(
 		// Fail-closed — compile or eval errors deny the whole batch. Admin
 		// callers bypass (v1 :admin? true semantics).
 		if ruleDoc != nil && !opts.Admin {
-			if err := enforcePerms(ctx, tx, appID, txCat, steps, opts, ruleDoc, storage.FetchTx); err != nil {
+			if err := enforcePerms(ctx, tx, appID, txCat, steps, opts, ruleDoc, storage.FetchTx, nil); err != nil {
 				return err
 			}
 		}

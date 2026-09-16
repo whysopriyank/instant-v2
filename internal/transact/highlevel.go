@@ -39,8 +39,8 @@ import (
 // DEVIATIONS from v1 (documented at the affected sites): resolution reads
 // committed state outside the write tx, so a unique value written by an
 // earlier step in the same batch is visible only when it was introduced
-// through this lowering (mint/resolution cache), and attr provisioning
-// commits in its own transaction (same pattern as authn system attrs).
+// through this lowering (mint/resolution cache). The admin caller emits
+// missing attrs as add-attr steps so provisioning and data commit atomically.
 
 // AttrSpec describes one missing attr to provision (v1 create-object-attr /
 // create-ref-attr shapes).

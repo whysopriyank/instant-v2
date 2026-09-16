@@ -13,15 +13,19 @@ import (
 
 // prepareCatalog provisions same-batch attrs before lookup resolution and
 // rewrites aliases to stored IDs without changing the shared catalog.
-func prepareCatalog(ctx context.Context, tx pgx.Tx, appID [16]byte, catalog *platform.AttrCatalog, steps []Step, opts Options, ruleDoc *perms.RuleDoc) (*platform.AttrCatalog, error) {
+func prepareCatalog(ctx context.Context, tx pgx.Tx, appID [16]byte, catalog *platform.AttrCatalog, steps []Step, opts Options, ruleDoc *perms.RuleDoc, evaluations ...*PermissionEvaluation) (*platform.AttrCatalog, error) {
 	txCat := catalog
+	var evaluation *PermissionEvaluation
+	if len(evaluations) > 0 {
+		evaluation = evaluations[0]
+	}
 	if hasOp(steps, "add-attr") || hasOp(steps, "update-attr") {
 		txCat = catalog.Clone()
 		// clientAttrID → serverAttrID for attrs the server already
 		// stores under another id (replayed or implicit-attr replays,
 		// e.g. <etype>/id). Mirrors the TS client's _rewriteMutations.
 		attrAlias := map[[16]byte][16]byte{}
-		for _, st := range steps {
+		for stepIndex, st := range steps {
 			if st.Op != "add-attr" {
 				continue
 			}
@@ -47,9 +51,11 @@ func prepareCatalog(ctx context.Context, tx pgx.Tx, appID [16]byte, catalog *pla
 				continue
 			}
 			if !opts.Admin && ruleDoc != nil {
-				allow, err := perms.Check("attrs", "create", ruleDoc, perms.Bindings{
+				bindings := perms.Bindings{
 					Auth: opts.AuthUser, RuleParams: opts.RuleParams, Request: opts.Request,
-				})
+				}
+				allow, err := perms.Check("attrs", "create", ruleDoc, bindings)
+				recordPermissionCheck(evaluation, stepIndex, "attrs", "create", allow, err, bindings)
 				if err != nil {
 					return nil, fmt.Errorf("transact: attrs.create: %w", err)
 				}
@@ -74,9 +80,10 @@ func prepareCatalog(ctx context.Context, tx pgx.Tx, appID [16]byte, catalog *pla
 // returns the resulting rows for the post-write coverage check. Metadata
 // updates are kept on the active transaction so a failed coverage check rolls
 // back together with the caller's data writes.
-func applyRequiredAttrUpdates(ctx context.Context, tx pgx.Tx, appID [16]byte, cat *platform.AttrCatalog, batch []Step, opts Options, ruleDoc *perms.RuleDoc) ([]platform.Attr, error) {
+func applyRequiredAttrUpdates(ctx context.Context, tx pgx.Tx, appID [16]byte, cat *platform.AttrCatalog, batch []indexedStep, opts Options, ruleDoc *perms.RuleDoc, evaluation *PermissionEvaluation) ([]platform.Attr, error) {
 	updates := make([]platform.Attr, 0, len(batch))
-	for _, st := range batch {
+	for _, indexed := range batch {
+		st := indexed.step
 		if len(st.Args) != 1 {
 			return nil, fmt.Errorf("transact: update-attr: want one payload")
 		}
@@ -110,9 +117,9 @@ func applyRequiredAttrUpdates(ctx context.Context, tx pgx.Tx, appID [16]byte, ca
 		// bindings as the add-attr path. Admin bypasses this permission only;
 		// namespace gates above still apply.
 		if !opts.Admin && ruleDoc != nil {
-			allow, err := perms.Check("attrs", "update", ruleDoc, perms.Bindings{
-				Auth: opts.AuthUser, RuleParams: opts.RuleParams, Request: opts.Request,
-			})
+			bindings := permBindings(opts, nil, nil)
+			allow, err := perms.Check("attrs", "update", ruleDoc, bindings)
+			recordPermissionCheck(evaluation, indexed.index, "attrs", "update", allow, err, bindings)
 			if err != nil {
 				return nil, fmt.Errorf("transact: attrs.update: %w", err)
 			}

@@ -127,8 +127,12 @@ func normalizedProjectionValue(v any) any {
 // Permission checks use the original entity image for update/delete/unlink and
 // the final same-batch image for new entities, matching v1's pre/post split.
 func enforcePerms(ctx context.Context, tx pgx.Tx, appID [16]byte,
-	cat *platform.AttrCatalog, steps []Step, opts Options, doc *perms.RuleDoc, fetch permissionFetcher,
+	cat *platform.AttrCatalog, steps []Step, opts Options, doc *perms.RuleDoc, fetch permissionFetcher, evaluations ...*PermissionEvaluation,
 ) error {
+	var evaluation *PermissionEvaluation
+	if len(evaluations) > 0 {
+		evaluation = evaluations[0]
+	}
 	seenEntities := make(map[[16]byte]bool)
 	var touchedEntities [][16]byte
 	stepKeys := make([]permissionProjectionKey, len(steps))
@@ -170,7 +174,6 @@ func enforcePerms(ctx context.Context, tx pgx.Tx, appID [16]byte,
 	}
 
 	projMap := make(map[permissionProjectionKey]map[string]any, len(steps))
-	entityExists := make(map[permissionProjectionKey]bool, len(steps))
 	attrExists := make(map[permissionProjectionKey]map[[16]byte]bool, len(steps))
 	storedValues := make(map[permissionProjectionKey]map[[16]byte][]permissionStoredValue, len(steps))
 	for _, key := range stepKeys {
@@ -211,10 +214,6 @@ func enforcePerms(ctx context.Context, tx pgx.Tx, appID [16]byte,
 				projMap[key]["id"] = uuidToStr(eid)
 			}
 			attrExists[key][r.Triple.A] = true
-			if a.Cardinality == "one" {
-				// v1 determines entity existence from the etype's EA rows.
-				entityExists[key] = true
-			}
 			if storedValues[key] == nil {
 				storedValues[key] = make(map[[16]byte][]permissionStoredValue)
 			}
@@ -264,13 +263,29 @@ func enforcePerms(ctx context.Context, tx pgx.Tx, appID [16]byte,
 	finalProjMap := cloneProjectionMap(projMap)
 	finalAttrExists := cloneAttrExists(attrExists)
 	finalStoredValues := cloneStoredValues(storedValues)
+	originalStoredValues := cloneStoredValues(storedValues)
+	updateEligible := make(map[permissionProjectionKey]bool, len(storedValues))
+	for key, values := range storedValues {
+		updateEligible[key] = len(values) > 0
+	}
+	stepUsesUpdate := make([]bool, len(steps))
 	for stepIndex, st := range steps {
+		key := stepKeys[stepIndex]
+		stepUsesUpdate[stepIndex] = updateEligible[key]
 		if err := projectPermissionStep(ctx, tx, cat, st, stepMD5s[stepIndex], finalProjMap, finalAttrExists, finalStoredValues); err != nil {
 			return err
 		}
+		if err := removeOriginalPermissionValue(cat, st, stepMD5s[stepIndex], originalStoredValues); err != nil {
+			return err
+		}
+		// Once the original entity image is fully removed, later additions are
+		// creates. Values added by this batch cannot keep update eligibility.
+		if len(originalStoredValues[key]) == 0 {
+			updateEligible[key] = false
+		}
 	}
 
-	for _, st := range steps {
+	for stepIndex, st := range steps {
 		switch st.Op {
 		case "add-triple", "deep-merge-triple":
 			ta, err := parseTripleArgs(st, cat)
@@ -283,7 +298,7 @@ func enforcePerms(ctx context.Context, tx pgx.Tx, appID [16]byte,
 			}
 			key := permissionProjectionKey{eid: eid, etype: etypeFor(cat, ta.AttrID)}
 			action := "create"
-			if entityExists[key] {
+			if stepUsesUpdate[stepIndex] {
 				action = "update"
 			}
 			etype := etypeFor(cat, ta.AttrID)
@@ -294,7 +309,9 @@ func enforcePerms(ctx context.Context, tx pgx.Tx, appID [16]byte,
 				// binds that same image as both data and newData.
 				data = cloneMap(finalProjMap[key])
 			}
-			allow, err := perms.Check(etype, action, doc, permBindings(opts, data, newData))
+			bindings := permBindings(opts, data, newData)
+			allow, err := perms.Check(etype, action, doc, bindings)
+			recordPermissionCheck(evaluation, stepIndex, etype, action, allow, err, bindings)
 			if err != nil {
 				return fmt.Errorf("perms %s %s: %w", etype, action, err)
 			}
@@ -319,7 +336,9 @@ func enforcePerms(ctx context.Context, tx pgx.Tx, appID [16]byte,
 			if a, ok := cat.ByID(ta.AttrID); ok && a.ValueType == "ref" && doc.ResolveExpr(etype, "unlink") != "" {
 				action = "unlink"
 			}
-			allow, err := perms.Check(etype, action, doc, permBindings(opts, data, newData))
+			bindings := permBindings(opts, data, newData)
+			allow, err := perms.Check(etype, action, doc, bindings)
+			recordPermissionCheck(evaluation, stepIndex, etype, action, allow, err, bindings)
 			if err != nil {
 				return fmt.Errorf("perms %s %s: %w", etype, action, err)
 			}
@@ -344,7 +363,9 @@ func enforcePerms(ctx context.Context, tx pgx.Tx, appID [16]byte,
 			}
 			key := permissionProjectionKey{eid: eid, etype: etype}
 			data := cloneMap(projMap[key])
-			allow, err := perms.Check(etype, "delete", doc, permBindings(opts, data, map[string]any{}))
+			bindings := permBindings(opts, data, map[string]any{})
+			allow, err := perms.Check(etype, "delete", doc, bindings)
+			recordPermissionCheck(evaluation, stepIndex, etype, "delete", allow, err, bindings)
 			if err != nil {
 				return fmt.Errorf("perms %s delete: %w", etype, err)
 			}
@@ -352,6 +373,51 @@ func enforcePerms(ctx context.Context, tx pgx.Tx, appID [16]byte,
 				return fmt.Errorf("transact: permission denied (delete %s)", etype)
 			}
 		}
+	}
+	return nil
+}
+
+func removeOriginalPermissionValue(cat *platform.AttrCatalog, st Step, stepMD5 string, values map[permissionProjectionKey]map[[16]byte][]permissionStoredValue) error {
+	switch st.Op {
+	case "retract-triple":
+		ta, err := parseTripleArgs(st, cat)
+		if err != nil {
+			return err
+		}
+		var eid [16]byte
+		if err := parseUUID(strings.Trim(string(ta.EID), `"`), &eid); err != nil {
+			return fmt.Errorf("perms: eid %s: %w", ta.EID, err)
+		}
+		key := permissionProjectionKey{eid: eid, etype: etypeFor(cat, ta.AttrID)}
+		stored := values[key][ta.AttrID]
+		for i, item := range stored {
+			if item.md5 != stepMD5 {
+				continue
+			}
+			stored = append(stored[:i:i], stored[i+1:]...)
+			if len(stored) == 0 {
+				delete(values[key], ta.AttrID)
+			} else {
+				values[key][ta.AttrID] = stored
+			}
+			break
+		}
+	case "delete-entity":
+		var eidStr, etype string
+		if err := json.Unmarshal(st.Args[0], &eidStr); err != nil {
+			return nil
+		}
+		var eid [16]byte
+		if err := parseUUID(eidStr, &eid); err != nil {
+			return nil
+		}
+		etype = "$default"
+		if len(st.Args) == 2 {
+			if err := json.Unmarshal(st.Args[1], &etype); err != nil {
+				return fmt.Errorf("perms: delete-entity etype: %w", err)
+			}
+		}
+		values[permissionProjectionKey{eid: eid, etype: etype}] = nil
 	}
 	return nil
 }
