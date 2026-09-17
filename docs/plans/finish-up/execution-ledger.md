@@ -406,11 +406,13 @@ PASS; `go vet` on those three packages exit 0; `go build ./...` exit 0;
 `gofmt -l` empty; `git diff --check` clean.
 
 Security review: independent read-only review of the exact candidate returned
-ACCEPT with no unresolved blocker (10 falsification targets — stale gate
+ACCEPT with no unresolved blocker (11 falsification targets — stale gate
 reuse, >1 superseded WS envelope, stale snapshot/watermark commit, stale SSE
 delivery, fail-open on lookup error, group sharing across generations,
 late-allow-over-deny, teardown resurrection, ABA/cancellation, lock
-inversion/I-O under global lock — all falsified with file:line citations;
+inversion, I-O under global lock — all falsified with file:line citations;
+full evidence:
+`docs/plans/finish-up/rt001-security-review-20260917.md`;
 one non-blocking note: rule-doc cache has no TTL, only `Invalidate`
 refresh; consistent with the ratified observed-swap boundary). Two earlier
 reviewer spawns failed at the provider level with no verdict and were
