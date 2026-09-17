@@ -438,7 +438,11 @@ func (m *Manager) releaseSnapshotFlight(flight *snapshotFlight) {
 // served (RT-002b/RT-002c): a render failure serves nothing and returns an
 // error so the generation is retried, never published; a member send
 // failure detaches and closes that member (reconnect re-establishes from a
-// full snapshot) without failing its siblings.
+// full snapshot) without failing its siblings — except when NOTHING was
+// served and the generation is still current: then there is no certified
+// gap to repair by reconnect, so the generation is withheld (error, no
+// snapshot, no watermark) with members kept attached for the notifier's
+// bounded same-tx retry, which heals in place.
 func (m *Manager) dispatchGroup(g *queryGroup, fr reactive.Frame) error {
 	members, anyDelta := g.snapshotMembers()
 	if len(members) == 0 {
@@ -514,6 +518,11 @@ func (m *Manager) dispatchGroup(g *queryGroup, fr reactive.Frame) error {
 		})
 	}
 
+	// Direct-write (SendRaw) failures withhold teardown until the fan-out
+	// outcome is known: detaching eagerly would destroy the subscription
+	// (and its bounded same-tx retry) for a generation nobody certified.
+	var served int
+	var failedDirect []*Session
 	for _, mem := range members {
 		if mem.sess.SendRaw == nil && mem.sess.SendRawGen == nil {
 			m.failMember(g, mem.sess)
@@ -535,6 +544,17 @@ func (m *Manager) dispatchGroup(g *queryGroup, fr reactive.Frame) error {
 			// drop here — enqueue always succeeds unless backpressured —
 			// so every member gets a healing retry via the same txID.
 			serr = mem.sess.SendRawGen(b, fr.Gen, g.sub)
+			if serr != nil {
+				// Queued transports own their teardown signaling
+				// (SSE overflow ends the stream independently of
+				// dispatch), so the established detach-and-continue
+				// outcome is preserved verbatim here.
+				if logger != nil {
+					logger.Debug("groups: send failed; detaching member", "err", serr)
+				}
+				m.failMember(g, mem.sess)
+				continue
+			}
 		} else {
 			// Per-member admission (RT-001): a re-gate that landed after
 			// Emit's check — or mid-fan-out — stops the stale spread here
@@ -546,19 +566,52 @@ func (m *Manager) dispatchGroup(g *queryGroup, fr reactive.Frame) error {
 				return errGenerationSuperseded
 			}
 			serr = mem.sess.SendRaw(b)
+			if serr != nil {
+				// RT-002c: a direct write that reached no member must
+				// not certify this generation — and, when the
+				// generation is still current, must not destroy the
+				// subscription either. The failure is collected for
+				// the fan-out-end decision below: withhold (error,
+				// members kept) for a same-tx healing retry when
+				// nothing was served, detach+close once a sibling has
+				// certified the generation (the failed member then has
+				// a real gap and must reconnect for full replay).
+				if logger != nil {
+					logger.Debug("groups: direct send failed; outcome deferred to fan-out end", "err", serr)
+				}
+				failedDirect = append(failedDirect, mem.sess)
+				continue
+			}
 		}
-		if serr != nil {
+		served++
+		metrics.FanoutBytes.Add(float64(len(b)))
+	}
+	if len(failedDirect) > 0 {
+		if served == 0 && g.sub.Gen.Load() == fr.Gen {
+			// Nothing was served and nothing was certified, so no
+			// member has a gap to repair by reconnect: withhold the
+			// generation (the notifier commits nothing and re-arms
+			// the same txID) and keep every member attached so the
+			// retry heals in place.
+			return fmt.Errorf("groups: no member served (%d direct delivery failures); withholding generation for retry", len(failedDirect))
+		}
+		for _, sess := range failedDirect {
 			// RT-002c: a member that was not served must not keep a
 			// watermark for this generation. Detach it now and close its
 			// transport so it reconnects and re-establishes from a full
 			// snapshot; siblings are unaffected.
 			if logger != nil {
-				logger.Debug("groups: send failed; detaching member", "err", serr)
+				logger.Debug("groups: send failed; detaching member")
 			}
-			m.failMember(g, mem.sess)
-			continue
+			m.failMember(g, sess)
 		}
-		metrics.FanoutBytes.Add(float64(len(b)))
+		if served == 0 {
+			// All direct writes failed after a re-gate overtook the
+			// generation mid-flight: revoked bytes must never be
+			// re-served in place, so the detached members
+			// re-establish under the new gate instead.
+			return errGenerationSuperseded
+		}
 	}
 	return nil
 }

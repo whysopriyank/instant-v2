@@ -54,9 +54,20 @@ func ParseFrame(b []byte) (Frame, error) {
 // json.Marshal or literal RawMessages. Keys are emitted in the same sorted
 // order as stdlib, so output is byte-identical for all frames this package
 // builds (asserted by TestFrameEncodeParity).
+//
+// RT-002b/RT-002e: values are validated with json.Valid so an invalid or
+// unencodable payload fails here — matching stdlib's Marshal error on bad
+// RawMessage — instead of emitting invalid or empty bytes to the wire.
+// Callers treat any error as a failed generation: nothing is sent, nothing
+// is committed, and the same transaction is retried.
 func (f Frame) Encode() ([]byte, error) {
 	if f == nil {
 		return []byte("null"), nil
+	}
+	for k, v := range f {
+		if !json.Valid(v) {
+			return nil, fmt.Errorf("frame: invalid JSON value for key %q", k)
+		}
 	}
 	keys := make([]string, 0, len(f))
 	size := 2
