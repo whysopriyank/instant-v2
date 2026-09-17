@@ -11,7 +11,7 @@ the remaining defects. No push or deployment is selected by this objective.
 | ID | Invariant / production path | Planned evidence / red expectation | Scope | Status |
 |---|---|---|---|---|
 | RT-001 | Permission revocation coordinates with initial answers, queued delivery, refresh fan-out and publication | Deterministic revocation at publication boundaries; bounded WS exception ratified (`DEC-001-rt001-bounded-rebinding-20260917`), live 6/6 + corpus 18/18 green, security review ACCEPT | reactive, sync, daemon assembly; architecture review first | COMPLETE |
-| RT-002 | Failed delivery has an explicit recovery outcome and reconnect establishes matching state/watermark | Actual notifier retry and transport reconnect tests, including same-tx corrective delivery | reactive, sync | PARTIAL |
+| RT-002 | Failed delivery has an explicit recovery outcome and reconnect establishes matching state/watermark | Real notifier retry + transport reconnect, incl. same-tx corrective via pinned SDK 1.0.65; focused 17 green twice with -race, packages + live + matrix green, reliability review ACCEPT | reactive, sync | COMPLETE |
 | RT-003 | Queue depth one reopens after drain | Deterministic fill/shed/drain/resume tests and reactive race package | reactive/config | COMPLETE |
 | DA-001-R | Failed root confirmation cannot be trusted by a later upload, even if directory cleanup fails | Inject root-sync failure and failed cleanup, then retry; current Stat shortcut bypasses confirmation | storageapi backend and durability tests | SUPERSEDED: committed DA-001 backend work pins barrier-ordered root confirmation (`TestDiskBackendSecondUploadWaitsForRootConfirmation`) and owned-DB retry semantics; the Stat-shortcut red probe is retained as a follow-up hardening row, not a stabilization blocker |
 | F-001/F-002 | Current candidate evidence and decision selections are consistent | Reconcile canonical ledger after accepted code; distinguish pending policy edits from approval | finish-up and reference docs | PARTIAL |
@@ -421,3 +421,97 @@ superseded by this completed review; zero repair cycles consumed.
 Status: RT-001 `COMPLETE / ACCEPTED_BOUNDED_REBINDING`. RT-002 remains
 PARTIAL; Phase 02 gate `REALTIME_TRUSTWORTHY` remains open. No other packet
 changed. No push, publication, deployment, or tag.
+
+## RT-002 close-out (2026-09-17, HEAD bbf5561f8d8e784b8ea4c1a2395c5581b760bac2 clean + work below, go1.27.1 darwin/arm64)
+
+Baseline: HEAD `bbf5561f8d8e784b8ea4c1a2395c5581b760bac2` on `main`, clean tree.
+RT-002 `PARTIAL / ACCEPTED_BOUNDED_REPAIR_CLIENT_EVIDENCE_PENDING` per
+`program-manifest.md`. Toolchain go1.27.1, PostgreSQL 17.11 Homebrew,
+Node v25.1.0, pnpm 10.28.0. DEC-001 wording recorded: RT-002 `REQUIRED`
+`Refresh outcome semantics (explicit disconnect + full replay)`
+(`docs/reference/release-envelope.md:140`); boundary `explicit disconnect
+plus full replay may be sufficient` (`02-realtime-correctness.md:69`). No new
+owner decision (policy unchanged; RT-002c allows retry OR disconnect).
+
+Product changes (2 files):
+- `internal/sync/frame.go`: `Encode` validates every value with `json.Valid`
+  (matches stdlib Marshal rejection of bad RawMessage); invalid payload fails
+  before any wire bytes.
+- `internal/sync/groups.go`: `dispatchGroup` collects direct-write failures;
+  nothing-served + current generation → withhold (error, members kept) for the
+  notifier's bounded same-tx retry; partial → detach failed + certify via
+  siblings; post-regate total → superseded; queued (`SendRawGen`/SSE) path
+  unchanged (immediate detach, preserves overflow teardown). No new test seam.
+
+Regression tests (6 new files, all green with `-race`):
+- B encode: `dispatch_encode_failure_test.go`
+  (`TestDispatchEncodeFailureServesNothing` both classes + both transports,
+  zero bytes, no empty, snapshot nil, Tx 0;
+  `TestDispatchEncodeFailureSchedulesSameTxRetry` real notifier, ≥2 attempts
+  same tx 7, sent 0, no commit) + `sse_encode_failure_test.go`
+  (`TestWriteSSEEventEncodeFailureWritesNothing` + `UnguardedControl`, zero
+  bytes before first Write/Flush).
+- C chain: `notifier_chain_failure_test.go`
+  (`TestNotifierChainAllDeliveryFailsWithholdsAndHeals`: no commit while
+  failing, same-tx retry, exactly 1 delivery + 1 commit after heal;
+  `TestNotifierChainPartialDeliveryCertifiesAndReconnects`: failed detached +
+  closed, healthy certifies, fresh rejoin exact state + watermark, tx2 reaches
+  both).
+- D SSE: `sse_failure_reconnect_test.go`
+  (`TestSSEFailureReconnectFullReplay`: 11 steps — real SSE session/query,
+  baseline, overflow via production dispatch, ConnCount 0 + Store 0, missed tx
+  via sibling WS transact chain, fresh session/query, exact tree + watermark,
+  no empty/malformed, continued delivery).
+- E delta: `delta_reconnect_test.go`
+  (`TestDeltaReconnectFullReplayCoversMissedTx`: two live 0.23.0 members,
+  delta-eligible single-op patch certified on both, drop, missed delta-eligible
+  tx to survivor as delta, fresh 0.23.0 full replay (no delta key) exact titles
+  + watermark == missed tx, later tx reaches both).
+- F SDK: `examples/vite-vanilla/rt002-sdk-same-tx-correction.test.mjs`
+  (pinned `@instantdb/core@1.0.65`, lock sha256
+  `3aed90cae84d70bf6c4e3e0d822ea437694ded046244c23cb5cffa5611f1cbb2`,
+  real `Reactor._handleReceive` → `querySubs` → `dataForQuery` → `notifyOne`;
+  stale tx 7 then corrective same-tx 7 applied, `processedTxId` 7, state
+  corrected, tx 8 live; `node --test` pass 1 fail 0 exit 0; node_modules
+  ignored, unstaged).
+
+Verification (all exit 0, zero skips unless noted):
+- Focused 17 twice with `-race` (9 prior + 8 new incl. encode/chain/SSE/delta):
+  `TestWatermarkMatchesDeliveredGeneration`, `TestSSESnapshotErrorEndsStream`,
+  `TestReconnectConvergesAfterSendFailure`, `TestDispatchRenderFailureServesNothing`,
+  `TestDispatchSendFailureDetachesOnlyFailedMember`,
+  `TestDispatchMissingTransportDetachesExplicitly`,
+  `TestDispatchNeverEmitsEmptyFrames`, `TestSSEOverflowClosesStream`,
+  `TestAdminSSEOverflowClosesStream`, `TestDispatchEncodeFailureServesNothing`,
+  `TestDispatchEncodeFailureSchedulesSameTxRetry`,
+  `TestWriteSSEEventEncodeFailureWritesNothing`,
+  `TestWriteSSEEventEncodeFailureUnguardedControl`,
+  `TestNotifierChainAllDeliveryFailsWithholdsAndHeals`,
+  `TestNotifierChainPartialDeliveryCertifiesAndReconnects`,
+  `TestSSEFailureReconnectFullReplay`,
+  `TestDeltaReconnectFullReplayCoversMissedTx` → PASS twice.
+- `go test -race ./internal/sync ./internal/reactive ./cmd/instantd -count=1` PASS.
+- RT-001 live 6/6 PASS (`TestRealtimeRebind*`, `TestRealtimeRuleOutage*`,
+  `TestSteadyDeny*`, `TestSupersededGenerationDrops`, `TestSyncFailsClosed*`).
+- Mounted CF-003 SSE/delta (`TestCF003AssembledSSE*`, `Delta`, `Room`,
+  `Transaction`) PASS; `TestDeltaRefreshNegotiation`,
+  `TestSSEInitQueryTreeShape`, `TestSubscriptionCap`,
+  `TestLiveReconnectConvergesAfterDrop` PASS; corpus replay 18/18 PASS.
+- Pinned SDK `node --test rt002-sdk-same-tx-correction.test.mjs` pass 1 fail 0 exit 0.
+- `go vet` (sync/reactive/instantd) exit 0; `go build ./...` exit 0;
+  `gofmt -l` empty; `git diff --check` clean.
+- Integration legs run with `INSTANT_TEST_INTEGRATION=1
+  DATABASE_URL=postgres://priyank@localhost/postgres` (owned `instant_test_*` only).
+
+Reliability review: independent read-only review of the exact candidate
+attempted all 12 falsification targets (watermark without delivery,
+snapshot/watermark skew, skipped tx, failed still registered, closed still
+live, SSE leak, delta/full divergence, duplicate amplification, empty frame,
+unbounded retry, deadlock, mock-for-SDK) — all FALSIFIED with file:line
+citations; verdict ACCEPT with 6 non-blocking notes. Artifact:
+`docs/plans/finish-up/rt002-reliability-review-20260917.md`.
+
+Status: RT-002 `COMPLETE / ACCEPTED_DISCONNECT_REPLAY_DELIVERY`. Phase 02
+`REALTIME_TRUSTWORTHY / COMPLETE` (RT-001 + RT-002 + RT-003 green). RT-001 and
+RT-003 remain complete. No later packet changed. No push, publication,
+deployment, or tag.

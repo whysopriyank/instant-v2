@@ -56,11 +56,11 @@ frame, not only a cache-unit test.
 
 | Row | Desired invariant | Red evidence |
 |---|---|---|
-| RT-002a | Watermark meaning—computed, queued, or delivered—is explicit and consistent across WS and SSE. | Source/behavior characterization. |
-| RT-002b | Render or encode failure cannot advance a client-visible processed state silently. | Inject renderer/encoder failure. |
-| RT-002c | Send/backpressure failure causes a declared retry or explicit disconnect/replay outcome. | Inject member send and SSE overflow failure. |
-| RT-002d | Reconnect converges to exact current state without skipping the failed transaction. | Fail delivery, reconnect, compare exact result and watermark. |
-| RT-002e | No empty frame is emitted after encoding failure. | Encoder failure assertion. |
+| RT-002a | Watermark meaning—computed, queued, or delivered—is explicit and consistent across WS and SSE. | `TestWatermarkMatchesDeliveredGeneration` green (every full/delta/nodelist frame carries its accepted generation's `processed-tx-id`; WS `SendRaw` is synchronous write, SSE `SendRaw` is enqueue with overflow-detach; watermark never means merely computed). COMPLETE. |
+| RT-002b | Render or encode failure cannot advance a client-visible processed state silently. | `TestDispatchRenderFailureServesNothing` (render) + `TestDispatchEncodeFailureServesNothing` / `TestDispatchEncodeFailureSchedulesSameTxRetry` / `TestWriteSSEEventEncodeFailureWritesNothing` + `TestWriteSSEEventEncodeFailureUnguardedControl` (encode via real dispatch + writer, invalid payload, zero bytes, no commit, same-tx retry) + `TestSSESnapshotErrorEndsStream` (SSE initial failure ends stream, serves nothing) green. COMPLETE. |
+| RT-002c | Send/backpressure failure causes a declared retry or explicit disconnect/replay outcome. | `TestDispatchSendFailureDetachesOnlyFailedMember` + `TestDispatchMissingTransportDetachesExplicitly` (partial detach) + `TestSSEOverflowClosesStream` / `TestAdminSSEOverflowClosesStream` (backpressure teardown) + `TestNotifierChainAllDeliveryFailsWithholdsAndHeals` (total withhold + same-tx retry + heal) + `TestNotifierChainPartialDeliveryCertifiesAndReconnects` (partial certify + detach) green. COMPLETE. |
+| RT-002d | Reconnect converges to exact current state without skipping the failed transaction. | `TestReconnectConvergesAfterSendFailure` (white-box) + `TestLiveReconnectConvergesAfterDrop` (live WS) + `TestNotifierChainPartialDeliveryCertifiesAndReconnects` (chain) + `TestSSEFailureReconnectFullReplay` (SSE overflow → fresh session full replay, missed tx + watermark) + `TestDeltaReconnectFullReplayCoversMissedTx` (delta 0.23.0 full replay covers delta-eligible missed tx) green. COMPLETE. |
+| RT-002e | No empty frame is emitted after encoding failure. | `TestDispatchNeverEmitsEmptyFrames` + `TestDispatchEncodeFailureServesNothing` + `TestWriteSSEEventEncodeFailureWritesNothing` (zero bytes, no `data: \n` / `data: {}\n`) green. COMPLETE. |
 
 ### Boundary
 
@@ -99,3 +99,5 @@ and routine review.
 All three packets must be green for a production realtime claim. An alpha may
 exclude depth one through validation. RT-001 and RT-002 may not be accepted as
 exceptions while realtime subscriptions remain supported.
+
+Phase 02 status: `REALTIME_TRUSTWORTHY / COMPLETE` — RT-001 `COMPLETE / ACCEPTED_BOUNDED_REBINDING`, RT-002 `COMPLETE / ACCEPTED_DISCONNECT_REPLAY_DELIVERY`, RT-003 `COMPLETE / ACCEPTED_HERMETIC_RECOVERY`.

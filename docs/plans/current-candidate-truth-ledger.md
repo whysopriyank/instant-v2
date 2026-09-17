@@ -746,3 +746,19 @@ PARTIAL; Phase 02 gate `REALTIME_TRUSTWORTHY` stays open. No other packet or
 selection changes. Evidence detail lives in the execution ledger's RT-001
 close-out section. New candidate SHA is recorded at commit time in this
 session's final report.
+
+## RT-002 close-out (2026-09-17, main at bbf5561f8d8e784b8ea4c1a2395c5581b760bac2 + work below)
+
+RT-002 delivery/watermarks is `COMPLETE / ACCEPTED_DISCONNECT_REPLAY_DELIVERY`
+under the already-approved DEC-001 explicit-disconnect/full-replay policy (no
+new owner decision; RT-002c allows retry OR disconnect). RT-002a–e each green
+per `02-realtime-correctness.md` (watermark semantics, render+encode no-commit,
+retry-or-disconnect, exact reconnect incl. SSE/delta, no empty frame).
+Evidence: focused 17 green twice with -race, sync/reactive/instantd race
+packages, RT-001 live 6/6, CF-003 SSE/delta + corpus 18/18, pinned SDK 1.0.65
+same-tx correction pass, reliability review ACCEPT
+(`docs/plans/finish-up/rt002-reliability-review-20260917.md`). Phase 02
+`REALTIME_TRUSTWORTHY / COMPLETE` (RT-001 + RT-002 + RT-003). RT-001/RT-003
+remain complete; no later packet changed. Detail in the execution ledger's
+RT-002 close-out section. New candidate SHA recorded at commit time in this
+session's final report.
