@@ -9,8 +9,12 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -314,5 +318,343 @@ func TestCF002WSRecordCreatesNoArtifact(t *testing.T) {
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("WS record produced output at %s", dir)
+	}
+}
+
+// cf002ShimSource is a healthy-but-different compatible binary: it serves
+// /health with ok:true db:true and /runtime/sse with an init-ok hello. It is
+// deliberately NOT built from the recorded candidate, so its SHA-256 differs
+// from any candidate build. A /bin/echo stand-in would only prove health
+// checking; this shim stays healthy yet must still be rejected because no
+// override path exists.
+const cf002ShimSource = `package main
+
+import (
+	"fmt"
+	"net"
+	"net/http"
+	"os"
+)
+
+func main() {
+	addr := os.Getenv("CF002_SHIM_ADDR")
+	if addr == "" {
+		addr = "127.0.0.1:0"
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, ` + "`" + `{"ok":true,"db":true}` + "`" + `)
+	})
+	mux.HandleFunc("/runtime/sse", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		_, _ = fmt.Fprint(w, "data: {\"op\":\"init-ok\",\"session-id\":\"wire-shim-123\"}\n\n")
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done()
+	})
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	_ = http.Serve(ln, mux)
+}
+`
+
+func cf002BuildShim(t *testing.T, dir string) string {
+	t.Helper()
+	src := filepath.Join(dir, "shim.go")
+	if err := os.WriteFile(src, []byte(cf002ShimSource), 0600); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(dir, "shim-instantd")
+	cmd := exec.Command("go", "build", "-o", bin, src)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build healthy shim: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(bin); err != nil {
+		t.Fatalf("shim binary missing: %v", err)
+	}
+	return bin
+}
+
+func cf002FreeLoopbackAddr(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := l.Addr().String()
+	_ = l.Close()
+	return addr
+}
+
+// TestCF002ManagedRecordRejectsInstantdBinaryOverride proves candidate
+// binding by removal: --instantd-binary no longer exists, so even a healthy
+// (healthy-but-different) compatible binary is rejected before any build,
+// capture, or output reservation. It first proves the shim itself is healthy,
+// then proves the recorder refuses the override with no output directory or
+// eligible manifest and a diagnostic free of binary contents, credentials,
+// or database URLs.
+func TestCF002ManagedRecordRejectsInstantdBinaryOverride(t *testing.T) {
+	base := t.TempDir()
+	shimBin := cf002BuildShim(t, base)
+	shimSHA, err := corpus.HashFile(shimBin)
+	if err != nil || len(shimSHA) != 64 {
+		t.Fatalf("shim hash invalid: %v %q", err, shimSHA)
+	}
+
+	// Prove the shim is healthy (not a /bin/echo stand-in): it must serve
+	// /health with ok:true db:true and /runtime/sse with an init-ok hello.
+	shimAddr := cf002FreeLoopbackAddr(t)
+	shimCmd := exec.Command(shimBin)
+	shimCmd.Env = append(os.Environ(), "CF002_SHIM_ADDR="+shimAddr)
+	shimCmd.Stdout = io.Discard
+	shimCmd.Stderr = io.Discard
+	if err := shimCmd.Start(); err != nil {
+		t.Fatalf("start healthy shim: %v", err)
+	}
+	defer func() {
+		_ = shimCmd.Process.Kill()
+		_, _ = shimCmd.Process.Wait()
+	}()
+	shimBase := "http://" + shimAddr
+	client := &http.Client{Timeout: 5 * time.Second}
+	healthy := false
+	for i := 0; i < 50; i++ {
+		resp, err := client.Get(shimBase + "/health")
+		if err == nil {
+			body, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK && bytes.Contains(body, []byte(`"ok":true`)) && bytes.Contains(body, []byte(`"db":true`)) {
+				healthy = true
+				break
+			}
+		} else {
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !healthy {
+		t.Fatal("healthy shim never served /health with ok:true db:true")
+	}
+	sseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	sseReq, _ := http.NewRequestWithContext(sseCtx, http.MethodGet, shimBase+"/runtime/sse?app_id=x", nil)
+	sseResp, err := client.Do(sseReq)
+	if err != nil {
+		t.Fatalf("shim SSE unreachable (not healthy): %v", err)
+	}
+	sseBody, _ := io.ReadAll(io.LimitReader(sseResp.Body, 1<<20))
+	_ = sseResp.Body.Close()
+	if !bytes.Contains(sseBody, []byte(`"op":"init-ok"`)) || !bytes.Contains(sseBody, []byte("session-id")) {
+		t.Fatalf("shim SSE hello missing init-ok/session-id: %q", sseBody)
+	}
+
+	// The override must be rejected before capture with no output/manifest.
+	root := cf002E2ERepoRoot(t)
+	outDir := filepath.Join(base, "override-out")
+	var out, stderr bytes.Buffer
+	code := run([]string{"--mode", "managed-record", "--output-dir", outDir, "--repo", root, "--instantd-binary", shimBin}, &out, &stderr)
+	if code == 0 {
+		t.Fatal("instantd-binary override reported success (candidate binding removed)")
+	}
+	diag := stderr.String()
+	if !strings.Contains(diag, "instantd-binary") {
+		t.Fatalf("override rejection does not name the removed flag: %q", diag)
+	}
+	if _, err := os.Stat(outDir); !os.IsNotExist(err) {
+		t.Fatalf("override run produced output at %s", outDir)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "manifest.json")); !os.IsNotExist(err) {
+		t.Fatal("override run published an eligible manifest")
+	}
+	if strings.Contains(out.String(), "PASS managed-record") {
+		t.Fatal("override run printed a pass line")
+	}
+	// Diagnostic must not leak binary contents, credentials, or database URLs.
+	if dbURL := os.Getenv("DATABASE_URL"); dbURL != "" && strings.Contains(diag, dbURL) {
+		t.Fatal("override diagnostic leaks DATABASE_URL")
+	}
+	for _, leak := range []string{"postgres://", "postgresql://", "cf002-managed-record-secret", "cf002-google-secret", "cf002-github-secret"} {
+		if strings.Contains(diag, leak) {
+			t.Fatalf("override diagnostic leaks %q", leak)
+		}
+	}
+	if shimBytes, err := os.ReadFile(shimBin); err == nil && len(shimBytes) > 0 {
+		// Binary blobs are non-UTF8; assert the diagnostic carries no long
+		// printable slice of the binary (proof it was not dumped).
+		printable := make([]byte, 0, 64)
+		for _, b := range shimBytes {
+			if b >= 32 && b < 127 {
+				printable = append(printable, b)
+				if len(printable) >= 64 {
+					break
+				}
+			} else if len(printable) >= 32 {
+				break
+			}
+		}
+		if len(printable) >= 32 && strings.Contains(diag, string(printable)) {
+			t.Fatal("override diagnostic contains binary contents")
+		}
+	}
+}
+
+// TestCF002ManagedRecordDefaultBuildReachesDatabaseStage proves the default
+// candidate build is accepted: with no override flag, a clean candidate gets
+// past the build stage and fails only at the owned-database stage when no
+// database URL is configured. A build failure would report "build instantd
+// from candidate" instead.
+func TestCF002ManagedRecordDefaultBuildReachesDatabaseStage(t *testing.T) {
+	root := cf002E2ERepoRoot(t)
+	if _, dirty, err := corpus.GitIdentity(root); err != nil {
+		t.Fatal(err)
+	} else if dirty {
+		t.Skip("managed-record acceptance requires a clean worktree")
+	}
+	oldURL, hadURL := os.LookupEnv("DATABASE_URL")
+	_ = os.Unsetenv("DATABASE_URL")
+	defer func() {
+		if hadURL {
+			_ = os.Setenv("DATABASE_URL", oldURL)
+		}
+	}()
+	outDir := filepath.Join(t.TempDir(), "default-build-out")
+	var out, stderr bytes.Buffer
+	code := run([]string{"--mode", "managed-record", "--output-dir", outDir, "--repo", root}, &out, &stderr)
+	if code == 0 {
+		t.Fatal("record without DATABASE_URL reported success")
+	}
+	diag := stderr.String()
+	if !strings.Contains(diag, "requires DATABASE_URL") {
+		t.Fatalf("default build did not reach database stage (build not accepted?): %q", diag)
+	}
+	if strings.Contains(diag, "build instantd from candidate") {
+		t.Fatalf("default candidate build was rejected: %q", diag)
+	}
+	if _, err := os.Stat(outDir); !os.IsNotExist(err) {
+		t.Fatalf("pre-reservation failure produced output at %s", outDir)
+	}
+}
+
+// TestCF002ManagedRecordFailurePreservesVictimUnderReplacement is the
+// deterministic replacement-race regression for the safe failure policy:
+// reserve, pause on an injected publication failure, replace the visible
+// pathname with a victim directory holding a sentinel, release the failure,
+// then prove the victim survives byte-identical, nothing outside the pinned
+// directory is removed, no eligible manifest exists, the incomplete residue
+// is clearly ineligible, and the command exits nonzero.
+func TestCF002ManagedRecordFailurePreservesVictimUnderReplacement(t *testing.T) {
+	if os.Getenv("INSTANT_TEST_INTEGRATION") != "1" || os.Getenv("DATABASE_URL") == "" {
+		t.Skip("integration test: set INSTANT_TEST_INTEGRATION=1 and DATABASE_URL")
+	}
+	root := cf002E2ERepoRoot(t)
+	if _, dirty, err := corpus.GitIdentity(root); err != nil {
+		t.Fatal(err)
+	} else if dirty {
+		t.Skip("managed-record acceptance requires a clean worktree")
+	}
+	base := t.TempDir()
+	outDir := filepath.Join(base, "out")
+	victimDir := filepath.Join(base, "victim")
+	if err := os.Mkdir(victimDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := []byte("victim-sentinel-cf002-race")
+	if err := os.WriteFile(filepath.Join(victimDir, "sentinel.txt"), sentinel, 0600); err != nil {
+		t.Fatal(err)
+	}
+	stash := filepath.Join(base, "stashed-reserved")
+
+	reservedCh := make(chan struct{}, 1)
+	releaseCh := make(chan struct{})
+	oldHook := managedTestHookAfterReserve
+	managedTestHookAfterReserve = func(reserved *corpus.ReservedDir) error {
+		reservedCh <- struct{}{}
+		<-releaseCh
+		return errors.New("injected publication failure")
+	}
+	defer func() { managedTestHookAfterReserve = oldHook }()
+
+	type runResult struct {
+		code   int
+		stdout string
+		stderr string
+	}
+	resultCh := make(chan runResult, 1)
+	go func() {
+		var out, stderr bytes.Buffer
+		code := run([]string{"--mode", "managed-record", "--output-dir", outDir, "--repo", root}, &out, &stderr)
+		resultCh <- runResult{code, out.String(), stderr.String()}
+	}()
+
+	select {
+	case <-reservedCh:
+	case <-time.After(3 * time.Minute):
+		t.Fatal("timed out waiting for output reservation")
+	}
+	// Swap the visible pathname: move the pinned reservation aside, then
+	// move the victim into its place. A path-based cleanup of outDir would
+	// now destroy the victim; the safe policy must leave it untouched.
+	if err := os.Rename(outDir, stash); err != nil {
+		t.Fatalf("stash reserved dir: %v", err)
+	}
+	if err := os.Rename(victimDir, outDir); err != nil {
+		t.Fatalf("replace pathname with victim: %v", err)
+	}
+	close(releaseCh)
+
+	var res runResult
+	select {
+	case res = <-resultCh:
+	case <-time.After(3 * time.Minute):
+		t.Fatal("timed out waiting for managed-record failure")
+	}
+	if res.code == 0 {
+		t.Fatal("injected failure reported success")
+	}
+	if !strings.Contains(res.stderr, "injected publication failure") {
+		t.Fatalf("failure diagnostic unstable: %q", res.stderr)
+	}
+	if strings.Contains(res.stdout, "PASS managed-record") {
+		t.Fatal("failed run printed a pass line")
+	}
+
+	// Victim directory and sentinel survive byte-identical at the visible path.
+	got, err := os.ReadFile(filepath.Join(outDir, "sentinel.txt"))
+	if err != nil {
+		t.Fatalf("victim sentinel missing after failure (deleted?): %v", err)
+	}
+	if !bytes.Equal(got, sentinel) {
+		t.Fatalf("victim sentinel altered: got %q want %q", got, sentinel)
+	}
+	if fi, err := os.Stat(outDir); err != nil || !fi.IsDir() {
+		t.Fatalf("victim directory missing after failure: %v %v", fi, err)
+	}
+	// No eligible manifest exists at the visible (victim) path.
+	if _, err := os.Stat(filepath.Join(outDir, "manifest.json")); !os.IsNotExist(err) {
+		t.Fatal("victim path gained an eligible manifest")
+	}
+	// Incomplete residue (stashed pinned dir) is left in place and clearly
+	// ineligible: it holds no manifest.json.
+	if fi, err := os.Stat(stash); err != nil || !fi.IsDir() {
+		t.Fatalf("pinned residue missing (must be left in place): %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(stash, "manifest.json")); !os.IsNotExist(err) {
+		t.Fatal("incomplete residue holds an eligible manifest")
+	}
+	// Diagnostic carries no credentials or database URL.
+	if dbURL := os.Getenv("DATABASE_URL"); dbURL != "" && strings.Contains(res.stderr, dbURL) {
+		t.Fatal("failure diagnostic leaks DATABASE_URL")
+	}
+	for _, leak := range []string{"postgres://", "postgresql://", "cf002-managed-record-secret"} {
+		if strings.Contains(res.stderr, leak) {
+			t.Fatalf("failure diagnostic leaks %q", leak)
+		}
 	}
 }

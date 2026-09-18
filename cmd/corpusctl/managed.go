@@ -1,8 +1,8 @@
 // Managed local recording entry point (CF-002).
 //
 // `corpusctl --mode managed-record` turns the previously test-only managed
-// lifecycle into a supported runnable recorder. It builds (or verifies) the
-// local instantd binary from the exact candidate, starts it loopback-only
+// lifecycle into a supported runnable recorder. It always builds the local
+// instantd binary from the exact recorded candidate, starts it loopback-only
 // against a newly owned instant_test_* database, derives every identity
 // field locally, resets the owned fixture before each mutating scenario,
 // captures HTTP and SSE evidence with raw+canonical forms, and publishes a
@@ -10,7 +10,12 @@
 // after exit; only owned temporary runtime resources are removed.
 //
 // Acceptance requires a clean Git worktree. Any identity, fixture, capture,
-// or publication failure fails closed without an eligible manifest.
+// or publication failure fails closed without an eligible manifest. The
+// output directory is reserved descriptor-relatively; on failure the pinned
+// reservation is only closed and any private incomplete residue is left in
+// place as untrusted and ineligible. No path-based deletion is performed
+// after reservation, so a concurrently renamed or replaced pathname can
+// never cause deletion outside the pinned directory.
 //
 // Database errors use static messages: connection strings may embed
 // credentials and are never printed, logged, or recorded.
@@ -47,6 +52,12 @@ import (
 // and is set only by in-package tests; the CLI path never enables it, and no
 // flag or environment variable can enable it.
 var managedProbeBypassReset = false
+
+// managedTestHookAfterReserve is a test-only hook run immediately after the
+// output directory is reserved and before any evidence is published. It is
+// nil in production; tests use it to deterministically simulate a pathname
+// replacement race paired with an injected publication failure.
+var managedTestHookAfterReserve func(reserved *corpus.ReservedDir) error
 
 const managedStorageSecret = "cf002-managed-record-secret-not-logged"
 
@@ -115,24 +126,24 @@ func runManagedRecord(o options, out, diagnostic io.Writer) int {
 	}
 
 	var r managedResources
+	// The binary is always built from the clean recorded candidate (--repo).
+	// No override flag exists: accepting a caller-supplied binary would break
+	// the cryptographic binding between the recorded Git SHA and the code
+	// that is actually executed and recorded in the manifest.
 	// Build-artifact cleanup runs last: the binary hash is verified
 	// throughout the lifecycle, so the file must survive until the end.
-	if o.instantdBinary != "" {
-		r.bin = o.instantdBinary
-	} else {
-		tmp, err := os.MkdirTemp("", "cf002-managed-bin-*")
-		if err != nil {
-			return fail(err)
-		}
-		r.buildTmp = tmp
-		r.bin = filepath.Join(tmp, "instantd-managed")
-		cmd := exec.CommandContext(ctx, "go", "build", "-o", r.bin, "./cmd/instantd")
-		cmd.Dir = absRepo
-		if combined, err := cmd.CombinedOutput(); err != nil {
-			_ = os.RemoveAll(tmp)
-			r.buildTmp = ""
-			return fail(fmt.Errorf("build instantd from candidate: %v\n%s", err, combined))
-		}
+	tmp, err := os.MkdirTemp("", "cf002-managed-bin-*")
+	if err != nil {
+		return fail(err)
+	}
+	r.buildTmp = tmp
+	r.bin = filepath.Join(tmp, "instantd-managed")
+	cmd := exec.CommandContext(ctx, "go", "build", "-o", r.bin, "./cmd/instantd")
+	cmd.Dir = absRepo
+	if combined, err := cmd.CombinedOutput(); err != nil {
+		_ = os.RemoveAll(tmp)
+		r.buildTmp = ""
+		return fail(fmt.Errorf("build instantd from candidate: %v\n%s", err, combined))
 	}
 	defer func() {
 		if r.buildTmp != "" {
@@ -394,13 +405,20 @@ func runManagedRecord(o options, out, diagnostic io.Writer) int {
 	if err != nil {
 		return fail(err)
 	}
-	published := false
+	// Safe failure policy: the reservation is pinned by descriptor and
+	// (dev,ino). On failure only close the descriptors and leave any private
+	// incomplete residue in place as untrusted and ineligible. Never delete
+	// through the output pathname after reservation: it may have been
+	// renamed or replaced concurrently, and path-based deletion could
+	// destroy unrelated data. No manifest.json is published on failure.
 	defer func() {
 		_ = reserved.Close()
-		if !published {
-			_ = os.RemoveAll(absOut)
-		}
 	}()
+	if managedTestHookAfterReserve != nil {
+		if err := managedTestHookAfterReserve(reserved); err != nil {
+			return fail(err)
+		}
+	}
 	if fi, err := os.Stat(absOut); err != nil || fi.Mode().Perm() != 0700 {
 		return fail(fmt.Errorf("reserved output directory is not mode 0700"))
 	}
@@ -457,7 +475,6 @@ func runManagedRecord(o options, out, diagnostic io.Writer) int {
 		return fail(fmt.Errorf("daemon log exposes the storage secret"))
 	}
 
-	published = true
 	_, _ = fmt.Fprintf(out, "PASS managed-record %s pid=%d fixture=%s artifacts=%d\n", gitSHA, r.pid, r.ownedDB, len(allFiles)+1)
 	_, _ = fmt.Fprintf(out, "precondition: %s\nfinal: %s\n", results[0].pre, results[0].post)
 	return 0

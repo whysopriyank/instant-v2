@@ -20,7 +20,7 @@ import (
 type options struct {
 	mode, transport, corpusDir, releaseEnvelope, suite, target, other, v1Path, v1Ref, outputDir string
 	endpointID, sourceID, fixtureID                                                             string
-	repo, databaseURL, instantdBinary                                                           string
+	repo, databaseURL                                                                           string
 	recordLimit                                                                                 int
 	redactHeaders                                                                               headerList
 	timeout                                                                                     time.Duration
@@ -70,7 +70,6 @@ func run(args []string, out, diagnostic io.Writer) int {
 	flags.StringVar(&o.outputDir, "output-dir", "", "new private evidence files (required for differential, record, and managed-record)")
 	flags.StringVar(&o.repo, "repo", ".", "repository path for managed-record (candidate SHA and binary build; must be clean)")
 	flags.StringVar(&o.databaseURL, "database-url", "", "admin PostgreSQL URL for managed-record (defaults to DATABASE_URL; never recorded)")
-	flags.StringVar(&o.instantdBinary, "instantd-binary", "", "explicit instantd binary for managed-record (defaults to building from the repository)")
 	flags.StringVar(&endpointIDFlag, "endpoint-id", "", "caller-supplied target endpoint identity for record mode")
 	flags.StringVar(&endpointFlag, "endpoint", "", "alias for --endpoint-id")
 	flags.StringVar(&sourceIDFlag, "source-id", "", "caller-supplied source revision/deployment identity for record mode")
