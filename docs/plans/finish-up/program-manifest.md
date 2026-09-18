@@ -31,7 +31,7 @@ its packet against current source and the latest handoff before changing status.
 | 18 | EV-005 benchmark evidence | 04 | `COMPLETE / ACCEPTED_BOUNDED_BUNDLE` | F-002 artifact policy | focused + reviewer |
 | 19 | EV-006 benchsmoke wiring | 04 | `COMPLETE / HISTORICAL_ENTRYPOINT_ENFORCED` | F-002 harness-entrypoint decision | build + smoke |
 | 20 | CF-001 COPY acceptance | 05 | `COMPLETE / ACCEPTED_POSTGRES_COPY` | F-002, owned PostgreSQL | DB integration |
-| 21 | CF-002 recorder/fixtures | 05 | `PARTIAL / ACCEPTED_BOUNDED_CAPTURE` | F-002 surfaces | integrated capture |
+| 21 | CF-002 recorder/fixtures | 05 | `COMPLETE / ACCEPTED_CANDIDATE_BOUND_LOCAL_CAPTURE` | F-002 surfaces | integrated capture |
 | 22 | CF-003 matrix closure | 05 | `PARTIAL / HTTP_SSE_PERMISSION_MULTICLIENT_TRANSACTION_ROOM_DELTA_ACCEPTED_MATRIX_PENDING` | selected product packets, CF-002 | real-path matrix |
 | 23 | CF-004 pinned-v1 environment | 05 | `BLOCKED / EXTERNAL_EVIDENCE` | F-002, service authority | qualified v1 runtime |
 | 24 | CF-005 differential | 05 | `BLOCKED / EXTERNAL_EVIDENCE` | CF-003/004 | compatibility + independent review |

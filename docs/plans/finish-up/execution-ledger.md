@@ -664,3 +664,112 @@ backup excluded (stable 503); in-memory/fake-S3 tests prove internal failure
 semantics only; no real S3/provider, recovery campaign, Linux/container
 qualification, production or release acceptance claimed. OP-006 remains
 separate. No push, publication, deployment, or tag.
+
+## CF-002 close-out (2026-09-19, HEAD c7f9a42d29a7587a99225236b54bb217f940833b clean + work below, go1.27.1 darwin/arm64, PostgreSQL 17.11)
+
+Baseline: HEAD `c7f9a42d29a7587a99225236b54bb217f940833b` on `main`, clean tree.
+CF-002 `PARTIAL / ACCEPTED_BOUNDED_CAPTURE` per program-manifest. CF-003 must
+not advance here and does not: no matrix, manifest, or coverage file changes.
+No external service is contacted; no push, deployment, publication, or tag.
+
+Six-row evidence mapping (all exit 0):
+
+1. Candidate revision, binary, process, configuration, endpoint identity —
+   PROVEN locally. `internal/corpus/candidate.go` derives Git SHA/dirty
+   (`GitIdentity`, `:54`), binary SHA-256 (`HashFile`, `:71`), loopback
+   binding (`RequireLoopbackEndpoint`, `:110`), process liveness
+   (`VerifyProcessAlive`, `:142`), binary continuity (`VerifyBinaryDigest`,
+   `:163`), revision continuity (`VerifyGitIdentity`, `:176`), and
+   secrets-excluded config digest (`ConfigDigest`, `:90`); `Validate` +
+   `VerifyLive` (`:189,:237`) gate every capture. The managed lifecycle
+   test records `c7f9a42… dirty=true go1.27.1 darwin/arm64`, binary
+   `dbfb93be…`, PID/endpoint/fixture per run, and fails closed on drift
+   (`cmd/corpusctl/managed_lifecycle_test.go:306-393,428,472,564-568`).
+   Hermetic tamper pins: `candidate_test.go` (wrong SHA/binary/endpoint/
+   fixture/app all rejected).
+2. Equivalent isolated bootstrap/reset before every mutating scenario —
+   PROVEN locally. `cf002ResetFixture` deletes the app row (cascading to
+   attrs/triples/idents) and recreates app+token (`:251-270`), runs before
+   every mutating scenario (`:417-419`), with exact precondition
+   (`apps=1 … attrs=0 triples=0 idents=0 rows=[]`, `:424-427`) and exact
+   final state (`attrs=2 triples=2 idents=2` plus literal rows, `:487-490`)
+   per scenario and cross-scenario equality of both (`:525-530`).
+   Observed pre `apps=1 title="cf002-managed" attrs=0 triples=0 idents=0
+   rows=[]`, post `… attrs=2 triples=2 idents=2 rows=[todos/id="<entity>"
+   todos/title="cf002-managed-todo"]`, identical across the reset in both
+   runs. Each run uses a separate owned fixture (`instant_test_4099…`,
+   `instant_test_2232…`).
+3. Raw and canonical capture per selected transport — PROVEN.
+   HTTP+SSE: `TestRecordHTTPSuccessAndRetention`,
+   `TestRecordSSESuccessAndRetention` (raw retained, canonical derived,
+   headers redacted); managed captures assert raw framing plus canonical
+   session masking and double-canonical determinism
+   (`managed_lifecycle_test.go:438-470`). WS recording explicitly
+   unsupported + fail-closed (`cmd/corpusctl/main.go:122-125`) with no
+   output/artifact proven (`TestCF002WSRecordCreatesNoArtifact`). SDK not
+   selected (no frozen-SDK claim in DEC-001); external/v1 owned by
+   CF-004/CF-005 (BLOCKED, unchanged).
+4. Path-scoped masking, payload significant — PROVEN.
+   `TestPayloadApplicationFieldsRemainSignificant` (id/token/timestamp/
+   cursor/email/title at payload paths significant in both modes;
+   frame-root protocol masking retained) plus existing differential-scope
+   and timestamp tests. Live over-broad-`title` probe went red in both
+   modes; reverted source green.
+5. Bounded completion/quiescence, late/error observable — PROVEN.
+   `TestCaptureSSEIncompleteStreamFails`,
+   `TestCaptureSSEQuiescenceDetectsExtraRecord`,
+   `TestRecordFailurePropagation` (no evidence on failure),
+   `TestReplaySSEDoesNotAcceptEOFAfterParentCancellation`,
+   quiescence-boundary tests; managed SSE capture enforces recordLimit=1
+   with hello-shape assertions.
+6. Fresh private redacted atomic write-once candidate-bound output —
+   PROVEN. Fresh 0700 reservation, 0600 files, symlink/TOCTOU rejection,
+   no-replace atomic publication, no-deletion failure semantics
+   (`fs_unix.go`, `http_unix_test.go`, `TestRecordOutputFreshnessAndWriteOnce`);
+   managed run asserts 0700/0600, publishes 4 evidence files + checksummed
+   manifest, verifies (`VerifyCaptureManifest`), and rejects republish
+   (`managed_lifecycle_test.go:405-412,516-562`).
+
+Focused verification:
+
+- `go test -race ./internal/corpus ./cmd/corpusctl -count=1` twice: both
+  `ok` (exit 0). With integration env: 87 PASS, 0 SKIP/FAIL.
+- Managed lifecycle twice under `-race` with integration env, separate
+  owned fixtures: run 1 pid 76643 `:64823` `instant_test_4099…` PASS;
+  run 2 pid 76956 `:64909` `instant_test_2232…` PASS; no skips; HTTP+SSE
+  captures, reset equivalence, manifest/checksum verification each run.
+- WS exclusion: direct `record --transport ws` fails with the stable
+  documented error and creates no output (PASS).
+- Mutation probes red/green: reset-omitted (`CF002_SKIP_RESET=1`) FAILs on
+  s2 precondition showing s1 rows, reverted (env unset); over-broad title
+  mask FAILs both modes, reverted; SHA/binary/endpoint/manifest-tamper and
+  output-reuse rejections green (fail on tamper, pass clean). Zero residue.
+
+Reviews (explicit ACCEPT with file:line citations, artifacts persisted):
+
+- Provenance: ACCEPT, 7 targets falsified.
+  `docs/plans/finish-up/cf002-provenance-review-20260919.md`.
+- Security: ACCEPT, 7 targets falsified.
+  `docs/plans/finish-up/cf002-security-review-20260919.md`.
+
+Added implementation/tests (inside CF-002 write lease only):
+
+- `internal/corpus/candidate.go`: proven-identity + manifest helpers.
+- `internal/corpus/candidate_test.go`: hermetic guards incl. payload
+  significance and manifest-tamper rejection.
+- `cmd/corpusctl/managed_lifecycle_test.go`: managed daemon lifecycle +
+  WS no-artifact proof.
+- `corpus/README.md`: managed-lifecycle paragraph (user-facing claim
+  change only); plain `--mode record` limitation statements preserved.
+- No product-code change (no WS recorder added: recording-level WS support
+  is not selected; WS replay retains raw/canonical via existing evidence
+  paths, and the exclusion is enforced in code, docs, and tests). No
+  production endpoint added for SHA exposure; identity comes from the
+  built binary, process handle, config, and lifecycle.
+
+Status: CF-002 `COMPLETE / ACCEPTED_CANDIDATE_BOUND_LOCAL_CAPTURE`. CF-003
+remains PARTIAL and unchanged; CF-004/CF-005 remain BLOCKED on external
+evidence; all other packets unchanged. Accepted transports for recording:
+HTTP + SSE. WS recording: explicitly excluded + enforced. SDK/v1 capture:
+unclaimed. No remote identity or external fixture equivalence claimed. No
+push, deployment, publication, or tag.

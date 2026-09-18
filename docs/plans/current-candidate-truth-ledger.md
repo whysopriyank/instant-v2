@@ -850,3 +850,36 @@ historical dated sections above and reconciles DA-003 only.
   acceptance, or release acceptance; OP-006 remains separate; DA-001 and all
   other packets unchanged; Phase 03 remains open per canonical dependencies
   (DA-006B/DA-008B BLOCKED). No push, deployment, publication, or tag.
+
+## CF-002 reconciliation (2026-09-19, baseline c7f9a42d29a7587a99225236b54bb217f940833b + work below)
+
+Baseline `c7f9a42` (main, clean) records CF-002
+`PARTIAL / ACCEPTED_BOUNDED_CAPTURE` with caller-asserted record identities.
+This section preserves all historical dated sections above and reconciles
+CF-002 only.
+
+- Status: CF-002 `COMPLETE / ACCEPTED_CANDIDATE_BOUND_LOCAL_CAPTURE`
+  (local candidate/process/endpoint identity proven; fixture reset locally
+  owned and proven; checksum, truncation/quiescence, authorization-adjacent
+  redaction, staging-free publication evidence passed).
+- Rows: (1) identity via `candidate.go:54-237` + lifecycle `:306-393`
+  (git `c7f9a42…`, binary `dbfb93be…`, PIDs 76643/76956, loopback
+  `:64823`/`:64909`, secrets-excluded config digest, go1.27.1
+  darwin/arm64); (2) reset via `:251-270` with exact pre
+  `attrs=0 triples=0` and post `attrs=2 triples=2` equality across runs on
+  `instant_test_4099…`/`instant_test_2232…`; (3) HTTP+SSE raw/canonical
+  retained, WS record excluded+enforced (`main.go:122-125`,
+  `TestCF002WSRecordCreatesNoArtifact`); (4) masking path-scoped, payload
+  id/token/timestamp/cursor/email/title significant; (5) incomplete/extra/
+  error frames fail with no evidence; (6) fresh 0700/0600 write-once
+  no-replace publication with checksummed manifest verification.
+- Reviews: provenance ACCEPT
+  (`docs/plans/finish-up/cf002-provenance-review-20260919.md`); security
+  ACCEPT (`docs/plans/finish-up/cf002-security-review-20260919.md`).
+- Boundary: HTTP + SSE recording accepted; WS recording explicitly
+  excluded and enforced (stable `record mode is unsupported for ws`, no
+  artifact); SDK and v1 capture remain unclaimed; local
+  candidate/process/endpoint identity proven; fixture reset locally owned
+  and proven; no remote deployment identity or external fixture equivalence
+  claimed; CF-003 remains PARTIAL and unchanged; CF-004/CF-005 remain
+  blocked on external evidence. No push, deployment, publication, or tag.

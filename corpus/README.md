@@ -143,13 +143,32 @@ Caller-asserted endpoint ID, source ID, fixture ID, and `fixtureReset=caller-own
 metadata are assertions, not proof of candidate revision, true fixture reset, or
 server state. WebSocket recording, client SDK harness bindings, and external
 endpoint process/lifecycle management remain unsupported. Do not claim full
-candidate binding or real fixture reset proof. Local revision checks do **not**
+candidate binding or real fixture reset proof from plain `--mode record` alone.
+Local revision checks do **not**
 establish which revision a remote endpoint is running. A designated comparison run
 must also record endpoint deployment/configuration, equivalent fixture initialization,
 and accepted-difference rationale externally. Captures are never automatically
 promoted to oracle entries. `v1-capture` metadata requires a full matching ref,
 a nonempty checked-in raw evidence file, and exact canonical agreement with the
 scenario's expected outputs; metadata cannot prove where a capture originated.
+
+### Managed local lifecycle (candidate-bound, CF-002)
+
+`TestCF002ManagedLocalLifecycle` (`cmd/corpusctl/managed_lifecycle_test.go`)
+closes the local half of the gap above without changing CLI semantics: it
+builds the local `instantd` binary from the exact candidate, launches a
+loopback-only daemon against an owned `instant_test_*` fixture, derives Git
+SHA, dirty state, binary SHA-256, PID/executable, loopback endpoint,
+secrets-excluded configuration digest, and Go/OS/arch locally
+(`internal/corpus/candidate.go`), resets the app fixture before every
+mutating scenario with exact precondition/final-state assertions, captures
+HTTP (`/health`) and SSE (`/runtime/sse` hello) through the corpus
+recorders with raw+canonical retention, and publishes a checksummed manifest
+(`VerifyCaptureManifest`) into a fresh 0700 directory with 0600 files. Any
+process, binary, endpoint, revision, configuration, or fixture drift fails
+closed. This proves local candidate/process/endpoint identity and owned
+fixture reset; it does not prove remote deployment identity, v1 provenance,
+SDK parity, or external fixture equivalence.
 
 ### Local readiness inspected 2026-08-31
 
