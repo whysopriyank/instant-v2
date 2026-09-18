@@ -13,7 +13,7 @@ its packet against current source and the latest handoff before changing status.
 | 3 | RT-001 permission rebinding | 02 | `COMPLETE / ACCEPTED_BOUNDED_REBINDING` | F-002 rule policy | integrated + security review |
 | 4 | RT-002 delivery/watermarks | 02 | `COMPLETE / ACCEPTED_DISCONNECT_REPLAY_DELIVERY` | F-002, RT-001 | integrated + reliability review |
 | 5 | RT-003 depth-one recovery | 02 | `COMPLETE / ACCEPTED_HERMETIC_RECOVERY` | F-002 | focused + package |
-| 6 | DA-001 durable storage assembly | 03 | `PARTIAL / LOCAL_REOPEN_ACCEPTED_ENV_PENDING` | F-002 storage profile | integrated + restart |
+| 6 | DA-001 durable storage assembly | 03 | `COMPLETE / ACCEPTED_DURABLE_LOCAL_STORAGE` | F-002 storage profile | integrated + restart |
 | 7 | DA-002 upload integrity | 03 | `COMPLETE / ACCEPTED` | F-002 compatibility policy | focused + DB-backed data review + Sol gate |
 | 8 | DA-003 backup fail-closed | 03 | `PARTIAL / LOCAL_DB_ACCEPTED_EXTERNAL_PENDING` | DA-001 | integrated + data review |
 | 8a | DA-004V dynamic view rules | 03 | `COMPLETE / EXCLUSION_ENFORCED_GATE_ACCEPTED` | F-002 permission policy | DB/runtime + corpus/release-gate evidence |

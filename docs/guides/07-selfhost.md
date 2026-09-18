@@ -35,16 +35,30 @@ lock — safe to run multiple replicas against one DB).
 
 The daemon runs as UID/GID `65532:65532` and validates its storage root at
 startup: the directory must exist (or be creatable), be absolute, and accept
-synced writes, otherwise the daemon refuses to start. Mount a persistent
-volume owned by `65532` and point `INSTANT_V2_STORAGE_ROOT` at it:
+synced writes, otherwise the daemon refuses to start before exposing any
+route. Mount a persistent volume owned by `65532` and point
+`INSTANT_V2_STORAGE_ROOT` at it:
 
 ```sh
 # host path /srv/instant-files owned by 65532:65532
 docker run -v /srv/instant-files:/data:rw -e INSTANT_V2_STORAGE_ROOT=/data …
 ```
 
-Ephemeral container storage loses blobs on restart; object-backup routes stay
-`503` until an S3-compatible store is wired (not selected for the alpha).
+Persistence across daemon restart (DA-001b): stopping the daemon and starting
+a new `instantd` process with the same PostgreSQL database, the same
+`INSTANT_V2_STORAGE_ROOT`, and the same `INSTANT_V2_STORAGE_SECRET` returns
+the exact same objects and metadata. The storage fingerprint (root plus quota
+plus credential posture, never the secret value) is logged at startup and is
+identical across such restarts.
+
+Warning: ephemeral filesystem or container layers lose blobs on restart. A
+container without a mounted persistent volume at `INSTANT_V2_STORAGE_ROOT`
+loses every stored object when the container is replaced, even though the
+database rows survive. Object-backup routes stay a stable explicit `503`
+(`{"message":"no object store wired"}`) for this alpha: no S3-compatible
+store is assembled and no object-backup provider is selected. Native Linux
+qualification remains OP-003 and container qualification remains unselected
+OP-004; container execution itself is outside DA-001.
 | `INSTANT_V2_MAX_SUBS_PER_APP` | 2000 | Live subscription cap per app (0 would mean unlimited) |
 | `INSTANT_V2_MAX_WS_CONNS` | 20000 | Concurrent websocket connection cap |
 | `INSTANT_V2_MAX_SSE_CONNS` | 10000 | Concurrent SSE stream cap |
@@ -113,6 +127,12 @@ curl -H "Authorization: Bearer <admin-token>" http://localhost:8080/backup/<app-
 ```
 
 Restore posts it back. Object storage routes (`PUT /backup/<app-id>/object?key=…`,
-`POST /backup/<app-id>/restore-object?key=…`) activate when an S3-compatible
-store is wired; keys are namespaced under the app id server-side. All backup
-routes require the app's admin token. See `internal/backup` package doc.
+`GET /backup/<app-id>/object?key=…`,
+`POST /backup/<app-id>/restore-object?key=…`) are disabled for this alpha:
+they return the stable explicit `503 {"message":"no object store wired"}`,
+construct no object-store backend, create no staging or final backup object,
+and require no S3 credentials. They activate only when an S3-compatible
+store is wired in a future packet; keys are namespaced under the app id
+server-side. All backup routes require the app's admin token. See
+`internal/backup` package doc. Container or production recovery acceptance
+is not claimed here (OP-004/OP-006 remain separate).

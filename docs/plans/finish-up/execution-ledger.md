@@ -515,3 +515,57 @@ Status: RT-002 `COMPLETE / ACCEPTED_DISCONNECT_REPLAY_DELIVERY`. Phase 02
 `REALTIME_TRUSTWORTHY / COMPLETE` (RT-001 + RT-002 + RT-003 green). RT-001 and
 RT-003 remain complete. No later packet changed. No push, publication,
 deployment, or tag.
+
+## DA-001 close-out (2026-09-18, HEAD 3119c31da0719998de923acd9586956d32d8943f + work below, go1.27.1 darwin/arm64, APFS, PostgreSQL 17.11 wal_level=logical)
+
+Baseline: HEAD `3119c31da0719998de923acd9586956d32d8943f` on `main`, clean tree.
+DA-001 `PARTIAL / LOCAL_REOPEN_ACCEPTED_ENV_PENDING` per program-manifest.
+Envelope selects durable configured local root REQUIRED, temp forbidden,
+object backup excluded with explicit 503 (`docs/reference/release-envelope.md:69,142`).
+
+Product changes (within DA-001 lease only):
+
+- `internal/storageapi/backend.go`: symlink defense via Lstat-first
+  `rejectSymlinkDir` in `confirmAppDir` (fast + EEXIST paths), `Open`
+  (dir + file), and `Delete` (per-key under createMu after security
+  re-review). No temp fallback, no behavior weakening.
+- `internal/config/config_test.go`: `setEnv` isolates ambient DATABASE_URL/
+  OAuth so hermetic config tests pass under integration env (test-only).
+- `internal/storageapi/symlink_escape_test.go`: app-dir symlink refused on
+  Put/Open/Delete with victim survival; file symlink not dereferenced;
+  deterministic file-root and uncreatable-parent refusals (uid-independent).
+- `cmd/instantd/daemon_restart_test.go`: real A/B/C daemon processes, same
+  binary, same PG fixture, same root+secret, new ports, bounded health/stop.
+- `cmd/instantd/daemon_startup_failure_test.go`: missing/relative/
+  uncreatable/file/missing-secret (+chmod unwritable when enforced) all exit
+  nonzero, diagnosable, no listener, no probe residue, no secret in output.
+- `cmd/instantd/daemon_object_disabled_test.go`: all three object routes
+  stable 503, no files delta, no S3 construction, storage + local backup
+  still work.
+- `docs/guides/07-selfhost.md`: persistence across restart, ephemeral
+  warning, stable 503 disablement, OP-003/OP-004 separation; no container or
+  recovery claim.
+
+Evidence (all exit 0, zero skips on selected integration tests):
+
+- Focused twice under -race: config storage-root/fingerprint (4 hermetic),
+  storageapi durability/atomicity/symlink (18), daemon restart/disabled/
+  startup + mount/assembly (all PASS).
+- `INSTANT_TEST_INTEGRATION=1 DATABASE_URL=postgres://priyank@localhost/postgres
+  go test -race ./internal/storageapi ./internal/backup ./internal/config
+  ./cmd/instantd -count=1` PASS (all four packages ok).
+- `go vet` on affected packages exit 0; `go build ./...` exit 0;
+  `gofmt -l` empty; `git diff --check` clean.
+
+Reviews (explicit ACCEPT with file:line citations, artifacts persisted):
+
+- Data-integrity: ACCEPT, 9 targets falsified.
+  `docs/plans/finish-up/da001-data-integrity-review-20260918.md`.
+- Security: initial REJECT on Delete-via-symlinked-dir, repaired, focused
+  re-review ACCEPT. Original finding preserved.
+  `docs/plans/finish-up/da001-security-review-20260918.md`.
+
+Status: DA-001 `COMPLETE / ACCEPTED_DURABLE_LOCAL_STORAGE`. Phase 03 remains
+open (DA-003 and external/deferred rows separately classified). No later
+packet changed. No external provider contact, no push, publication,
+deployment, or tag.
