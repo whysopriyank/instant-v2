@@ -336,6 +336,94 @@ func da001Download(t *testing.T, baseURL, appStr, adminToken, id string) (payloa
 	return got, gresp.Header.Get("Content-Type"), gresp.Header.Get("Content-Length")
 }
 
+// da001FileMeta is the complete persisted $files metadata for one object.
+// Every field is compared explicitly after each distinct process restart;
+// map printing and row order are never used.
+type da001FileMeta struct {
+	Path        string
+	ID          string
+	Size        int64
+	ContentType string
+	LocationID  string
+	KeyVersion  int64
+}
+
+// da001ReadFileMeta queries the owned test fixture directly for the $files
+// triples of one file entity. It fails if any of the six fields is missing,
+// so the caller cannot silently pass when a field is omitted.
+func da001ReadFileMeta(t *testing.T, ctx context.Context, fixture *testkit.Postgres, appID [16]byte, fileID string) da001FileMeta {
+	t.Helper()
+	entity, err := platform.ScanUUIDErr(fileID)
+	if err != nil {
+		t.Fatalf("bad file id %q: %v", fileID, err)
+	}
+	st := storage.New(fixture.Pool)
+	cat, err := platform.LoadAttrCatalog(ctx, fixture.Pool, appID)
+	if err != nil {
+		t.Fatalf("load catalog: %v", err)
+	}
+	rows, err := st.FetchTriples(ctx, appID, storage.FetchFilter{EntityIDs: [][16]byte{entity}})
+	if err != nil {
+		t.Fatalf("fetch $files triples: %v", err)
+	}
+	got := map[string]any{}
+	for _, row := range rows {
+		if a, ok := cat.ByID(row.Triple.A); ok && a.Label != nil {
+			got[*a.Label] = row.Triple.V
+		}
+	}
+	toInt := func(v any) (int64, bool) {
+		switch n := v.(type) {
+		case json.Number:
+			f, err := n.Float64()
+			if err != nil {
+				return 0, false
+			}
+			return int64(f), true
+		case float64:
+			return int64(n), true
+		case int64:
+			return n, true
+		case int:
+			return int64(n), true
+		default:
+			return 0, false
+		}
+	}
+	toStr := func(v any) (string, bool) {
+		s, ok := v.(string)
+		return s, ok
+	}
+	var m da001FileMeta
+	var ok bool
+	if m.Path, ok = toStr(got["path"]); !ok || m.Path == "" {
+		t.Fatalf("$files.path missing for %s: %#v", fileID, got)
+	}
+	if m.ID, ok = toStr(got["id"]); !ok || m.ID == "" {
+		t.Fatalf("$files.id missing for %s: %#v", fileID, got)
+	}
+	if m.Size, ok = toInt(got["size"]); !ok {
+		t.Fatalf("$files.size missing for %s: %#v", fileID, got)
+	}
+	if m.ContentType, ok = toStr(got["content-type"]); !ok || m.ContentType == "" {
+		t.Fatalf("$files.content-type missing for %s: %#v", fileID, got)
+	}
+	if m.LocationID, ok = toStr(got["location-id"]); !ok || m.LocationID == "" {
+		t.Fatalf("$files.location-id missing for %s: %#v", fileID, got)
+	}
+	if m.KeyVersion, ok = toInt(got["key-version"]); !ok {
+		t.Fatalf("$files.key-version missing for %s: %#v", fileID, got)
+	}
+	return m
+}
+
+func da001RequireFileMeta(t *testing.T, want, got da001FileMeta, which string) {
+	t.Helper()
+	if want != got {
+		t.Fatalf("%s $files metadata changed:\nwant %+v\n got %+v", which, want, got)
+	}
+}
+
 func TestDA001DaemonRestartPreservesObjects(t *testing.T) {
 	fixture := testkit.NewPostgres(t, testkit.PostgresOptions{})
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -408,10 +496,19 @@ func TestDA001DaemonRestartPreservesObjects(t *testing.T) {
 	ct1 := "text/plain; charset=utf-8"
 	id1, _ := da001Upload(t, baseA, appStr, adminStr, filename1, payload1, ct1)
 
-	gotA, gotCT1, _ := da001Download(t, baseA, appStr, adminStr, id1)
+	gotA, _, _ := da001Download(t, baseA, appStr, adminStr, id1)
 	if !bytes.Equal(gotA, payload1) {
 		t.Fatal("download via A differs from upload")
 	}
+
+	// Complete persisted $files snapshot for object one. The HTTP download
+	// Content-Type is sniffed from bytes (transfer.go fileGet) and is not
+	// used as proof of the stored content-type below.
+	metaA1 := da001ReadFileMeta(t, ctx, fixture, appID, id1)
+	da001RequireFileMeta(t, da001FileMeta{
+		Path: filename1, ID: id1, Size: int64(len(payload1)),
+		ContentType: ct1, LocationID: id1, KeyVersion: 1,
+	}, metaA1, "object one via A")
 
 	// Bytes must be on the configured root (not a temp fallback).
 	appDir := filepath.Join(root, appStr)
@@ -442,21 +539,27 @@ func TestDA001DaemonRestartPreservesObjects(t *testing.T) {
 	}
 
 	baseB := "http://" + addrB
-	gotB, gotCTB, _ := da001Download(t, baseB, appStr, adminStr, id1)
+	gotB, _, _ := da001Download(t, baseB, appStr, adminStr, id1)
 	if !bytes.Equal(gotB, payload1) {
 		t.Fatal("daemon B returned different bytes for object one")
 	}
-	if gotCTB != gotCT1 {
-		t.Fatalf("content-type changed across restart: A=%q B=%q", gotCT1, gotCTB)
-	}
+	// Exact persisted metadata must survive the A->B process restart.
+	metaB1 := da001ReadFileMeta(t, ctx, fixture, appID, id1)
+	da001RequireFileMeta(t, metaA1, metaB1, "object one A->B")
 
 	// Second object via B proves the reopened root still accepts writes.
 	payload2 := []byte("da001-durable-object-two-" + strings.Repeat("abcdef", 200))
-	id2, _ := da001Upload(t, baseB, appStr, adminStr, "docs/restart-two.txt", payload2, ct1)
+	filename2 := "docs/restart-two.txt"
+	id2, _ := da001Upload(t, baseB, appStr, adminStr, filename2, payload2, ct1)
 	got2B, _, _ := da001Download(t, baseB, appStr, adminStr, id2)
 	if !bytes.Equal(got2B, payload2) {
 		t.Fatal("daemon B second-object round trip differs")
 	}
+	metaB2 := da001ReadFileMeta(t, ctx, fixture, appID, id2)
+	da001RequireFileMeta(t, da001FileMeta{
+		Path: filename2, ID: id2, Size: int64(len(payload2)),
+		ContentType: ct1, LocationID: id2, KeyVersion: 1,
+	}, metaB2, "object two via B")
 
 	// --- daemon C: prove both objects survive a second restart ---
 	da001Stop(t, db)
@@ -476,6 +579,13 @@ func TestDA001DaemonRestartPreservesObjects(t *testing.T) {
 	if !bytes.Equal(got1C, payload1) || !bytes.Equal(got2C, payload2) {
 		t.Fatal("daemon C lost an object across the second restart")
 	}
+	// Both objects' six persisted fields must survive the B->C restart.
+	// Field-by-field struct equality fails if any field is omitted, changed,
+	// or bound to the wrong object (entity-scoped fetch isolates objects).
+	metaC1 := da001ReadFileMeta(t, ctx, fixture, appID, id1)
+	da001RequireFileMeta(t, metaA1, metaC1, "object one A->C")
+	metaC2 := da001ReadFileMeta(t, ctx, fixture, appID, id2)
+	da001RequireFileMeta(t, metaB2, metaC2, "object two B->C")
 	da001Stop(t, dc)
 
 	// Only the isolated fixture database and the test-owned root are

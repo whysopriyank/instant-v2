@@ -762,3 +762,50 @@ same-tx correction pass, reliability review ACCEPT
 remain complete; no later packet changed. Detail in the execution ledger's
 RT-002 close-out section. New candidate SHA recorded at commit time in this
 session's final report.
+
+## DA-001 reconciliation (2026-09-19, baseline d097820183cce7db589037449c0c350b345c8cab + repair below)
+
+Baseline `d097820` (main, clean) already records DA-001
+`COMPLETE / ACCEPTED_DURABLE_LOCAL_STORAGE` in `program-manifest.md` with the
+A/B/C restart, startup-refusal, and 503 evidence plus data-integrity and
+security ACCEPT reviews. This section preserves all historical dated sections
+above and reconciles the remaining verification gap only: persisted `$files`
+metadata is now proven exactly unchanged across the same distinct-process
+restarts (the earlier HTTP download Content-Type comparison sniffed bytes and
+did not read the stored triple).
+
+- Status: DA-001 `COMPLETE / ACCEPTED_DURABLE_LOCAL_STORAGE` (unchanged).
+- Distinct processes: built `instantd` binary; daemon A, B, C share one owned
+  `instant_test_*` PostgreSQL fixture and one test-owned durable root with the
+  same storage secret; new loopback ports per daemon; PIDs distinct and ports
+  confirmed down between restarts
+  (`cmd/instantd/daemon_restart_test.go:339-590`).
+- Exact blobs: object one via A, object one via B, object two via B, both via
+  C — `bytes.Equal` on every leg plus on-disk size under the configured root.
+- Exact six-field metadata: `path`, `id`, `size`, `content-type`,
+  `location-id`, `key-version` read directly from the owned fixture via
+  `platform.LoadAttrCatalog` + `storage.FetchTriples` for the file entity
+  (`:354-425`); object one validated via A (`:507-511`), A→B equality
+  (`:547-548`), object two validated via B (`:558-562`), A→C and B→C equality
+  (`:585-588`). Label-keyed extraction (no map printing/row order) fails if
+  any field is omitted; struct equality fails if any field is changed or bound
+  to the wrong object.
+- Startup refusal: missing/relative/uncreatable/file/missing-secret (+chmod
+  unwritable when enforced) exit nonzero with diagnosable errors, no listener,
+  no probe residue, no secret in output.
+- Stable object-backup 503: `PUT/GET /backup/{app}/object` and
+  `POST /restore-object` return `503 {"message":"no object store wired"}`,
+  create no files, assemble no backend, need no S3 credentials; ordinary
+  storage and local backup export still work.
+- Reviews: data-integrity ACCEPT including the exact-metadata addendum
+  (`docs/plans/finish-up/da001-data-integrity-review-20260918.md`); security
+  ACCEPT after the Delete symlink repair and re-review
+  (`docs/plans/finish-up/da001-security-review-20260918.md`).
+- Selected alpha profile: durable configured local disk root REQUIRED;
+  temporary production storage forbidden; object backup excluded (explicit
+  503); no cloud provider, S3 deployment, or migration assembled.
+- No claim is made for Linux qualification (OP-003 separate), container
+  qualification or execution (OP-004 separate), container/production recovery
+  (OP-006 separate), real providers, recovery campaigns, production use, or
+  release acceptance. DA-003 and all later packets are unchanged. No push,
+  deployment, publication, or tag.

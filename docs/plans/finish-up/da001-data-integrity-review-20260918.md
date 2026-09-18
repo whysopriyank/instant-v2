@@ -54,3 +54,41 @@ as a data-loss, durability, or escape violation):
 Docs (`docs/guides/07-selfhost.md`) accurately describe required root,
 persistence across restart, ephemeral warning, stable 503 disablement, and
 OP-003/OP-004 separation with no overclaim.
+
+## Addendum — 2026-09-19 exact $files metadata across restarts
+
+The earlier review's row 1 cited the HTTP download `Content-Type` response
+comparison (`daemon_restart_test.go` A-vs-B header equality) as corroborating
+metadata survival. That comparison did not independently prove stored
+metadata: `fileGet` derives the download `Content-Type` by sniffing object
+bytes (`internal/storageapi/transfer.go:169-189`), not by reading the
+persisted `$files` `content-type` triple. The earlier ACCEPT evidence for
+bytes, startup refusal, 503 disablement, fingerprinting, and cleanup stands;
+this addendum closes only the stored-metadata gap.
+
+New assertion (`cmd/instantd/daemon_restart_test.go`):
+
+- `da001FileMeta` (`:342-349`) captures all six persisted fields: `Path`,
+  `ID`, `Size`, `ContentType`, `LocationID`, `KeyVersion`.
+- `da001ReadFileMeta` (`:354-418`) queries the owned test fixture directly
+  (`platform.LoadAttrCatalog` + `storage.FetchTriples` for the file entity),
+  maps label→value without relying on map printing or row order, normalizes
+  `json.Number` numerics, and fails if any of the six fields is missing.
+- `da001RequireFileMeta` (`:420-425`) uses field-by-field struct equality, so
+  an omitted, changed, or wrong-object field fails.
+- Object one via A validates all six against upload expectations
+  (`:507-511`: path `docs/restart-one.txt`, id, size, content-type
+  `text/plain; charset=utf-8`, location-id, key-version 1).
+- Object one A→B asserts exact equality after a distinct process restart
+  (`:547-548`); exact blob bytes retained alongside.
+- Object two via B validates all six (`:558-562`).
+- Objects one A→C and two B→C assert exact equality after the second
+  distinct restart (`:585-588`); exact-byte comparisons retained.
+- Entity-scoped fetch isolates objects, so cross-object association fails.
+
+Focused evidence: `TestDA001DaemonRestartPreservesObjects` passes twice
+under `-race` with the owned database (zero skips). The HTTP download
+`Content-Type` header is no longer asserted as metadata proof.
+
+Verdict: **ACCEPT** — all six `$files` fields are proven exactly unchanged
+across distinct daemon A/B/C restarts, alongside exact blob bytes.
