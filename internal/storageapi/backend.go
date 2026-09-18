@@ -162,6 +162,11 @@ func (d *DiskBackend) PresignDownload(key string, ttl time.Duration) (string, er
 // Concurrent first uploads serialize here: no Put proceeds past a
 // directory whose root sync is unconfirmed, and a failed confirmation
 // removes the entry so the next contender re-initializes from scratch.
+//
+// Symlink defense (DA-001d): an app directory that resolves through a
+// symlink is rejected. os.Stat follows links, so the check uses Lstat
+// first — otherwise a planted root/<app-id> -> /outside link would let
+// later writes escape the configured root.
 func (d *DiskBackend) confirmAppDir(appDir string) error {
 	d.createMu.Lock()
 	defer d.createMu.Unlock()
@@ -170,6 +175,9 @@ func (d *DiskBackend) confirmAppDir(appDir string) error {
 			return err
 		}
 		delete(d.unconfirmed, appDir)
+	}
+	if err := rejectSymlinkDir(appDir); err != nil {
+		return err
 	}
 	if st, serr := os.Stat(appDir); serr == nil {
 		if st.IsDir() {
@@ -184,6 +192,10 @@ func (d *DiskBackend) confirmAppDir(appDir string) error {
 			// An external actor created it concurrently; without a
 			// confirmed sync of our own, re-stat to at least confirm
 			// it is a directory, then trust the volume (as before).
+			// A racing symlink plant is still rejected here.
+			if err := rejectSymlinkDir(appDir); err != nil {
+				return err
+			}
 			if st, serr := os.Stat(appDir); serr != nil {
 				return serr
 			} else if !st.IsDir() {
@@ -302,6 +314,14 @@ func (d *DiskBackend) Open(key string) (*Object, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Symlink defense: Open follows links, so a planted file symlink
+	// pointing outside the root must not be dereferenced.
+	if err := rejectSymlinkDir(filepath.Dir(p)); err != nil {
+		return nil, err
+	}
+	if fi, lerr := os.Lstat(p); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("storageapi: %q is a symlink", p)
+	}
 	f, err := os.Open(p)
 	if err != nil {
 		return nil, err
@@ -314,11 +334,38 @@ func (d *DiskBackend) Open(key string) (*Object, error) {
 	return &Object{Body: f, Size: st.Size()}, nil
 }
 
+// rejectSymlinkDir rejects an existing app directory that is a symlink.
+// Missing paths return nil so first-use creation can proceed; any other
+// Lstat error is surfaced. Callers hold createMu where races matter.
+func rejectSymlinkDir(appDir string) error {
+	fi, err := os.Lstat(appDir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("storageapi: %q is a symlink", appDir)
+	}
+	return nil
+}
+
 func (d *DiskBackend) Delete(keys []string) error {
+	d.createMu.Lock()
+	defer d.createMu.Unlock()
 	var errs []error
 	for _, key := range keys {
 		_, _, p, err := d.file(key)
 		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		// Symlink defense (DA-001d): a planted root/<app-id> symlink must
+		// not direct Remove outside the root. Lstat the parent before
+		// removing; a symlinked file target itself is safe to unlink
+		// (removes the link), but a symlinked parent dir is refused.
+		if err := rejectSymlinkDir(filepath.Dir(p)); err != nil {
 			errs = append(errs, err)
 			continue
 		}

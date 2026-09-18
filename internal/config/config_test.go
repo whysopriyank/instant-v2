@@ -9,6 +9,28 @@ import (
 
 func setEnv(t *testing.T, kv map[string]string) {
 	t.Helper()
+	// Isolate ambient DATABASE_URL/OAuth: hermetic config tests must not
+	// inherit the integration DATABASE_URL from the outer environment,
+	// otherwise Load() requires OAuth credentials the test never set
+	// (stabilization caveat). Unless the caller explicitly sets these
+	// keys, unset them for the test duration.
+	for _, k := range []string{
+		"DATABASE_URL",
+		"INSTANT_OAUTH_GOOGLE_CLIENT_ID", "INSTANT_OAUTH_GOOGLE_CLIENT_SECRET",
+		"INSTANT_OAUTH_GITHUB_CLIENT_ID", "INSTANT_OAUTH_GITHUB_CLIENT_SECRET",
+	} {
+		if _, ok := kv[k]; !ok {
+			if old, had := os.LookupEnv(k); had {
+				_ = os.Unsetenv(k)
+				old, had := old, had
+				t.Cleanup(func() {
+					if had {
+						_ = os.Setenv(k, old)
+					}
+				})
+			}
+		}
+	}
 	for k, v := range kv {
 		old, had := os.LookupEnv(k)
 		if v == "" {
