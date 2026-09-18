@@ -290,6 +290,7 @@ func (m *Manager) detachMember(sess *Session, id string) {
 		return
 	}
 	g.mu.Lock()
+	_, existed := g.members[sess]
 	delete(g.members, sess)
 	empty := len(g.members) == 0
 	g.mu.Unlock()
@@ -297,7 +298,7 @@ func (m *Manager) detachMember(sess *Session, id string) {
 	sess.mu.Lock()
 	delete(sess.Subs, id)
 	sess.mu.Unlock()
-	if m.appMembers[sess.AppID] > 0 {
+	if existed && m.appMembers[sess.AppID] > 0 {
 		m.appMembers[sess.AppID]--
 	}
 	if empty {

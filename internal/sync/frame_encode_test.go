@@ -20,6 +20,9 @@ func TestFrameEncodeParity(t *testing.T) {
 			"z-last":  json.RawMessage(`"sorts last"`),
 			"a-first": json.RawMessage(`"sorts first"`),
 		},
+		// RT-002 review: nil RawMessage must match stdlib, which emits
+		// literal null (json.Marshal of nil RawMessage → null).
+		{"nullable": json.RawMessage(nil)},
 	}
 	for i, f := range cases {
 		want, err := json.Marshal(map[string]json.RawMessage(f))

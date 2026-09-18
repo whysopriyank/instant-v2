@@ -55,16 +55,23 @@ func ParseFrame(b []byte) (Frame, error) {
 // order as stdlib, so output is byte-identical for all frames this package
 // builds (asserted by TestFrameEncodeParity).
 //
-// RT-002b/RT-002e: values are validated with json.Valid so an invalid or
-// unencodable payload fails here — matching stdlib's Marshal error on bad
-// RawMessage — instead of emitting invalid or empty bytes to the wire.
-// Callers treat any error as a failed generation: nothing is sent, nothing
-// is committed, and the same transaction is retried.
+// RT-002b/RT-002e: non-nil values are validated with json.Valid so an
+// invalid or unencodable payload fails here — matching stdlib's Marshal
+// error on bad RawMessage — instead of emitting invalid or empty bytes to
+// the wire. A nil RawMessage emits literal null, matching stdlib parity
+// (RawMessage.MarshalJSON special-cases nil). Callers treat any error as a
+// failed generation: nothing is sent, nothing is committed, and the same
+// transaction is retried.
 func (f Frame) Encode() ([]byte, error) {
 	if f == nil {
 		return []byte("null"), nil
 	}
 	for k, v := range f {
+		if v == nil {
+			// Stdlib parity: json.Marshal emits literal null for a nil
+			// RawMessage (RawMessage.MarshalJSON special-cases nil).
+			continue
+		}
 		if !json.Valid(v) {
 			return nil, fmt.Errorf("frame: invalid JSON value for key %q", k)
 		}
@@ -84,7 +91,11 @@ func (f Frame) Encode() ([]byte, error) {
 		}
 		buf = appendJSONKey(buf, k)
 		buf = append(buf, ':')
-		buf = append(buf, f[k]...)
+		if v := f[k]; v == nil {
+			buf = append(buf, "null"...)
+		} else {
+			buf = append(buf, v...)
+		}
 	}
 	return append(buf, '}'), nil
 }
