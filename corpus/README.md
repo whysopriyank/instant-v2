@@ -156,7 +156,8 @@ scenario's expected outputs; metadata cannot prove where a capture originated.
 
 The supported runnable recorder is `corpusctl --mode managed-record` (see
 `cmd/corpusctl/README.md`). It builds the local `instantd` binary from the
-exact candidate (clean worktree required), launches a loopback-only daemon
+exact candidate (clean worktree required), with no caller-supplied binary
+override, and launches a loopback-only daemon
 against a newly owned `instant_test_*` fixture, derives Git SHA, dirty
 state, binary SHA-256, PID/executable, loopback endpoint, secrets-excluded
 configuration digest, and Go/OS/arch locally
@@ -167,6 +168,10 @@ the corpus recorders with raw+canonical retention, and publishes a
 checksummed manifest (`VerifyCaptureManifest`) into the caller's fresh 0700
 directory with 0600 files. Any process, binary, endpoint, revision,
 configuration, or fixture drift fails closed with no eligible manifest.
+Pre-reservation failures create no output. Post-reservation failures close only
+the descriptor-pinned reservation and may leave private incomplete residue as
+untrusted and ineligible; cleanup never deletes through the replaceable output
+pathname.
 `TestCF002ManagedRecordEndToEnd` drives this same production entry point.
 This proves local candidate/process/endpoint identity and owned fixture
 reset; it does not prove remote deployment identity, v1 provenance, SDK

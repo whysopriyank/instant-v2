@@ -897,3 +897,25 @@ databases dropped. Provenance and security re-reviews both ACCEPT with
 corrective addenda acknowledging the earlier test-only scope. CF-002 stays
 `COMPLETE / ACCEPTED_CANDIDATE_BOUND_LOCAL_CAPTURE`; CF-003/004/005
 unchanged. No push, deployment, publication, or tag.
+
+## CF-002 binding/cleanup corrective note (2026-09-19, implementation 5b7d30b8)
+
+The runnable-recorder note above is historically accurate for intermediate
+`92e3a64` but its binary override and pathname failure cleanup are superseded.
+Implementation `5b7d30b8be1a2e3bf018b0057276ecbb6510cfcf` removes
+`--instantd-binary`; managed recording now always builds `./cmd/instantd` from
+the clean candidate at `--repo`. A healthy-but-different compatible shim is
+rejected at argument parsing before capture or output creation, and the default
+candidate build is independently pinned.
+
+The same implementation removes post-reservation `os.RemoveAll(absOut)`.
+Pre-reservation failures create no output; post-reservation failures close only
+the descriptor-pinned reservation and leave any private incomplete residue
+untrusted/ineligible. A deterministic rename-and-replace regression proves the
+replacement victim survives and no eligible manifest is published.
+
+Corrective provenance and security re-reviews both return fresh **ACCEPT**.
+CF-002 remains `COMPLETE / ACCEPTED_CANDIDATE_BOUND_LOCAL_CAPTURE` with local
+HTTP+SSE scope only. Plain record remains caller-asserted. CF-003 remains
+PARTIAL and unchanged; CF-004/CF-005 remain BLOCKED and unchanged. No remote,
+SDK, v1, external-fixture, push, deployment, publication, or tag claim is made.

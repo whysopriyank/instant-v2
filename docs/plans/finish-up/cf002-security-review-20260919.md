@@ -163,3 +163,32 @@ Re-verified against the runnable path:
 Verdict: **ACCEPT** (re-review). The runnable recorder preserves the
 private write-once posture with no secret leakage, no unsafe cleanup, and
 no eligible evidence on failure.
+
+## Corrective addendum — post-reservation cleanup race (2026-09-19, implementation 5b7d30b8)
+
+The runnable-recorder ACCEPT above missed an unsafe-cleanup gap. Its failure
+defer called `os.RemoveAll(absOut)` after descriptor-relative reservation. A
+concurrent actor could rename the pinned directory and replace the visible
+pathname, causing failure cleanup to delete unrelated replacement contents.
+The earlier finding and verdict are preserved as history, but the claim that
+managed failure cleanup was safe was incorrect.
+
+Repair and falsification:
+
+- Policy A (before reservation): validation, candidate build, database setup,
+  and capture are buffered in memory. A failure creates no output path.
+- Policy B (after reservation): cleanup closes only `ReservedDir`; it never
+  removes through `absOut`. Failed publication has no eligible manifest, while
+  private incomplete residue may remain explicitly untrusted and ineligible.
+  This matches the lower-level no-ambiguous-deletion publication policy.
+- `TestCF002ManagedRecordFailurePreservesVictimUnderReplacement` pauses after
+  reservation, renames the pinned directory aside, replaces the visible output
+  pathname with a victim directory containing a sentinel, and injects failure.
+  It proves nonzero exit, byte-identical victim survival, no eligible manifest
+  at either path, and ineligible residue preservation in the pinned directory.
+  The regression would fail under the removed `os.RemoveAll(absOut)` behavior.
+
+Fresh verdict: **ACCEPT**. Pathname-based post-reservation deletion is removed;
+the Policy A/B boundary and deterministic replacement-race regression repair
+the unsafe-cleanup defect. Private residue is not eligible evidence, and no
+secret, remote, publication, or external-fixture claim is broadened.

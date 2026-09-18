@@ -821,3 +821,31 @@ Docs: `cmd/corpusctl/README.md` (managed-record contract + example),
 `corpus/README.md` (runnable recorder replaces the test-only claim; plain
 record stays caller-asserted). CF-003 not started; CF-004/CF-005 unchanged.
 No push, deployment, publication, or tag.
+
+## CF-002 binding/cleanup corrective reconciliation (2026-09-19, implementation 5b7d30b8 + documentation follow-up)
+
+The runnable-recorder follow-up above is preserved as history, including the
+now-removed `--instantd-binary` flag and its unsafe claim that failed runs remove
+the freshly reserved output directory. Two defects were repaired in
+implementation commit `5b7d30b8be1a2e3bf018b0057276ecbb6510cfcf`:
+
+- Candidate binding: the binary override flag and field are gone. Managed mode
+  always builds `./cmd/instantd` from the clean `--repo`. A healthy-but-different
+  compatible shim is proven healthy, yet the removed flag is rejected before
+  build/capture/output reservation; the default path is proven to build and
+  proceed to the database prerequisite.
+- Safe cleanup: post-reservation `os.RemoveAll(absOut)` is gone. Policy A keeps
+  all pre-reservation capture in memory, so early failure creates no output.
+  Policy B closes only the pinned reservation after reservation and leaves any
+  private incomplete residue untrusted/ineligible. The deterministic pathname-
+  replacement regression proves a replacement victim and sentinel survive
+  byte-identical while no eligible manifest appears.
+
+The CLI help was re-inspected: managed mode exposes `--repo`, `--database-url`,
+`--output-dir`, and `--timeout`, and does not expose `--instantd-binary`.
+Corrective provenance and security addenda each return fresh **ACCEPT** verdicts.
+Status remains CF-002 `COMPLETE / ACCEPTED_CANDIDATE_BOUND_LOCAL_CAPTURE`.
+CF-003 remains `PARTIAL / HTTP_SSE_PERMISSION_MULTICLIENT_TRANSACTION_ROOM_DELTA_ACCEPTED_MATRIX_PENDING`;
+CF-004 and CF-005 remain `BLOCKED / EXTERNAL_EVIDENCE`. No CF-003/004/005
+implementation, manifest, coverage, or status changed. No push, deployment,
+publication, or tag.

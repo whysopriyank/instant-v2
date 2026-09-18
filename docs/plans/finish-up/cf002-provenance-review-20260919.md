@@ -166,3 +166,34 @@ Verdict: **ACCEPT** (re-review). The runnable recorder provides persistent
 candidate-bound evidence with the same guarantees the test-only lifecycle
 proved. No remote identity, v1 provenance, SDK parity, or external fixture
 equivalence is claimed.
+
+## Corrective addendum — candidate-binary binding (2026-09-19, implementation 5b7d30b8)
+
+The runnable-recorder ACCEPT above missed a provenance gap: the then-supported
+`--instantd-binary` override allowed a healthy, protocol-compatible binary that
+was not built from the recorded Git candidate to be executed while the manifest
+still named that candidate. Hashing the supplied binary did not establish its
+source revision. The earlier finding and verdict are preserved as history, but
+that reasoning was insufficient.
+
+Repair and falsification:
+
+- `--instantd-binary` and its options field were removed. Managed recording now
+  unconditionally runs `go build -o <owned-temp>/instantd-managed ./cmd/instantd`
+  with `cmd.Dir` set to the clean `--repo`, then hashes and continuously verifies
+  that built binary. There is no alternate executable-selection path.
+- `TestCF002ManagedRecordRejectsInstantdBinaryOverride` first starts a
+  healthy-but-different shim and proves both `/health` and SSE `init-ok` work,
+  then supplies the removed flag. Parsing rejects it before build, output
+  reservation, capture, or manifest publication. This is stronger than an
+  unhealthy `/bin/echo` probe: protocol compatibility cannot bypass candidate
+  binding.
+- `TestCF002ManagedRecordDefaultBuildReachesDatabaseStage` proves the no-override
+  path successfully builds the candidate and reaches the later database
+  prerequisite check. The focused managed suite exercises the complete build,
+  launch, capture, and identity lifecycle.
+
+Fresh verdict: **ACCEPT**. The stale-compatible-binary gap is repaired by
+removing executable injection and always building from the clean recorded
+candidate. Plain `--mode record` remains caller-asserted; no remote, SDK, v1, or
+external-fixture provenance is claimed.

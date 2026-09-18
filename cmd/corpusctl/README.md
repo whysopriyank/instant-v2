@@ -47,8 +47,8 @@ from plain record mode.
 ## Managed local recording (candidate-bound)
 
 `--mode managed-record` is the supported runnable local recorder. It builds
-(or verifies via `--instantd-binary`) the instantd binary from the exact
-candidate at `--repo` (default `.`, must be a clean worktree), starts it on
+the instantd binary from the exact candidate at `--repo` (default `.`, must
+be a clean worktree); there is no caller-supplied binary override. It starts it on
 loopback against a newly owned `instant_test_*` database (via `DATABASE_URL`
 or `--database-url`, never recorded), derives PID/executable/endpoint/
 configuration-digest/fixture identities locally, resets the owned fixture
@@ -64,4 +64,8 @@ go run ./cmd/corpusctl --mode managed-record --output-dir /tmp/cf002run1
 Evidence persists after exit; the daemon is stopped and only owned temporary
 resources (owned database, storage root, build/log dirs) are removed. Any
 identity, fixture, capture, or publication failure exits nonzero without an
-eligible manifest. The managed path never records WebSocket frames.
+eligible manifest. Failures before output reservation create no output. After
+reservation, failure cleanup closes only the descriptor-pinned reservation and
+may leave private incomplete residue in place as untrusted and ineligible; it
+never deletes through the output pathname, which may have been concurrently
+replaced. The managed path never records WebSocket frames.
