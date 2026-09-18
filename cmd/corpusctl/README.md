@@ -36,8 +36,32 @@ failure. Only a successful return makes an artifact eligible evidence. Non-Unix
 platforms fail closed as unsupported.
 
 Limitations: Caller-supplied endpoint ID, source ID, fixture ID, and
-`fixtureReset=caller-owned` metadata are unverified caller assertions, not proof
-of candidate revision, true fixture reset, or server state. `corpusctl` does not
+`fixtureReset=caller-owned` metadata in plain `--mode record` are unverified
+caller assertions, not proof
+of candidate revision, true fixture reset, or server state. `corpusctl record` does not
 provision, verify, or reset external fixtures. WebSocket recording, client SDK
 harness bindings, and external endpoint process/lifecycle management remain
-unsupported. Do not claim full candidate binding or real fixture reset proof.
+unsupported. Do not claim full candidate binding or real fixture reset proof
+from plain record mode.
+
+## Managed local recording (candidate-bound)
+
+`--mode managed-record` is the supported runnable local recorder. It builds
+(or verifies via `--instantd-binary`) the instantd binary from the exact
+candidate at `--repo` (default `.`, must be a clean worktree), starts it on
+loopback against a newly owned `instant_test_*` database (via `DATABASE_URL`
+or `--database-url`, never recorded), derives PID/executable/endpoint/
+configuration-digest/fixture identities locally, resets the owned fixture
+before each of two mutating scenarios with exact precondition/final-state
+assertions, captures HTTP (`/health`) and SSE (`/runtime/sse`) raw plus
+canonical evidence, and publishes a checksummed `manifest.json` into the
+caller's fresh `--output-dir` (must be outside the repository). Example:
+
+```sh
+go run ./cmd/corpusctl --mode managed-record --output-dir /tmp/cf002run1
+```
+
+Evidence persists after exit; the daemon is stopped and only owned temporary
+resources (owned database, storage root, build/log dirs) are removed. Any
+identity, fixture, capture, or publication failure exits nonzero without an
+eligible manifest. The managed path never records WebSocket frames.

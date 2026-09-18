@@ -773,3 +773,51 @@ evidence; all other packets unchanged. Accepted transports for recording:
 HTTP + SSE. WS recording: explicitly excluded + enforced. SDK/v1 capture:
 unclaimed. No remote identity or external fixture equivalence claimed. No
 push, deployment, publication, or tag.
+
+## CF-002 runnable-recorder follow-up (2026-09-19, intermediate 92e3a64 clean + work below, go1.27.1 darwin/arm64, PostgreSQL 17.11)
+
+The prior close-out proved a test-only lifecycle. This follow-up extracts it
+into the supported entry point `corpusctl --mode managed-record`
+(`cmd/corpusctl/managed.go`, flags `--repo/--database-url/--instantd-binary/--output-dir/--timeout`,
+visible in `--help`) without changing instantd product behavior. The
+previous `TestCF002ManagedLocalLifecycle` became `TestCF002ManagedRecordEndToEnd`,
+an end-to-end of the same production code path; orchestration was deleted
+from the test file. HTTP+SSE stay selected; WS recording stays excluded.
+
+Direct CLI evidence from clean `92e3a64`
+(`go run ./cmd/corpusctl --mode managed-record --output-dir <fresh dir>`,
+run 1 → `/private/tmp/cf002run1`, run 2 → `/private/tmp/cf002run2`):
+
+- Run 1: pid 98966 `:51496` fixture `instant_test_4d64ba…`, PASS.
+- Run 2: pid 99253 `:51584` fixture `instant_test_acb587…`, PASS.
+- Both manifests: `gitSha 92e3a64`, `dirty false`, 64-hex binary SHA-256
+  and config digest, PID, loopback endpoint, go1.27.1 darwin/arm64,
+  `instant_test_*` fixture + app; identical pre (`attrs=0 triples=0`) and
+  literal post (`attrs=2 triples=2` with exact rows) across the reset;
+  4 artifacts + manifest, every SHA-256/size recomputed matching,
+  0700/0600 modes, no secret or database URL in manifests; evidence
+  readable after exit; daemons stopped (connection refused); owned
+  databases dropped; reuse exits 1 (`already exists`) with the first
+  manifest byte-identical (`d4f54400…`).
+
+Failure probes (red preserved, zero residue): dirty worktree rejected
+before any work with no output; `/bin/echo` as binary → `never became
+healthy`, no output; missing DATABASE_URL → immediate usage failure;
+omitted reset through the production path → precondition red, no manifest;
+symlinked output → rejected with empty target; tampered copy (zeroed SHA,
+lied checksum) detected on both fields; over-broad masking and
+incomplete-SSE/quiescence legs green via the unit battery. Scratch
+validation repos and tamper copies removed.
+
+Re-reviews (corrective addenda appended 2026-09-19, each acknowledging the
+earlier ACCEPT was test-only):
+
+- Provenance re-review: ACCEPT —
+  `docs/plans/finish-up/cf002-provenance-review-20260919.md`.
+- Security re-review: ACCEPT —
+  `docs/plans/finish-up/cf002-security-review-20260919.md`.
+
+Docs: `cmd/corpusctl/README.md` (managed-record contract + example),
+`corpus/README.md` (runnable recorder replaces the test-only claim; plain
+record stays caller-asserted). CF-003 not started; CF-004/CF-005 unchanged.
+No push, deployment, publication, or tag.

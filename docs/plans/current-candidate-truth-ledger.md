@@ -883,3 +883,17 @@ CF-002 only.
   and proven; no remote deployment identity or external fixture equivalence
   claimed; CF-003 remains PARTIAL and unchanged; CF-004/CF-005 remain
   blocked on external evidence. No push, deployment, publication, or tag.
+
+## CF-002 runnable-recorder note (2026-09-19, intermediate 92e3a64)
+
+The test-only lifecycle is superseded by the supported runnable recorder
+`corpusctl --mode managed-record` (`cmd/corpusctl/managed.go`). Two direct
+CLI runs from clean `92e3a64` into `/private/tmp/cf002run1` and
+`/private/tmp/cf002run2` record `gitSha 92e3a64`, `dirty false`, verified
+binary hashes, PIDs 98966/99253 on loopback `:51496`/`:51584`, owned
+fixtures `instant_test_4d64ba…`/`instant_test_acb587…`, identical reset
+pre/post states, and fully validating manifests; daemons stopped and owned
+databases dropped. Provenance and security re-reviews both ACCEPT with
+corrective addenda acknowledging the earlier test-only scope. CF-002 stays
+`COMPLETE / ACCEPTED_CANDIDATE_BOUND_LOCAL_CAPTURE`; CF-003/004/005
+unchanged. No push, deployment, publication, or tag.

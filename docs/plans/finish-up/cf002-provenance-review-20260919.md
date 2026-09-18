@@ -118,3 +118,51 @@ the masking probe initially stayed green because of it; added the `title`
 pair to `TestPayloadApplicationFieldsRemainSignificant` (test-only, green).
 No production-code repair was needed. Re-review of the four new/affected
 tests confirms each fails when its guard is removed (probes above).
+
+## Addendum — runnable recorder re-review (2026-09-19, intermediate 92e3a64)
+
+The ACCEPT above covered a test-only lifecycle: orchestration lived in
+`cmd/corpusctl/managed_lifecycle_test.go` and no runnable recorder existed.
+This addendum re-reviews the extracted production entry point
+`cmd/corpusctl/managed.go` (`corpusctl --mode managed-record`, wired in
+`cmd/corpusctl/main.go`) and two direct CLI runs from the clean intermediate
+SHA. Prior sections stand; only the new path is re-verified below.
+
+Re-verified against the runnable path:
+
+- Direct CLI, persistent evidence: `go run ./cmd/corpusctl --mode
+  managed-record --output-dir /private/tmp/cf002run1` and `.../cf002run2`
+  from `92e3a64` both exit 0 with `PASS managed-record 92e3a64…`
+  (pids 98966/99253, fixtures `instant_test_4d64ba…`/`instant_test_acb587…`,
+  endpoints `127.0.0.1:51496`/`:51584`). Evidence (4 files + manifest)
+  remains readable after exit with 0700/0600 modes; both daemons confirmed
+  stopped (connection refused); both owned databases dropped (absent from
+  `pg_database`); no repository residue.
+- Candidate binding: both manifests record `gitSha 92e3a64`,
+  `gitDirty false`, 64-hex binary SHA-256 and config digest, PID, loopback
+  endpoint, `go1.27.1 darwin/arm64`, and `instant_test_*` fixture DB + app.
+  The CLI requires a clean worktree before any build/daemon/fixture work
+  (`managed.go`: dirty check precedes all side effects), derives the SHA
+  itself, and re-verifies git/binary/process before, during, and after
+  capture. A dirty scratch repo is rejected with `clean Git worktree`
+  and no output (`TestCF002ManagedRecordRequiresCleanTree`); a wrong-SHA
+  manifest copy is detected by the SHA-equality check the e2e asserts.
+- Reset equivalence: both runs show identical pre
+  (`attrs=0 triples=0`) and identical literal post (`attrs=2 triples=2`
+  with exact rows) across the inter-scenario reset; the omission probe
+  through the production entry point goes red with no manifest
+  (`TestCF002ManagedRecordSkipResetFails`).
+- Manifest checksums: every artifact hash/size recomputed and matching in
+  both runs; tampered copy (zeroed SHA, lied checksum) detected on both
+  fields; reuse of an output dir exits 1 (`already exists`) with the first
+  manifest byte-identical (`d4f54400…` before and after).
+- Transports unchanged: HTTP+SSE captured raw+canonical (base64 envelope
+  decodes to exact raw bytes asserted in the e2e); WS record still
+  excluded with no artifact (`TestCF002WSRecordCreatesNoArtifact`
+  retained). Ordinary `--mode record` keeps its caller-asserted,
+  unverified evidence class; nothing silently upgraded it.
+
+Verdict: **ACCEPT** (re-review). The runnable recorder provides persistent
+candidate-bound evidence with the same guarantees the test-only lifecycle
+proved. No remote identity, v1 provenance, SDK parity, or external fixture
+equivalence is claimed.

@@ -114,3 +114,52 @@ Initial findings: none requiring repair. The `title` payload pin added
 during provenance review (test-only) also serves this review's over-broad
 redaction leg; re-review confirms it fails when the guard is removed and
 passes otherwise. No production-code change, no secret touched, no residue.
+
+## Addendum — runnable recorder re-review (2026-09-19, intermediate 92e3a64)
+
+The ACCEPT above covered a test-only lifecycle. This addendum re-reviews the
+runnable `corpusctl --mode managed-record` path (`cmd/corpusctl/managed.go`)
+and its two direct CLI runs. Prior sections stand.
+
+Re-verified against the runnable path:
+
+- Output handling: directories are reserved fresh with mode 0700
+  (descriptor-relative no-follow reservation, fail-fast freshness pre-check
+  plus authoritative `ReserveOutputDir`); evidence and manifest are 0600;
+  publication is fsynced atomic no-replace; output inside the repository is
+  refused before any work (it would dirty the candidate); symlinked output
+  is rejected with nothing written under the link
+  (`TestCF002ManagedRecordRejectsSymlinkedOutput`, target dir observed
+  empty); reuse is refused with the first evidence byte-identical.
+- Secret exclusion: manifests and logs carry no secret values — config
+  digest uses presence bits only, the admin token lives only in memory and
+  request headers, and both run manifests were scanned for the storage
+  secret and the database URL (absent). Database errors use static messages
+  because pgx errors may embed credentials (`managed.go`); the secret value
+  is asserted absent from the daemon log. Raw SSE hello retains its
+  short-lived session token inside the private 0700/0600 evidence only,
+  matching the documented private-evidence posture.
+- Owned-resource cleanup: daemon stopped via bounded SIGTERM/wait with
+  port-down confirmation (both runs connection-refused after exit, no
+  `instantd-managed` process remains); owned `instant_test_*` databases
+  dropped on success and failure paths (both absent afterwards; unrelated
+  pre-existing test databases untouched); storage root, build, and log
+  temp dirs removed. Failure paths remove the freshly reserved output dir
+  itself, so unsuccessful runs leave no eligible manifest (proven by the
+  omitted-reset probe: no `manifest.json`).
+- Safe database scoping: the owned name is always generated
+  `instant_test_*`; no flag accepts a database name, so out-of-scope names
+  are structurally impossible; `--database-url`/DATABASE_URL is an admin
+  connection string that is never recorded, logged, or printed.
+- Endpoint restriction: the daemon binds `127.0.0.1` by construction with
+  no flag to change it; `RequireLoopbackEndpoint` gates the recorded URL;
+  loopback is asserted in both run manifests.
+- Failure non-publication: every identity/fixture/capture/publication
+  error returns nonzero before manifest publication (dead-binary probe
+  `/bin/echo`: `never became healthy`, no output dir; missing-DATABASE_URL
+  probe: immediate usage failure). Only the final verified manifest makes
+  evidence eligible.
+
+Verdict: **ACCEPT** (re-review). The runnable recorder preserves the
+private write-once posture with no secret leakage, no unsafe cleanup, and
+no eligible evidence on failure.
