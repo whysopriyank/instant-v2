@@ -71,3 +71,33 @@ All 12 falsification attempts failed — code guards + pinning tests hold for ea
 - `internal/sync/frame.go`: `Encode` validates every value with `json.Valid` (matches stdlib Marshal rejection).
 - `internal/sync/groups.go`: direct-write failures collected; nothing-served + current generation → withhold (error, members kept) for bounded same-tx retry; partial → detach failed + certify via siblings; post-regate total → superseded; queued (`SendRawGen`) path unchanged (immediate detach).
 - New tests: `dispatch_encode_failure_test.go`, `sse_encode_failure_test.go`, `notifier_chain_failure_test.go`, `sse_failure_reconnect_test.go`, `delta_reconnect_test.go`, `examples/vite-vanilla/rt002-sdk-same-tx-correction.test.mjs`.
+
+## Addendum — 2026-09-18 focused re-review (detach accounting + Encode nil parity)
+
+Reviewer: fresh read-only focused re-review (subagent session `ses_f4db1924bffesct08tRnQoYF5a`), no write access.
+Candidate delta since `4425d5d`: `internal/sync/groups.go` (`detachMember`
+`existed` gate), `internal/sync/frame.go` (nil → `null`), `frame_encode_test.go`
+(nil parity case), `detach_accounting_test.go` (new).
+
+Verdict: ACCEPT. Both repairs narrow, correct, verified under `-race`. No blocker.
+
+- Detach accounting: `detachMember` records `_, existed := g.members[sess]`
+  (`groups.go:292`) and decrements `appMembers` only `if existed`
+  (`groups.go:301`); stale `Subs` cleanup on both branches; empty-group
+  Store/registry removal unchanged; `failMember→detachMember→Close` holds no
+  lock across teardown; `TestDetachMemberDoubleDetachDecrementsOnce`
+  (2 members, double-detach → removed once, count exactly 1, survivor
+  registered, cap-visible count 1) and
+  `TestDetachMemberConcurrentFailMemberDetachAllRaceClean` (8× concurrent,
+  race-clean, survivor registered) pass under `-race`.
+- Encode parity: nil RawMessage emits literal `null`, byte-identical to
+  `json.Marshal(map[string]json.RawMessage)`; non-nil invalid still errors
+  fail-closed; `TestFrameEncodeParity` (with `{"nullable": nil}` →
+  `{"nullable":null}`) + `TestFrameEncodeNil` + all encode-failure tests pass.
+- Cap correctness: pre/post-I/O checks + rollback intact; double-detach no
+  longer inflates free capacity.
+- Original twelve targets re-attempted; all remain falsified; prior ACCEPT stands.
+
+The original §Non-blocking note #1 (double-detach undercount) is hereby
+recorded as REPAIRED and verified; the original finding text above is
+preserved unchanged.
