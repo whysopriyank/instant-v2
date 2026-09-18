@@ -15,7 +15,7 @@ its packet against current source and the latest handoff before changing status.
 | 5 | RT-003 depth-one recovery | 02 | `COMPLETE / ACCEPTED_HERMETIC_RECOVERY` | F-002 | focused + package |
 | 6 | DA-001 durable storage assembly | 03 | `COMPLETE / ACCEPTED_DURABLE_LOCAL_STORAGE` | F-002 storage profile | integrated + restart |
 | 7 | DA-002 upload integrity | 03 | `COMPLETE / ACCEPTED` | F-002 compatibility policy | focused + DB-backed data review + Sol gate |
-| 8 | DA-003 backup fail-closed | 03 | `PARTIAL / LOCAL_DB_ACCEPTED_EXTERNAL_PENDING` | DA-001 | integrated + data review |
+| 8 | DA-003 backup fail-closed | 03 | `COMPLETE / ACCEPTED_LOCAL_FAIL_CLOSED_BACKUP` | DA-001 | integrated + data review |
 | 8a | DA-004V dynamic view rules | 03 | `COMPLETE / EXCLUSION_ENFORCED_GATE_ACCEPTED` | F-002 permission policy | DB/runtime + corpus/release-gate evidence |
 | 9 | DA-004 admin permission fidelity | 03 | `COMPLETE / ACCEPTED_DB_SECURITY_REVIEWED` | F-002 permission policy | DB integration + security review |
 | 10 | DA-005 admin mutation atomicity | 03 | `COMPLETE / ACCEPTED_DB_ATOMICITY_REVIEWED` | F-002, stable admin candidate | DB integration + data review |

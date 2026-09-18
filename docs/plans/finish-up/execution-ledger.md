@@ -569,3 +569,98 @@ Status: DA-001 `COMPLETE / ACCEPTED_DURABLE_LOCAL_STORAGE`. Phase 03 remains
 open (DA-003 and external/deferred rows separately classified). No later
 packet changed. No external provider contact, no push, publication,
 deployment, or tag.
+
+## DA-003 close-out (2026-09-19, HEAD 8cabdb4a7a6f06cb16d552dd41d2f798f9030a75 clean + work below, go1.27.1 darwin/arm64, APFS, PostgreSQL 17.11)
+
+Baseline: HEAD `8cabdb4a7a6f06cb16d552dd41d2f798f9030a75` on `main`, clean tree.
+DA-003 `PARTIAL / LOCAL_DB_ACCEPTED_EXTERNAL_PENDING` per program-manifest.
+Alpha profile: local NDJSON export/restore accepted; runtime object-backup
+routes deliberately unwired with stable 503. No S3 credentials, external
+provider contact, object-store wiring, or Phase-06 recovery campaign.
+
+Evidence mapping (all exit 0, zero skips on selected tests):
+
+- DA-003a (missing auth config, no panic):
+  `TestHandlerRejectsMissingAuthConfig` (`http_test.go:110-123`, GET 500, no
+  panic) + `TestHandlerMissingAuthConfigObjectRoutes`
+  (`da003_failclosed_test.go:121-155`, PUT/GET object + POST restore-object
+  each 500, no panic, zero puts/gets). Central nil-check
+  (`http.go:64-69`) precedes routing/DB/store work.
+- DA-003b (unauthorized emits nothing, mutates nothing):
+  `TestUnauthorizedRestoreWritesNothing` (`http_test.go:128-153`, 401,
+  triples 10/attrs 4 unchanged) +
+  `TestUnauthorizedObjectRoutesMutateNothing`
+  (`da003_failclosed_test.go:457-502`, 3 methods x 3 auth cases each 401,
+  GET emits no `kind` bytes, zero puts/gets) + export 401 legs in
+  `TestHandlerRoutesAndAuth` (`http_test.go:21-46`). Auth precedes the
+  action switch (`http.go:84-95`).
+- DA-003c (terminal checksum + record-count contract):
+  `TestPutObjectReturnsCounts` (`da003_failclosed_test.go:161-227`, stored
+  artifact ends with checksum trailer, records==counts sum, sha non-empty,
+  one staging Put/promotion/cleanup) + `TestChecksumCorruption`
+  (`import_test.go:63-104`, sha mismatch rejected, target unchanged) +
+  `TestTruncatedDumpRejected` (`:109-135`, missing trailer rejected, fresh
+  DB 0 apps/0 triples) + `TestImportReadErrorAfterChecksumRollsBack`
+  (`import_boundary_test.go:20-38`, read failure after checksum rolls back,
+  no app row) + `TestImportRejectsExtraAfterChecksum`
+  (`da003_extra_contract_test.go:23-50`, valid extra line rejected, 0/0) +
+  `TestImportRejectsRecordsMismatch` (`:52-102`, valid sha + lied records
+  rejected, 0/0). Export trailer (`export.go:98-104`), sha+records+extra
+  checks (`import.go:92-103`), missing-trailer refusal (`:146`).
+- DA-003d (incomplete/staged artifacts unselectable; publish only after
+  complete export/upload): `TestStagingObjectKeysArePrivate`
+  (`da003_failclosed_test.go:251-281`, staging prefix 400 on GET/PUT/restore,
+  zero store calls) + `TestPutObjectPrefixFailurePreservesFinalAndCleansStage`
+  (`:323-358`, 502, final preserved, one staging cleanup, no promotion) +
+  `TestPutObjectShortSuccessDoesNotPromote` (`:360-388`, 502, final
+  preserved, no promotion) +
+  `TestPutObjectPromotionFailureReportsUnknownStatus` (`:421-452`, 502 +
+  "status unknown", final preserved, staging cleaned) + traversal/escape
+  battery `TestObjectKeysRejectTraversalAndEscape`
+  (`da003_extra_contract_test.go:104-176`, `..`/leading-`/` 400 on all three
+  routes with zero store calls; foreign-app key stays under caller prefix).
+  Staging/private/publish/cleanup order (`http_objects.go:76-139`),
+  scoping (`:25-36`), staging key shape (`:141-147`).
+- DA-003e (failed restore preserves source + exact prior target under
+  single-tx atomicity): `TestRestoreObjectCorruptPreservesSourceAndTarget`
+  (`da003_failclosed_test.go:508-551`, 400, source bytes identical, target
+  10/4) + `TestRestoreObjectTruncatedPreservesSourceAndTarget` (`:557-597`,
+  400, source identical, target 10/4) +
+  `TestFailedImportPreservesExactDump`
+  (`da003_extra_contract_test.go:178-202`, corrupt re-import fails, next
+  export byte-identical). Single tx (`import.go:35-39`), commit only after
+  checksum+extra validation (`:82-110`), restore-object Get+Import only
+  (`http_objects.go:149-176`).
+
+Focused evidence: the 15-test DA-003 set passes twice under `-race` with
+the owned database (zero skips). Full `internal/backup` package passes
+under `-race` (35 PASS, 0 FAIL/SKIP). Assembled daemon contract passes:
+`TestDA001ObjectBackupDisabled` (real daemon 503s + local export + storage),
+`TestCF003HTTPMatrixOwnedPostgres` (export trailer + restore round-trip +
+object 503), `TestCF003HTTPMatrixHermetic` (backup 401, no files).
+
+Reviews (explicit ACCEPT with file:line citations, artifacts persisted):
+
+- Data-integrity: ACCEPT, 7 targets falsified (partial publication,
+  truncation/checksum, early commit, target mutation, source deletion,
+  ambiguous promotion, cancellation cleanup).
+  `docs/plans/finish-up/da003-data-integrity-review-20260919.md`.
+- Security: ACCEPT, 7 targets falsified (nil-auth, unauthorized
+  disclosure/mutation, cross-app, staging access, traversal/escape,
+  credential disclosure, auth ordering).
+  `docs/plans/finish-up/da003-security-review-20260919.md`.
+
+Added evidence (test-only, no production change):
+`internal/backup/da003_extra_contract_test.go` pins extra-after-checksum,
+records-mismatch, traversal/escape namespace, and byte-exact rollback; all
+four green on first run. Production behavior already fail-closed; the gap
+was missing pins, not a defect. No red-before-production-fix cycle needed;
+re-review confirms each new test fails if its guard is removed.
+
+Status: DA-003 `COMPLETE / ACCEPTED_LOCAL_FAIL_CLOSED_BACKUP`. Phase 03
+remains open (DA-006B/DA-008B BLOCKED on external authority; OP/CF/FR rows
+unchanged). No later packet changed. Local NDJSON accepted; runtime object
+backup excluded (stable 503); in-memory/fake-S3 tests prove internal failure
+semantics only; no real S3/provider, recovery campaign, Linux/container
+qualification, production or release acceptance claimed. OP-006 remains
+separate. No push, publication, deployment, or tag.

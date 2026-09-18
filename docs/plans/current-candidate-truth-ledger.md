@@ -809,3 +809,44 @@ did not read the stored triple).
   (OP-006 separate), real providers, recovery campaigns, production use, or
   release acceptance. DA-003 and all later packets are unchanged. No push,
   deployment, publication, or tag.
+
+## DA-003 reconciliation (2026-09-19, baseline 8cabdb4a7a6f06cb16d552dd41d2f798f9030a75 + repair below)
+
+Baseline `8cabdb4` (main, clean) records DA-001
+`COMPLETE / ACCEPTED_DURABLE_LOCAL_STORAGE` with DA-003
+`PARTIAL / LOCAL_DB_ACCEPTED_EXTERNAL_PENDING`. This section preserves all
+historical dated sections above and reconciles DA-003 only.
+
+- Status: DA-003 `COMPLETE / ACCEPTED_LOCAL_FAIL_CLOSED_BACKUP` (local
+  NDJSON export/restore accepted; checksum, truncation, authorization,
+  staging, and rollback evidence passed).
+- Rows: DA-003a missing-auth 500/no-panic
+  (`http_test.go:110-123`, `da003_failclosed_test.go:121-155`,
+  `http.go:64-69`); DA-003b unauthorized 401/no-data/no-mutation
+  (`http_test.go:128-153`, `da003_failclosed_test.go:457-502`,
+  `http.go:84-95`); DA-003c checksum+records contract
+  (`da003_failclosed_test.go:161-227`, `import_test.go:63-135`,
+  `import_boundary_test.go:20-38`,
+  `da003_extra_contract_test.go:23-102`, `export.go:98-104`,
+  `import.go:92-103,146`); DA-003d staging-private/publish-only-after-complete
+  (`da003_failclosed_test.go:251-281,323-388,421-452`,
+  `da003_extra_contract_test.go:104-176`, `http_objects.go:25-36,76-139`);
+  DA-003e failed-restore source+exact-target preservation under single-tx
+  atomicity (`da003_failclosed_test.go:508-597`,
+  `da003_extra_contract_test.go:178-202`, `import.go:35-39,82-110`).
+- Reviews: data-integrity ACCEPT
+  (`docs/plans/finish-up/da003-data-integrity-review-20260919.md`);
+  security ACCEPT
+  (`docs/plans/finish-up/da003-security-review-20260919.md`).
+- Boundary: local NDJSON export/restore is accepted; runtime object-backup
+  routes remain excluded and explicitly 503
+  (`PUT/GET /backup/{app}/object`, `POST /restore-object` →
+  `503 {"message":"no object store wired"}` after auth passes;
+  `http_objects.go:63-65,150-153`, `routes.go:224-228`,
+  `daemon_object_disabled_test.go:70-94`,
+  `runtime_cf003_test.go:240-244`); in-memory object-store tests prove
+  internal failure semantics only; no real S3/provider behavior is claimed.
+- No claim: no recovery campaign, Linux/container qualification, production
+  acceptance, or release acceptance; OP-006 remains separate; DA-001 and all
+  other packets unchanged; Phase 03 remains open per canonical dependencies
+  (DA-006B/DA-008B BLOCKED). No push, deployment, publication, or tag.
