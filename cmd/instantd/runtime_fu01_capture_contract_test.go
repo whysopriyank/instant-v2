@@ -343,6 +343,13 @@ func TestFU01CaptureContractQueryConcurrency(t *testing.T) {
 		t.Fatalf("late joiner titles = %#v; want exactly %#v", titles, wantFinal)
 	}
 	fu01AssertRetentionSeq(t, logC, "C", 3)
+	// Replay C from retention alone under the same oracle: the retained
+	// snapshot re-asserts without touching the live stream.
+	replayLate := logC[2].frame
+	fu01AssertLateSnapshot(t, replayLate, txID, wantLate)
+	if titles := fu01TreeTitles(t, replayLate); !reflect.DeepEqual(titles, wantFinal) {
+		t.Fatalf("replayed late joiner titles = %#v; want exactly %#v", titles, wantFinal)
+	}
 	fu01AssertQuiet(t, c, "C", 250*time.Millisecond)
 
 	a.closeAndAwaitUnauthorized(t, ctx)
