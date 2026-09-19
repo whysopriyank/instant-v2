@@ -149,7 +149,14 @@ func TestCF003AssembledSSELookupLifecycle(t *testing.T) {
 		if len(node) != 2 {
 			t.Fatalf("lookup create node = %#v; want exactly data plus child-nodes", rawNode)
 		}
-		if children, _ := node["child-nodes"].([]any); len(children) != 0 {
+		if _, ok := node["data"]; !ok {
+			t.Fatalf("lookup create node = %#v; want exactly data plus child-nodes", rawNode)
+		}
+		children, ok := node["child-nodes"].([]any)
+		if !ok {
+			t.Fatalf("lookup create child nodes = %#v; want []any", node["child-nodes"])
+		}
+		if len(children) != 0 {
 			t.Fatalf("lookup create child nodes = %#v; want none", node["child-nodes"])
 		}
 		rows, _ := node["data"].(map[string]any)
