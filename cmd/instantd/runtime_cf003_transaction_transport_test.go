@@ -17,8 +17,10 @@ import (
 // the low-level "transact" op through the mounted WS session path and the
 // mounted SSE POST path. Each transport proves one positive low-level write
 // converging to the exact whole HTTP query result plus one exact validation
-// denial that mutates nothing. Every leg asserts the exact whole result so a
-// partial write cannot hide behind a subset check.
+// denial that mutates nothing. The WS path additionally proves the
+// same-batch cardinality-one boundary (final value wins exactly once).
+// Every leg asserts the exact whole result so a partial write cannot hide
+// behind a subset check.
 func TestCF003AssembledTransactionTransportMatrix(t *testing.T) {
 	mux, appID, adminToken := cf003PostgresMux(t)
 	app := platform.UUIDToStr(appID)
@@ -110,6 +112,22 @@ func TestCF003AssembledTransactionTransportMatrix(t *testing.T) {
 	})
 	exactDenial(ws.nextOp(t, "error"))
 	exactTitle("ws-one")
+
+	// WS same-batch cardinality-one boundary: the final value wins exactly
+	// once through the mounted WS session path.
+	ws.send(t, ctx, map[string]any{
+		"op": "transact", "client-event-id": "ws-card",
+		"tx-steps": []any{
+			[]any{"add-triple", cf003EntityID, titleAttr, "ws-card-first"},
+			[]any{"add-triple", cf003EntityID, titleAttr, "ws-card-last"},
+		},
+	})
+	cardTx := exactTransactOK(ws.nextOp(t, "transact-ok"), "ws-card")
+	if cardTx <= wsTx {
+		t.Fatalf("WS cardinality tx %v did not advance past WS tx %v", cardTx, wsTx)
+	}
+	wsTx = cardTx
+	exactTitle("ws-card-last")
 
 	// SSE init after seeding observes the exact live catalog identity.
 	sseGet.post(t, ctx, map[string]any{"op": "init", "app-id": app})
