@@ -33,6 +33,10 @@
     {
       "id": "auth-http-denied-error",
       "path": "fixtures/auth-http-denied-error.json"
+    },
+    {
+      "id": "auth-http-refresh-lifecycle",
+      "path": "fixtures/auth-http-refresh-lifecycle.json"
     }
   ],
   "surfaces": [
@@ -217,15 +221,17 @@
       "case": "lifecycle",
       "surface": "http.auth-admin-runtime-storage-backup",
       "transport": "http",
-      "fixture": "smoke",
+      "scenario": "auth-http-refresh-lifecycle",
+      "fixture": "auth-http-refresh-lifecycle",
       "owner": "internal/corpus",
       "expectedState": "refresh token rotation and replay behavior are captured",
-      "status": "gap",
+      "status": "covered",
       "oracle": {
-        "kind": "spec",
-        "source": "docs/reference/03-protocol.md runtime auth contract"
+        "kind": "regression",
+        "source": "Authored v2 contract: exact corpus replay of the accepted assembled leg TestCF003AssembledAuthRefreshBatchAndSignout @ a686613 via TestCF003RefreshLifecycleCaptureReplay. Not a captured v1 oracle."
       },
-      "note": "No HTTP fixture or raw evidence is checked in yet."
+      "evidence": ["auth-http-refresh-lifecycle.json"],
+      "note": "Covered by checked-in raw capture auth-http-refresh-lifecycle.json (400 exact malformed batch, 401 exact unknown-token batch twice replay-identical, 401 exact singular unknown-token verify, 200 exact alias-signout empty envelope twice replay-identical for idempotence, 400 exact malformed signout) replayed exactly by cmd/instantd/runtime_cf003_refresh_replay_test.go::TestCF003RefreshLifecycleCaptureReplay on the owned isolated auth-http-refresh-lifecycle fixture (app 00000000-0000-4000-8000-000000000003); minted-token rotation values are never checked in (fresh UUIDs per issuance) and are replayed live with the assembled leg's exact whole-user DeepEqual, failed-batch-mutates-nothing, signout-invalidation, and survivor assertions, and the refresh flow is asserted to leave auth_throttle exactly empty. FU-02 Option A report-only; no v1-parity claim."
     },
     {
       "id": "auth-http-denied-error",

@@ -1266,3 +1266,59 @@ Repair cycle: 2
 - CF-003-2A2 (auth-http-refresh-lifecycle) reusing the self-bound transport-evidence pattern
 
 CF-003-2A1 accepted commit: `47a95683ece1a825dc8ce23b59af63c4adab882e` (local only, no push). Tree clean. CF-003 stays PARTIAL (single-row flip only: 10 covered / 12 gap / 4 unsupported).
+
+## CF-003-2A2 close-out (2026-09-19, HEAD 4eb6739 + work below, go1.27.1 darwin/arm64)
+
+# Packet CF-003-2A2 handoff
+
+Status: COMPLETE
+Candidate: HEAD `4eb6739a33f562b5ce619a8b322a8980161afe40` + uncommitted packet files below (accepted commit SHA at close)
+Decision/profile: DEC-001-single-node-alpha (FU-02 Option A report-only)
+Implementation agent: OpenCode / Muse Spark 1.3 free / xhigh
+Review agent: OpenAI / GPT-5.6 Sol / medium
+Repair cycle: 1
+
+## Ledger
+| Row | Result | Evidence | Remaining |
+| R1 raw capture | GREEN | 7 deterministic exchanges (400/401-batch/401-verify/200-signout-idempotent/400); minted rotation excluded with reason | None |
+| R2 exact replay | GREEN | Exact bytes+CT, 4-field fixture binding, live rotation DeepEqual/invalidation/survivor, throttle-empty; -race twice; 4 mutation proofs | None |
+| R3 single-row flip | GREEN | Only auth-http-refresh-lifecycle gap→covered (10/12/4 → 11/11/4); validate + validate-release green; 18/18 green | None |
+| R4 exclusions | GREEN | WS fails closed; no other files/rows; no v1 text | None |
+
+## Changes
+- corpus/auth-http-refresh-lifecycle.json (NEW): self-bound envelope + 7 exchanges + excluded note
+- corpus/fixtures/auth-http-refresh-lifecycle.json (NEW): dedicated fixture == actual seed
+- corpus/manifest.json: fixtures[] entry + single-row flip (expectedState unchanged)
+- cmd/instantd/runtime_cf003_refresh_replay_test.go (NEW): exact replay + live rotation + 4-field binding
+
+## Verification
+| Command/run | Selected | Exit | Meaning |
+| replay -race twice (owned fixture) | 1 | 0,0 | R2 |
+| 4 mutations (creator/admin/txSteps/appId) | 1 each | FAIL pre-replay | binding load-bearing; restored identical |
+| TestCorpusReplayIntegration | 18/18 | 0 | no regression |
+| validate / validate-release | full | 0,0 | R3 gates |
+| WS-record exclusion | 1 | 0 | R4 |
+| cmd/instantd package | full | 0 | affected package |
+| gofmt/vet/diff-check | n/a | 0 | static clean |
+
+## Independent review
+- Verdict: ACCEPT (second review; first: REPAIR_REQUIRED on 4-field binding only; hybrid capture/live rotation design explicitly accepted as non-over-claiming)
+- Findings repaired: 1 (fixture binding appId → all four fields)
+- Remaining findings: none
+- Evidence limitations: owned testkit fixtures only; no external/v1/release qualification
+
+## Not run
+- Full-repo sweep (affected lanes run instead); production gate end-to-end (FR-002); differential/v1 (FU-04 blocked)
+
+## Scope audit
+- Leased paths only (manifest single-row hunk + fixtures[] entry + 3 new files); no validator/recorder/docs/Makefile changes
+- Unexpected changes: none
+
+## Artifact/provenance
+- Candidate SHA: accepted commit SHA at close (below)
+- Environment: go1.27.1 darwin/arm64; owned instant_test_* fixtures only
+
+## Next prerequisite
+- CF-003-2A3 (query-conjunction-gap) via TestCF003AssembledQueryConjunctionAndOrder
+
+CF-003-2A2 accepted commit: `f1c5a407da1fd15ad02ee2f8b4a0cc5e280b7be5` (local only, no push). Tree clean. CF-003 stays PARTIAL (11 covered / 11 gap / 4 unsupported).

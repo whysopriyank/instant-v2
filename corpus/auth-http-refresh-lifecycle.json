@@ -1,0 +1,96 @@
+{
+  "scenario": "auth-http-refresh-lifecycle",
+  "id": "auth-http-refresh-lifecycle",
+  "transport": "http",
+  "status": "covered",
+  "fixture": "auth-http-refresh-lifecycle",
+  "source": "Report-only single-flow capture of the already-accepted assembled leg TestCF003AssembledAuthRefreshBatchAndSignout (@ a686613) under FU-02 Option A; no corpusctl recorder behavior change, no v1 oracle. Every exchange uses fixed UUIDs only, so exact whole-body replay is deterministic.",
+  "redaction": "CF-002 discipline: volatile transport headers (Date, Content-Length, Transfer-Encoding) excluded; no credential-bearing headers present on these exchanges so no header redaction applies; application payload keys retained exactly and remain comparison-significant. No tokens, timestamps, DSNs, or database URLs appear in these bytes.",
+  "excluded": "The minted-token rotation values are excluded from these bytes with reason: guest sign-in mints fresh UUID identity/token values, and every positive-batch, mixed minted-plus-unknown batch, minted-token signout, and survivor-verify body echoes those minted values, so exact byte replay is impossible. Rotation and token-invalidation behavior is asserted live by the replay test (values asserted live, never checked in), mirroring the accepted assembled leg step for step.",
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "target": "/runtime/auth/refresh_tokens",
+        "body": "{}"
+      },
+      "response": {
+        "status": 400,
+        "headers": {"Content-Type": ["application/json"]},
+        "body": "{\"message\":\"refresh_tokens and app-id are required\"}\n"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "target": "/runtime/auth/refresh_tokens",
+        "body": "{\"app-id\":\"00000000-0000-4000-8000-000000000003\",\"refresh_tokens\":[\"00000000-0000-4000-8000-000000000099\"]}"
+      },
+      "response": {
+        "status": 401,
+        "headers": {"Content-Type": ["application/json"]},
+        "body": "{\"message\":\"authn: unknown refresh token\"}\n"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "target": "/runtime/auth/refresh_tokens",
+        "body": "{\"app-id\":\"00000000-0000-4000-8000-000000000003\",\"refresh_tokens\":[\"00000000-0000-4000-8000-000000000099\"]}"
+      },
+      "response": {
+        "status": 401,
+        "headers": {"Content-Type": ["application/json"]},
+        "body": "{\"message\":\"authn: unknown refresh token\"}\n"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "target": "/runtime/auth/verify_refresh_token",
+        "body": "{\"app-id\":\"00000000-0000-4000-8000-000000000003\",\"refresh-token\":\"00000000-0000-4000-8000-000000000099\"}"
+      },
+      "response": {
+        "status": 401,
+        "headers": {"Content-Type": ["application/json"]},
+        "body": "{\"message\":\"authn: unknown refresh token\"}\n"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "target": "/runtime/signout",
+        "body": "{\"app_id\":\"00000000-0000-4000-8000-000000000003\",\"refresh_token\":\"00000000-0000-4000-8000-000000000099\"}"
+      },
+      "response": {
+        "status": 200,
+        "headers": {"Content-Type": ["application/json"]},
+        "body": "{}\n"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "target": "/runtime/signout",
+        "body": "{\"app_id\":\"00000000-0000-4000-8000-000000000003\",\"refresh_token\":\"00000000-0000-4000-8000-000000000099\"}"
+      },
+      "response": {
+        "status": 200,
+        "headers": {"Content-Type": ["application/json"]},
+        "body": "{}\n"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "target": "/runtime/signout",
+        "body": "{}"
+      },
+      "response": {
+        "status": 400,
+        "headers": {"Content-Type": ["application/json"]},
+        "body": "{\"message\":\"refresh_token and app_id are required\"}\n"
+      }
+    }
+  ]
+}
