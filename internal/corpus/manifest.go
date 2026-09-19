@@ -296,7 +296,14 @@ func validateCoverage(dir string, m *Manifest, surfaces map[string]Surface) erro
 		}
 		if entry.Scenario != "" {
 			if _, ok := scenarios[entry.Scenario]; !ok {
-				return fmt.Errorf("coverage %s: unknown scenario %q", entry.ID, entry.Scenario)
+				// Transport (.json) evidence is self-bound, http/sse only:
+				// such a row carries its own identity (scenario ==
+				// coverage id) instead of borrowing a WS scenario entry.
+				// WS rows must name a registered ScenarioEntry; anything
+				// else is unknown.
+				if entry.Scenario != entry.ID || (entry.Transport != "http" && entry.Transport != "sse") {
+					return fmt.Errorf("coverage %s: unknown scenario %q", entry.ID, entry.Scenario)
+				}
 			}
 		}
 		if entry.Status == "covered" && len(entry.Evidence) == 0 {
@@ -329,7 +336,10 @@ func validateCoverage(dir string, m *Manifest, surfaces map[string]Surface) erro
 
 // validateCoverageEvidence binds an evidence file to the coverage row that
 // claims it. Legacy WS NDJSON evidence is bound by its declared scenario path;
-// transport evidence uses the small metadata envelope written by corpusctl.
+// transport evidence uses the small metadata envelope written by corpusctl and
+// is honestly self-bound, http/sse only: the envelope must name the claiming
+// coverage entry and its fixture, and the entry must use its own identity
+// (scenario == coverage id) instead of borrowing a WS scenario id.
 func validateCoverageEvidence(path, evidence string, entry CoverageEntry, scenario ScenarioEntry) error {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".ndjson":
@@ -341,6 +351,12 @@ func validateCoverageEvidence(path, evidence string, entry CoverageEntry, scenar
 		}
 		return nil
 	case ".json":
+		// WS rows must bind registered NDJSON scenario evidence; .json
+		// envelopes are http/sse only, so a WS row cannot self-bind a
+		// handcrafted JSON file even when it aliases a registered id.
+		if entry.Transport != "http" && entry.Transport != "sse" {
+			return fmt.Errorf("JSON evidence requires http or sse transport, got %q", entry.Transport)
+		}
 		b, err := os.ReadFile(path)
 		if err != nil {
 			return err
@@ -350,6 +366,7 @@ func validateCoverageEvidence(path, evidence string, entry CoverageEntry, scenar
 			ID        string `json:"id"`
 			Transport string `json:"transport"`
 			Status    string `json:"status"`
+			Fixture   string `json:"fixture"`
 		}
 		if err := json.Unmarshal(b, &metadata); err != nil {
 			return fmt.Errorf("invalid metadata: %w", err)
@@ -363,6 +380,15 @@ func validateCoverageEvidence(path, evidence string, entry CoverageEntry, scenar
 		}
 		if metadata.Transport != entry.Transport || metadata.Status != entry.Status {
 			return fmt.Errorf("declared transport/status %q/%q does not match %q/%q", metadata.Transport, metadata.Status, entry.Transport, entry.Status)
+		}
+		if metadata.ID != entry.ID {
+			return fmt.Errorf("declared id %q does not match coverage %q", metadata.ID, entry.ID)
+		}
+		if metadata.Fixture != entry.Fixture {
+			return fmt.Errorf("declared fixture %q does not match %q", metadata.Fixture, entry.Fixture)
+		}
+		if entry.Scenario != entry.ID {
+			return fmt.Errorf("transport evidence must self-bind: scenario %q does not match coverage %q", entry.Scenario, entry.ID)
 		}
 		return nil
 	default:

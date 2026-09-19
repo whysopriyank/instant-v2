@@ -29,6 +29,10 @@
     {
       "id": "required",
       "path": "fixtures/required.json"
+    },
+    {
+      "id": "auth-http-denied-error",
+      "path": "fixtures/auth-http-denied-error.json"
     }
   ],
   "surfaces": [
@@ -229,15 +233,17 @@
       "case": "denied-error",
       "surface": "http.auth-admin-runtime-storage-backup",
       "transport": "http",
-      "fixture": "smoke",
+      "scenario": "auth-http-denied-error",
+      "fixture": "auth-http-denied-error",
       "owner": "internal/corpus",
       "expectedState": "malformed or expired credentials return client-safe denial",
-      "status": "gap",
+      "status": "covered",
       "oracle": {
-        "kind": "spec",
-        "source": "docs/reference/03-protocol.md auth semantics"
+        "kind": "regression",
+        "source": "Authored v2 contract: exact corpus replay of the accepted assembled leg TestCF003AssembledAuthMagicCodeDenied @ 356d68d plus a deterministically seeded expired-magic-code leg via TestCF003DeniedErrorCaptureReplay. Not a captured v1 oracle."
       },
-      "note": "The selected HTTP routes require capture through assembled handlers."
+      "evidence": ["auth-http-denied-error.json"],
+      "note": "Covered by checked-in raw capture auth-http-denied-error.json (400 exact malformed denial, 401 exact invalid-code denial twice replay-identical, 401 exact expired-code denial from a deterministically seeded backdated code) replayed exactly by cmd/instantd/runtime_cf003_denied_replay_test.go::TestCF003DeniedErrorCaptureReplay on the owned isolated auth-http-denied-error fixture (app 00000000-0000-4000-8000-000000000003); the replay asserts the capture id/fixture against this row, the expected auth_throttle failure rows (2 invalid + 1 expired, below the 5-attempt lockout), and a live guest sign-in shape check only (minted UUIDs never checked in; not a no-residue proof). FU-02 Option A report-only; no v1-parity claim."
     },
     {
       "id": "permissions-ws-view-positive",

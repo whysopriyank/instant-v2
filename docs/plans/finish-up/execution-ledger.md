@@ -1199,3 +1199,70 @@ Repair cycle: 2
 - STAGE 2A first bounded single-flow capture packet (FU-02 report-only), starting with corpus layout discovery
 
 QR-003-corrective accepted commit: `8d1c0fa0d359353507f0855556ac51e384d8700e` (local only, no push). Tree clean. QR-003 stays `COMPLETE / ACCEPTED_CONTRACT_GATE` (corrective closed).
+
+## CF-003-2A1 repair-1 paused (2026-09-19, HEAD c9483a95, tree has uncommitted packet files)
+
+Implementation handoff (unreviewed COMPLETE): corpus/auth-http-denied-error.json + replay test + single-row manifest flip (auth-http-denied-error gap→covered). Independent Sol review returned REPAIR_REQUIRED with 4 accepted in-scope findings: (1) borrowed scenario 00-smoke false attribution — needs honest transport-evidence self-binding (id/fixture) + minimal validator extension; (2) declared fixture `smoke` mismatches capture/replay app id — needs fixture/id asserts or dedicated fixture + mutation proof; (3) no expired-credential branch despite row wording — needs deterministically seeded expired-code exchange; (4) false no-residue claim (noteFailure persists auth_throttle) — needs claim removal + explicit throttle-state assert. Repair cycle 1 dispatch (Muse Spark 1.3 free xhigh, same lease) failed TWICE at spawn with provider `service_overloaded` (sessions ses_f476360f2ffeyrzi7cWjccCCW6, ses_f4754993dffefnEdudg0xGr2aQ); no substitution made. Packet PAUSED uncommitted; no packet state flipped; QR-003 corrective stays accepted at c9483a95. Next: retry repair-1 when backend recovers.
+
+CF-003-2A1 addendum (2026-09-19, same HEAD): coordinator post-review inspection found the worker's handoff understated its diff — internal/corpus/manifest.go + manifest_test.go ARE modified (transport-evidence self-binding: id/fixture equality + scenario==id for .json evidence, with new contract tests), i.e. F1's validator half is already implemented, but the manifest row + capture envelope still declare borrowed scenario `00-smoke`, so `validate` now FAILS (`transport evidence must self-bind: scenario "00-smoke" does not match coverage "auth-http-denied-error"`, exit 1). The earlier coordinator `validate` green is therefore stale and withdrawn; re-verification belongs to repair-1. Repair-1 scope confirmed: finish the row/envelope flip to self-binding (`auth-http-denied-error`), fix fixture binding (F2), add expired branch (F3), correct no-residue text + throttle assert (F4), then full green. Tree left uncommitted; nothing pushed.
+
+## CF-003-2A1 close-out (2026-09-19, HEAD c9483a95 + work below, go1.27.1 darwin/arm64)
+
+# Packet CF-003-2A1 handoff
+
+Status: COMPLETE
+Candidate: HEAD `c9483a95` + uncommitted packet files below (accepted commit SHA at close)
+Decision/profile: DEC-001-single-node-alpha (FU-02 Option A report-only)
+Implementation agent: OpenCode / Muse Spark 1.3 free / xhigh
+Review agent: OpenAI / GPT-5.6 Sol / medium
+Repair cycle: 2
+
+## Ledger
+| Row | Result | Evidence | Remaining |
+| R1 raw capture | GREEN | corpus/auth-http-denied-error.json: 4 deterministic exchanges (400 malformed, 401 invalid x2 identical, 401 expired seeded), redacted, guest leg excluded with reason | None |
+| R2 exact replay | GREEN | TestCF003DeniedErrorCaptureReplay: exact bytes + Content-Type, id/fixture/app binding, throttle {2+1}, guest shape; -race twice, zero skips | None |
+| R3 single-row flip | GREEN | Only auth-http-denied-error gap→covered (9/13/4 → 10/12/4); validate + validate-release green; 18/18 replay green | None |
+| R4 exclusions | GREEN | WS record fails closed; .json evidence http/sse-only (registry + alias guards); no FU-01/03/04, no v1 | None |
+
+## Changes
+- corpus/auth-http-denied-error.json (NEW): self-bound envelope + 4 exchanges + notes
+- corpus/fixtures/auth-http-denied-error.json (NEW): dedicated fixture (app 0000-4000-8000-000000000003)
+- corpus/manifest.json: fixtures[] entry + auth-http-denied-error row only
+- cmd/instantd/runtime_cf003_denied_replay_test.go (NEW): exact replay test
+- internal/corpus/manifest.go + manifest_test.go: transport-evidence self-binding (id/fixture/scenario==id, http/sse-only, WS alias guard) + 5 contract subtests
+
+## Verification
+| Command/run | Selected | Exit | Meaning |
+| replay test -race twice (owned fixture) | 1 test | 0,0 | R2 exact replay |
+| TestCorpusReplayIntegration | 18/18 | 0 | no corpus regression |
+| validate / validate-release | full | 0,0 | R3 gates |
+| self-binding contract tests | 5/5 | 0 | F1 + WS-alias guard |
+| WS-record exclusion | 1 | 0 | R4 enforcement |
+| internal/corpus + cmd/corpusctl (incl. -race) | full | 0 | affected packages |
+| gofmt/vet/diff-check | n/a | 0 | static clean |
+
+## Independent review
+- Verdict: ACCEPT (terminal; R1-R4 positively verified with file:line-level checks)
+- Findings repaired: 5 across 2 cycles (borrowed scenario, fixture mismatch, missing expired branch, false no-residue, WS self-bind bypass)
+- Remaining findings: none
+- Evidence limitations: DB lanes run on owned testkit fixtures only; no external/v1/release qualification claimed
+
+## Not run
+- Full ./cmd/instantd suite per run (affected focused lanes run instead); production gate end-to-end (FR-002 owns it); differential/v1 (FU-04 blocked)
+
+## Scope audit
+- Pre-existing changes preserved: QR-003 commit c9483a95 intact; STAGE-0 docs preserved
+- Leased paths (+cycle-0 validator extension, disclosed): listed under Changes; nothing else
+- Coordinator-owned integration: this handoff + close-out commit (local only, no push)
+- Process note: repair-2 handoff prose claimed "no new edit required" while the diff shows its transport-guard edits; coordinator verified substance directly (5/5 subtests, validate green) and accepts the code, not the prose. Worker handoff accuracy itself is a follow-up observation, not a packet defect.
+- Unexpected changes: none
+
+## Artifact/provenance
+- Candidate SHA: accepted commit SHA at close (below)
+- Evidence: checked-in capture + replay test + battery outputs above
+- Environment: go1.27.1 darwin/arm64; owned instant_test_* fixtures only
+
+## Next prerequisite
+- CF-003-2A2 (auth-http-refresh-lifecycle) reusing the self-bound transport-evidence pattern
+
+CF-003-2A1 accepted commit: `47a95683ece1a825dc8ce23b59af63c4adab882e` (local only, no push). Tree clean. CF-003 stays PARTIAL (single-row flip only: 10 covered / 12 gap / 4 unsupported).

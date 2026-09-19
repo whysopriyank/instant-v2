@@ -1,0 +1,60 @@
+{
+  "scenario": "auth-http-denied-error",
+  "id": "auth-http-denied-error",
+  "transport": "http",
+  "status": "covered",
+  "fixture": "auth-http-denied-error",
+  "source": "Report-only single-flow capture of the already-accepted assembled leg TestCF003AssembledAuthMagicCodeDenied (@ 356d68d) plus a deterministically seeded expired-magic-code leg, under FU-02 Option A; no corpusctl recorder behavior change, no v1 oracle. The expired leg is seeded at fixture setup by inserting a magic-code triple pair with created_at backdated 48h (past the 24h TTL); no sleep is involved.",
+  "redaction": "CF-002 discipline: volatile transport headers (Date, Content-Length, Transfer-Encoding) excluded; no credential-bearing headers present on these exchanges so no header redaction applies; application payload keys retained exactly and remain comparison-significant. No tokens, timestamps, DSNs, or database URLs appear in these bytes.",
+  "excluded": "The post-denial guest sign-in leg is excluded from these bytes with reason: its response mints fresh UUID identity/token values, so exact byte replay is impossible. Guest sign-in is a live post-denial shape check only (values asserted live, never checked in); it is not a no-residue proof. The 401 legs DO persist auth_throttle failure rows (2 for the invalid-code email, 1 for the expired-code email, all below the 5-attempt lockout threshold), asserted exactly by the replay test.",
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "target": "/runtime/auth/verify_magic_code",
+        "body": "{}"
+      },
+      "response": {
+        "status": 400,
+        "headers": {"Content-Type": ["application/json"]},
+        "body": "{\"message\":\"email, code and app-id are required\"}\n"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "target": "/runtime/auth/verify_magic_code",
+        "body": "{\"app-id\":\"00000000-0000-4000-8000-000000000003\",\"code\":\"000000\",\"email\":\"cf003-denied@example.test\"}"
+      },
+      "response": {
+        "status": 401,
+        "headers": {"Content-Type": ["application/json"]},
+        "body": "{\"message\":\"authn: invalid magic code\"}\n"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "target": "/runtime/auth/verify_magic_code",
+        "body": "{\"app-id\":\"00000000-0000-4000-8000-000000000003\",\"code\":\"000000\",\"email\":\"cf003-denied@example.test\"}"
+      },
+      "response": {
+        "status": 401,
+        "headers": {"Content-Type": ["application/json"]},
+        "body": "{\"message\":\"authn: invalid magic code\"}\n"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "target": "/runtime/auth/verify_magic_code",
+        "body": "{\"app-id\":\"00000000-0000-4000-8000-000000000003\",\"code\":\"654321\",\"email\":\"cf003-expired@example.test\"}"
+      },
+      "response": {
+        "status": 401,
+        "headers": {"Content-Type": ["application/json"]},
+        "body": "{\"message\":\"authn: expired magic code\"}\n"
+      }
+    }
+  ]
+}
