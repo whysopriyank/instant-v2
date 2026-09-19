@@ -1054,3 +1054,12 @@ EXTERNAL_EVIDENCE`. No such flip is made here.
 
 `corpus/manifest.json` untouched; all 13 coverage rows stay `gap`;
 `program-manifest.md` untouched. No push, deployment, publication, or tag.
+
+## Follow-up packets pointer (2026-09-19, HEAD 302b13816f07bfb1f76d6340572bbc1ddf308436 clean, docs only)
+
+Bounded definitions for the structurally-blocked remainder live in
+`docs/plans/finish-up/followup-packets.md` (FU-01 multi-client capture
+contract, FU-02 recorder scope decision with WS exclusion as constraint,
+FU-03 admin-presence surface decision, FU-04 CF-004/005 external
+evidence out of local scope). All four are proposed, not started; no
+status flipped here.
