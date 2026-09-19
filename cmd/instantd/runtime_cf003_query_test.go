@@ -53,16 +53,6 @@ func TestCF003AssembledQueryConjunctionAndOrder(t *testing.T) {
 		}
 		return todos, envelope.PageInfo
 	}
-	todoIDs := func(todos any) []any {
-		t.Helper()
-		ids := []any{}
-		for _, raw := range todos.([]any) {
-			todo, _ := raw.(map[string]any)
-			ids = append(ids, todo["id"])
-		}
-		return ids
-	}
-
 	transact(
 		[]any{"update", "todos", cf003EntityID, map[string]any{"title": "cf003-alpha", "priority": 1, "team": "red"}},
 		[]any{"update", "todos", entityB, map[string]any{"title": "cf003-beta", "priority": 2, "team": "red"}},
@@ -106,14 +96,14 @@ func TestCF003AssembledQueryConjunctionAndOrder(t *testing.T) {
 	todos, _ = query(map[string]any{"todos": map[string]any{"$": map[string]any{
 		"order": map[string]any{"k": "priority", "direction": "asc"},
 	}}})
-	if got := todoIDs(todos); !reflect.DeepEqual(got, []any{cf003EntityID, entityB, entityC}) {
-		t.Fatalf("ascending order ids = %#v", got)
+	if !reflect.DeepEqual(todos, []any{wantA, wantB, wantC}) {
+		t.Fatalf("ascending order = %#v; want exactly [%#v %#v %#v]", todos, wantA, wantB, wantC)
 	}
 	todos, _ = query(map[string]any{"todos": map[string]any{"$": map[string]any{
 		"order": map[string]any{"k": "priority", "direction": "desc"},
 	}}})
-	if got := todoIDs(todos); !reflect.DeepEqual(got, []any{entityC, entityB, cf003EntityID}) {
-		t.Fatalf("descending order ids = %#v", got)
+	if !reflect.DeepEqual(todos, []any{wantC, wantB, wantA}) {
+		t.Fatalf("descending order = %#v; want exactly [%#v %#v %#v]", todos, wantC, wantB, wantA)
 	}
 
 	// Ordered pages partition the match set: first page plus its cursor-held
@@ -121,8 +111,8 @@ func TestCF003AssembledQueryConjunctionAndOrder(t *testing.T) {
 	first, info := query(map[string]any{"todos": map[string]any{"$": map[string]any{
 		"order": map[string]any{"k": "priority", "direction": "asc"}, "limit": 2,
 	}}})
-	if got := todoIDs(first); !reflect.DeepEqual(got, []any{cf003EntityID, entityB}) {
-		t.Fatalf("ordered first page ids = %#v", todoIDs(first))
+	if !reflect.DeepEqual(first, []any{wantA, wantB}) {
+		t.Fatalf("ordered first page = %#v; want exactly [%#v %#v]", first, wantA, wantB)
 	}
 	endCursor, _ := info["endCursor"].(string)
 	if info["hasNextPage"] != true || endCursor == "" {
