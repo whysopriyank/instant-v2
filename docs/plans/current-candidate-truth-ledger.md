@@ -938,3 +938,68 @@ are report-only scope changes, captured-v1 flips await CF-004/005 external
 evidence). CF-003 stays PARTIAL; CF-004/CF-005 stay BLOCKED. No row status
 flipped, no `program-manifest.md` table change, no code/tests/manifest
 change. No push, deployment, publication, or tag.
+
+## CF-003 honest closure — per-gap mapping appendix (2026-09-19, HEAD 2c15ac97c2771ea9e1d727a8154db679e84e96eb clean, docs only)
+
+No status flipped; `corpus/manifest.json` untouched (all 13 coverage rows
+stay `gap`); `program-manifest.md` untouched (no per-gap notes column, so
+the mapping lives here + execution-ledger). CF-003 PARTIAL; CF-004/005
+BLOCKED. Legs present at this HEAD; cited SHA is the acceptance commit.
+
+- `auth-http-refresh-lifecycle`: `runtime_cf003_auth_batch_test.go::TestCF003AssembledAuthRefreshBatchAndSignout`
+  @ `a686613` (exact whole-user/batch). Missing: raw HTTP capture. Why:
+  report-only scope change.
+- `auth-http-denied-error`: `runtime_cf003_auth_batch_test.go::TestCF003AssembledAuthMagicCodeDenied`
+  @ `356d68d` (400/401 exact, replay identical, no residue). Missing: raw
+  HTTP capture. Why: report-only scope change.
+- `query-conjunction-gap`: `runtime_cf003_query_test.go::TestCF003AssembledQueryConjunctionAndOrder`
+  @ `31d5539`+`b293a5c` (exact whole-result, not ID-only). Missing: HTTP
+  query exchange capture. Why: report-only scope change.
+- `query-concurrency-gap`: `runtime_cf003_sse_concurrency_test.go::TestCF003AssembledSSEQueryConcurrencyOrderedSnapshot`
+  @ `778d348`+`19ec8e9` (identical ordered snapshot, exact float
+  watermark). Missing: multi-client SSE capture. Why: no multi-client
+  capture contract.
+- `refresh-delta-boundary`: `runtime_cf003_delta_transport_test.go::TestCF003AssembledDeltaCrossTransportConvergence`
+  @ `6bd719e` (WS delta patch applied equals SSE whole result, same tx,
+  exact floats). Missing: corpus delta leg. Why: WS excluded by
+  enforcement (`record --transport ws` fails closed).
+- `refresh-sse-lifecycle`: `runtime_cf003_sse_test.go::TestCF003AssembledSSERefreshAndReconnect`
+  @ `ec78ad7` (exact handshake/refresh/teardown/reconnect). Missing: SSE
+  scenario capture. Why: report-only scope change.
+- `refresh-convergence-concurrency`: same SSE-concurrency leg as
+  query-concurrency @ `778d348`+`19ec8e9` (one change converges both at
+  exact tx). Missing: multi-client fixture + raw streams. Why: no
+  multi-client capture contract.
+- `rooms-fanout-positive`: `runtime_cf003_room_sse_test.go::TestCF003AssembledRoomFanoutSSE`
+  @ `58dab88` (ordered presence/broadcast/leave exact; WS variant
+  `runtime_cf003_room_test.go::TestCF003AssembledRoomLifecycle` @
+  `ec78ad7`). Missing: multi-client stream capture. Why: no multi-client
+  capture contract (WS flip additionally excluded).
+- `rooms-presence-lifecycle`: `runtime_cf003_presence_exclusion_test.go::TestCF003AssembledAdminPresenceExclusion`
+  @ `951175c` (stable 501 exclusion, 401 without disclosure). DIVERGENCE:
+  manifest `expectedState` still describes a positive presence view while
+  product enforces 501. Owner decision required (rewrite `expectedState`
+  to exclusion vs select positive surface); NOT rewritten here. Row stays
+  `gap`.
+- `transactions-rollback-error`: `runtime_cf003_transaction_test.go::TestCF003AssembledTransactionMatrix`
+  @ `ec78ad7` + `runtime_cf003_transaction_transport_test.go::TestCF003AssembledTransactionTransportMatrix`
+  @ `43ed443` (rollback exact state, per-transport denial mutates
+  nothing). Missing: HTTP exchange capture. Why: report-only scope change.
+- `transactions-cardinality-boundary`: `runtime_cf003_transaction_transport_test.go::TestCF003AssembledTransactionTransportMatrix`
+  @ `43ed443`+`ab0d75b`+`e2d97ae` +
+  `runtime_cf003_runtime_transact_test.go::TestCF003AssembledRuntimeTransactMatrix`
+  @ `dcc8373`+`255e28b` (final-wins exactly once, len==1 whole-result).
+  Missing: corpus cardinality/merge/cascade leg. Why: WS excluded;
+  SSE/HTTP variants report-only.
+- `transactions-lookup-lifecycle`: `runtime_cf003_sse_lookup_test.go::TestCF003AssembledSSELookupLifecycle`
+  @ `63b82d0`+`2340195`+`f904b42` (refresh-ok at exact tx, strict
+  child-nodes). Missing: SSE transaction evidence. Why: report-only scope
+  change.
+- `transactions-concurrency-gap`: `runtime_cf003_transaction_test.go::TestCF003AssembledTransactionMatrix`
+  @ `ec78ad7` + transaction-transport @ `43ed443` (exact winner/baseline,
+  unique-constraint marker). Missing: HTTP concurrency capture. Why:
+  report-only scope change (barrier only, no fault-scheduled overlap).
+
+Captured-v1: all scenario oracles are authored-v2 `regression`, none is a
+captured v1 oracle; v1-parity flips await CF-004/005 (BLOCKED). No push,
+deployment, publication, or tag.

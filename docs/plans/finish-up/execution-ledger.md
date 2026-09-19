@@ -883,3 +883,174 @@ flipped. CF-003 stays `PARTIAL /
 HTTP_SSE_PERMISSION_MULTICLIENT_TRANSACTION_ROOM_DELTA_ACCEPTED_MATRIX_PENDING`;
 CF-004/CF-005 stay `BLOCKED / EXTERNAL_EVIDENCE`. No push, deployment,
 publication, or tag.
+
+## CF-003 honest closure — per-gap assembled-route mapping (2026-09-19, HEAD 2c15ac97c2771ea9e1d727a8154db679e84e96eb clean, docs only)
+
+Scope: docs + manifest-notes mapping only. No code, no tests, no
+`corpus/manifest.json` edit, no NDJSON fabrication. No gap→covered flip.
+`program-manifest.md` has no per-gap notes/oracle column, so the mapping
+lives here and in the truth-ledger appendix; status codes are untouched.
+CF-003 stays `PARTIAL /
+HTTP_SSE_PERMISSION_MULTICLIENT_TRANSACTION_ROOM_DELTA_ACCEPTED_MATRIX_PENDING`;
+CF-004/CF-005 stay `BLOCKED / EXTERNAL_EVIDENCE`. All legs below were
+ACCEPTed on `main` and are present at this HEAD; the cited short SHA is the
+acceptance commit for that leg's exact oracle.
+
+Oracle standard cited as "exact": whole-result `reflect.DeepEqual`
+(lengths before elements where stated), exact float `processed-tx-id`
+compare, exact status/body strings, exact session/presence snapshots. A
+subset/ID-only check would fail the cited test.
+
+1. `auth-http-refresh-lifecycle` (http, refresh rotation/replay) —
+   `cmd/instantd/runtime_cf003_auth_batch_test.go::TestCF003AssembledAuthRefreshBatchAndSignout`
+   @ `a686613`. Proves plural `POST /runtime/auth/refresh_tokens` batch +
+   `POST /runtime/signout` alias with exact whole-user DeepEqual
+   (`id/type/refresh_token`), exact batch application, unknown-token 401
+   exact. Missing flip: checked-in raw HTTP capture + corpus replay
+   (`00-smoke.ndjson`-class evidence). Why gap remains: single-flow HTTP
+   flip would be a report-only scope change without checked-in raw capture;
+   no NDJSON fabricated. Any captured-v1 flip awaits CF-004/005 (BLOCKED).
+
+2. `auth-http-denied-error` (http, client-safe denial) —
+   `cmd/instantd/runtime_cf003_auth_batch_test.go::TestCF003AssembledAuthMagicCodeDenied`
+   @ `356d68d`. Proves `POST /runtime/auth/verify_magic_code` 400 exact
+   `email, code and app-id are required`, 401 exact `authn: invalid magic
+   code` twice (replay identical), post-denial guest sign-in exact whole
+   user + singular verify exact, no auth-store residue. Missing flip:
+   checked-in HTTP denied-error capture. Why gap remains: report-only scope
+   change; awaits CF-004/005 for any v1-parity claim.
+
+3. `query-conjunction-gap` (http, conjunction + ordering over HTTP query
+   path) —
+   `cmd/instantd/runtime_cf003_query_test.go::TestCF003AssembledQueryConjunctionAndOrder`
+   @ `31d5539` + `b293a5c`. Proves multi-predicate conjunctions and
+   asc/desc/paged ordering over mounted `POST /runtime/framework/query`
+   with exact whole-result DeepEqual (not ID-only; `b293a5c` replaced
+   slug-only checks). Missing flip: checked-in HTTP query exchange using
+   the adapter. Why gap remains: report-only scope change.
+
+4. `query-concurrency-gap` (sse, concurrent subscribers observe one
+   ordered snapshot) —
+   `cmd/instantd/runtime_cf003_sse_concurrency_test.go::TestCF003AssembledSSEQueryConcurrencyOrderedSnapshot`
+   @ `778d348` + `19ec8e9`. Proves two SSE subscribers through a concurrent
+   barrier observe one identical ordered whole-result snapshot (lengths
+   before elements); `19ec8e9` pins exact float watermark compare
+   (`gotTx != float64(txID)` fails). Missing flip: owned multi-client SSE
+   capture + raw stream evidence. Why gap remains: no multi-client capture
+   contract (CF-002 `managed-record` is single-flow).
+
+5. `refresh-delta-boundary` (ws, delta/full converge) —
+   `cmd/instantd/runtime_cf003_delta_transport_test.go::TestCF003AssembledDeltaCrossTransportConvergence`
+   @ `6bd719e`. Proves WS 0.23.0 structural `refresh-ok-delta` patch + SSE
+   full `refresh-ok` at the exact same tx; equal baseline watermarks/result
+   metadata; trigger advances baseline; parsed wire delta applied to WS
+   baseline equals parsed SSE full result and exact 4-entity map; exact
+   float compares. Missing flip: corpus NDJSON delta leg via replay. Why
+   gap remains: WS excluded — CF-002 `record --transport ws` fails closed
+   with no artifact (`TestCF002WSRecordCreatesNoArtifact`); package/route
+   tests are not corpus acceptance.
+
+6. `refresh-sse-lifecycle` (sse, handshake/updates/reconnect ordered) —
+   `cmd/instantd/runtime_cf003_sse_test.go::TestCF003AssembledSSERefreshAndReconnect`
+   @ `ec78ad7`. Proves mounted GET/POST SSE exact handshake, init attrs,
+   POST responses, add-query ack, initial full tree, tx-driven refresh with
+   exact attr IDs + positive watermark, old-session teardown, distinct
+   reconnect creds, converged reconnect state (3x race + Sol ACCEPT per
+   ledger). Missing flip: checked-in SSE scenario + corpus replay. Why gap
+   remains: single-flow SSE flip would be a report-only scope change; no
+   NDJSON fabricated.
+
+7. `refresh-convergence-concurrency` (sse, all selected subscribers
+   converge after one change) — same leg as (4):
+   `cmd/instantd/runtime_cf003_sse_concurrency_test.go::TestCF003AssembledSSEQueryConcurrencyOrderedSnapshot`
+   @ `778d348` + `19ec8e9`. Proves one committed admin change converges
+   both subscribers to identical refresh frames at the exact tx with exact
+   final titles. Missing flip: owned multi-client fixture + raw stream
+   evidence. Why gap remains: no multi-client capture contract.
+
+8. `rooms-fanout-positive` (sse, same-node peers ordered presence +
+   broadcast) —
+   `cmd/instantd/runtime_cf003_room_sse_test.go::TestCF003AssembledRoomFanoutSSE`
+   @ `58dab88`. Proves two SSE subscribers sharing one room via
+   `Manager.Handle`: join fans ordered presence to both, resync converges
+   joiner, set-presence fans update to both, client-broadcast reaches only
+   the peer with exact sender session, leave converges survivor to exact
+   one-member snapshot; lengths-before-elements DeepEqual.
+   Cross-reference: WS variant
+   `cmd/instantd/runtime_cf003_room_test.go::TestCF003AssembledRoomLifecycle`
+   @ `ec78ad7` (join/presence-update/broadcast/leave, 10x race + Sol
+   ACCEPT) proves the WS path but cannot flip corpus. Missing flip:
+   multi-client stream capture. Why gap remains: no multi-client capture
+   contract; WS flip additionally excluded by enforcement.
+
+9. `rooms-presence-lifecycle` (http, admin presence join/update/leave) —
+   `cmd/instantd/runtime_cf003_presence_exclusion_test.go::TestCF003AssembledAdminPresenceExclusion`
+   @ `951175c`. Proves enforced exclusion: `GET /admin/rooms/presence`
+   returns stable 501 unsupported to an authorized caller, still 501 with
+   live WS room presence behind it, 401 missing/foreign without disclosing
+   state. DIVERGENCE (explicit, not rewritten): manifest `expectedState`
+   still reads "admin presence view reflects join, update and leave
+   lifecycle" (positive surface) while product enforces 501 exclusion.
+   Owner decision required: rewrite `expectedState` to the 501 exclusion
+   vs select and implement a positive admin-presence surface + raw capture.
+   `expectedState` is NOT rewritten here. Row stays `gap`. Flipping to
+   covered on the current exclusion text would be a report-only scope
+   change; flipping to the positive text has no positive capture.
+
+10. `transactions-rollback-error` (http, no partial write) —
+    `cmd/instantd/runtime_cf003_transaction_test.go::TestCF003AssembledTransactionMatrix`
+    @ `ec78ad7` (rollback after second-step unique-ID failure, exact whole
+    query state, 10x race + Sol ACCEPT) + cross-transport denial legs
+    `cmd/instantd/runtime_cf003_transaction_transport_test.go::TestCF003AssembledTransactionTransportMatrix`
+    @ `43ed443` (per-transport exact validation denial mutates nothing,
+    exact whole HTTP query convergence). Missing flip: authored HTTP
+    transaction exchange (NDJSON). Why gap remains: report-only scope
+    change.
+
+11. `transactions-cardinality-boundary` (ws, cardinality/merge/cascade/
+    required) —
+    `cmd/instantd/runtime_cf003_transaction_transport_test.go::TestCF003AssembledTransactionTransportMatrix`
+    @ `43ed443` + `ab0d75b` (WS same-batch cardinality-one final-wins
+    exactly once) + `e2d97ae` (SSE same boundary) +
+    `cmd/instantd/runtime_cf003_runtime_transact_test.go::TestCF003AssembledRuntimeTransactMatrix`
+    @ `dcc8373` + `255e28b` (exact single-row whole-result, `len==1` +
+    DeepEqual; malformed/admin-only/bad-input denials mutate nothing).
+    Only `ws.transact.required` retraction is corpus-covered. Missing flip:
+    corpus NDJSON cardinality/merge/cascade leg. Why gap remains: WS
+    variant excluded by enforcement; SSE/HTTP variants would be
+    report-only scope changes without checked-in capture.
+
+12. `transactions-lookup-lifecycle` (sse, lookup persists + visible over
+    stream) —
+    `cmd/instantd/runtime_cf003_sse_lookup_test.go::TestCF003AssembledSSELookupLifecycle`
+    @ `63b82d0` + `2340195` + `f904b42`. Proves lookup-eid update retargets
+    seeded entity + second lookup mints fresh entity; each surfaces as
+    `refresh-ok` at the exact triggering tx and converges the mounted HTTP
+    query path to the exact whole result; lengths-before-elements, exact
+    float watermark, strict child-nodes oracle (`f904b42`). Missing flip:
+    authored SSE transaction evidence (NDJSON). Why gap remains:
+    report-only scope change.
+
+13. `transactions-concurrency-gap` (http, concurrent ordering/final
+    state) —
+    `cmd/instantd/runtime_cf003_transaction_test.go::TestCF003AssembledTransactionMatrix`
+    @ `ec78ad7` (same-lookup concurrent convergence via start barrier to
+    one exact visible entity; only success or decoded unique-constraint
+    400 accepted; exact baseline + one exact winner; winner saved; baseline
+    alone after delete) +
+    `cmd/instantd/runtime_cf003_transaction_transport_test.go::TestCF003AssembledTransactionTransportMatrix`
+    @ `43ed443` (WS+SSE positive convergence past watermark). Missing
+    flip: HTTP concurrency capture proving ordering/final state via
+    replay. Why gap remains: report-only scope change (no HTTP concurrency
+    capture selected/checked in); the start barrier encourages but does
+    not force DB-level overlap, so the assembled leg is boundary evidence
+    only, not a fault-scheduled campaign.
+
+Captured-v1 note (applies to all 13): every checked-in scenario oracle is
+`regression` from the authored v2 contract (`corpus/manifest.json`
+`oracle.kind`), not a captured v1 oracle. Any flip claiming v1 parity
+awaits CF-004 pinned-v1 environment + CF-005 differential, both `BLOCKED /
+EXTERNAL_EVIDENCE`. No such flip is made here.
+
+`corpus/manifest.json` untouched; all 13 coverage rows stay `gap`;
+`program-manifest.md` untouched. No push, deployment, publication, or tag.
