@@ -849,3 +849,37 @@ CF-003 remains `PARTIAL / HTTP_SSE_PERMISSION_MULTICLIENT_TRANSACTION_ROOM_DELTA
 CF-004 and CF-005 remain `BLOCKED / EXTERNAL_EVIDENCE`. No CF-003/004/005
 implementation, manifest, coverage, or status changed. No push, deployment,
 publication, or tag.
+
+## CF-003 assembled-legs reconciliation (2026-09-19, HEAD 58dab88e5554f2abfd5d02f77ed4550ffcecaac7 clean, docs only)
+
+Audit finding recorded: all 13 corpus manifest coverage gaps have accepted
+assembled-route legs with exact oracles. The accepted legs on `main`, in
+commit order, are:
+
+- Query conjunction and ordering (`31d5539`) with exact whole-result oracles
+  (`b293a5c`).
+- Auth refresh-batch and alias-signout (`a686613`).
+- Admin-presence exclusion (`951175c`).
+- Runtime-transact (`dcc8373`) with exact whole-result oracle (`255e28b`).
+- Transaction WS/SSE-transport (`43ed443`) with WS cardinality-boundary
+  (`ab0d75b`) and SSE cardinality-boundary (`e2d97ae`) legs.
+- SSE query-concurrency (`778d348`) with exact watermark compare (`19ec8e9`).
+- Delta cross-transport (`6bd719e`).
+- SSE lookup-lifecycle (`63b82d0`) with strict oracles (`2340195`,
+  `f904b42`).
+- Magic-code denied leg for the auth-http transport matrix (`356d68d`).
+- SSE fanout leg for the rooms transport matrix (`58dab88`, current HEAD).
+
+Gap-classification outcome: no class-(a) remainder — no remaining gap row is
+flippable by in-scope work. Rows stay gap for the stated structural reasons
+only: WS-recording flips are excluded by enforcement (CF-002 `record
+--transport ws` fails closed with no artifact); multi-client stream capture
+flips have no capture contract; single-flow HTTP/SSE flips are report-only
+scope changes; captured-v1 flips await CF-004/005 external evidence.
+
+Docs-only reconciliation: no code, tests, `corpus/manifest.json`, or CF-002
+materials touched. `program-manifest.md` is untouched — no row status
+flipped. CF-003 stays `PARTIAL /
+HTTP_SSE_PERMISSION_MULTICLIENT_TRANSACTION_ROOM_DELTA_ACCEPTED_MATRIX_PENDING`;
+CF-004/CF-005 stay `BLOCKED / EXTERNAL_EVIDENCE`. No push, deployment,
+publication, or tag.

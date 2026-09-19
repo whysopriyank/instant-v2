@@ -919,3 +919,22 @@ CF-002 remains `COMPLETE / ACCEPTED_CANDIDATE_BOUND_LOCAL_CAPTURE` with local
 HTTP+SSE scope only. Plain record remains caller-asserted. CF-003 remains
 PARTIAL and unchanged; CF-004/CF-005 remain BLOCKED and unchanged. No remote,
 SDK, v1, external-fixture, push, deployment, publication, or tag claim is made.
+
+## CF-003 assembled-legs reconciliation note (2026-09-19, HEAD 58dab88e5554f2abfd5d02f77ed4550ffcecaac7, docs only)
+
+Audit finding: all 13 corpus manifest coverage gaps have accepted
+assembled-route legs with exact oracles on `main` — query-conjunction
+(`31d5539` + `b293a5c`), auth-batch (`a686613`), presence-exclusion
+(`951175c`), runtime-transact (`dcc8373` + `255e28b`),
+transaction-transport + WS/SSE cardinality (`43ed443`, `ab0d75b`,
+`e2d97ae`), SSE-concurrency (`778d348` + `19ec8e9`), delta cross-transport
+(`6bd719e`), SSE-lookup (`63b82d0` + `2340195` + `f904b42`),
+magic-code-denied (`356d68d`), rooms-fanout SSE (`58dab88`).
+
+Gap-classification outcome: no class-(a) remainder; rows stay gap for the
+stated structural reasons only (WS recording excluded by enforcement,
+multi-client stream capture contract nonexistent, single-flow HTTP/SSE flips
+are report-only scope changes, captured-v1 flips await CF-004/005 external
+evidence). CF-003 stays PARTIAL; CF-004/CF-005 stay BLOCKED. No row status
+flipped, no `program-manifest.md` table change, no code/tests/manifest
+change. No push, deployment, publication, or tag.
