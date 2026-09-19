@@ -66,7 +66,11 @@ func TestCF003AssembledRuntimeTransactMatrix(t *testing.T) {
 	}
 	exactTitle := func(want string) {
 		t.Helper()
-		cf003ExactTodo(t, cf003TodoByID(t, queryTodos(), cf003EntityID), map[string]any{
+		todos := queryTodos()
+		if len(todos) != 1 {
+			t.Fatalf("runtime matrix todos = %#v; want exactly one row", todos)
+		}
+		cf003ExactTodo(t, cf003TodoByID(t, todos, cf003EntityID), map[string]any{
 			"id": cf003EntityID, "title": want,
 		})
 	}
