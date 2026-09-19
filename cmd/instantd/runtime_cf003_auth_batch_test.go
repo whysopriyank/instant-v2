@@ -148,3 +148,72 @@ func TestCF003AssembledAuthRefreshBatchAndSignout(t *testing.T) {
 		t.Fatalf("survivor verify status/body = %d %q; want %d %q", status, body, http.StatusOK, wantVerify)
 	}
 }
+
+// TestCF003AssembledAuthMagicCodeDenied proves the CF-003 auth-http
+// denied-error remainder for magic-code credentials over the
+// production-mounted routes: malformed verify_magic_code is a 400 with the
+// stable client-safe message, and an unknown code for a fresh email is a 401
+// with the stable invalid-code denial. The failed verification burns
+// nothing: the identical replay denies identically, and a subsequent guest
+// sign-in still issues an exact whole user. CF-003 remains PARTIAL; no
+// manifest, coverage, or other packet changed.
+func TestCF003AssembledAuthMagicCodeDenied(t *testing.T) {
+	mux, appID, _ := cf003PostgresMux(t)
+	app := platform.UUIDToStr(appID)
+
+	status, body, _ := cf003Serve(mux, http.MethodPost, "/runtime/auth/verify_magic_code",
+		`{}`, nil)
+	if status != http.StatusBadRequest || body != "{\"message\":\"email, code and app-id are required\"}\n" {
+		t.Fatalf("malformed magic verify status/body = %d %q; want 400 exact denial", status, body)
+	}
+
+	invalid := cf003JSON(t, map[string]any{
+		"email": "cf003-denied@example.test", "code": "000000", "app-id": app,
+	})
+	status, body, _ = cf003Serve(mux, http.MethodPost, "/runtime/auth/verify_magic_code", invalid, nil)
+	if status != http.StatusUnauthorized || body != "{\"message\":\"authn: invalid magic code\"}\n" {
+		t.Fatalf("invalid magic verify status/body = %d %q; want 401 exact denial", status, body)
+	}
+
+	// The failed verification burns nothing: the identical replay denies
+	// identically instead of flipping to expired or succeeding.
+	status, body, _ = cf003Serve(mux, http.MethodPost, "/runtime/auth/verify_magic_code", invalid, nil)
+	if status != http.StatusUnauthorized || body != "{\"message\":\"authn: invalid magic code\"}\n" {
+		t.Fatalf("invalid magic replay status/body = %d %q; want 401 exact denial", status, body)
+	}
+
+	// The denial leaves no auth-store residue: a fresh guest still signs in
+	// with an exact whole user and verifies through the singular path.
+	status, body, _ = cf003Serve(mux, http.MethodPost, "/runtime/auth/sign_in_guest",
+		`{"app-id":"`+app+`"}`, nil)
+	if status != http.StatusOK {
+		t.Fatalf("guest sign-in after denial = %d %q; want 200", status, body)
+	}
+	var envelope struct {
+		User map[string]any `json:"user"`
+	}
+	if err := json.Unmarshal([]byte(body), &envelope); err != nil {
+		t.Fatalf("guest sign-in body = %q: %v", body, err)
+	}
+	if len(envelope.User) != 3 || envelope.User["type"] != "guest" {
+		t.Fatalf("guest user shape = %#v; want exactly id/type/refresh_token", envelope.User)
+	}
+	id, _ := envelope.User["id"].(string)
+	tok, _ := envelope.User["refresh_token"].(string)
+	if _, err := platform.ScanUUIDErr(id); err != nil || len(tok) != 36 {
+		t.Fatalf("guest identity/token = %q/%q", id, tok)
+	}
+	if _, err := platform.ScanUUIDErr(tok); err != nil {
+		t.Fatalf("guest refresh token not uuid = %q: %v", tok, err)
+	}
+	want := map[string]any{"id": id, "type": "guest", "refresh_token": tok}
+	if !reflect.DeepEqual(envelope.User, want) {
+		t.Fatalf("guest user = %#v; want exactly %#v", envelope.User, want)
+	}
+	status, body, _ = cf003Serve(mux, http.MethodPost, "/runtime/auth/verify_refresh_token",
+		cf003JSON(t, map[string]any{"refresh-token": tok, "app-id": app}), nil)
+	wantVerify := `{"user":{"id":"` + id + `","refresh_token":"` + tok + `","type":"guest"}}` + "\n"
+	if status != http.StatusOK || body != wantVerify {
+		t.Fatalf("guest verify after denial status/body = %d %q; want %d %q", status, body, http.StatusOK, wantVerify)
+	}
+}
