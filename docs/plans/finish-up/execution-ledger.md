@@ -1063,3 +1063,40 @@ contract, FU-02 recorder scope decision with WS exclusion as constraint,
 FU-03 admin-presence surface decision, FU-04 CF-004/005 external
 evidence out of local scope). All four are proposed, not started; no
 status flipped here.
+
+## FU-01 preparatory slice (2026-09-19, HEAD a08e60612fb1041e2f8d6464afce8fd1f78580f8 clean, no push/tag)
+
+Locally-doable candidate-side contract/capture slice; core recorder work
+and all manifest flips remain gated (see below). One focused commit.
+
+- Contract doc: `docs/plans/finish-up/fu01-multiclient-capture-contract.md`
+  defines the SSE-only multi-client capture contract per FU-01
+  acceptance 1–3 as definition (subscriber counts, shared-room /
+  shared-query topologies, barrier/ordering rules, per-subscriber
+  `(subscriber, seq)` retention, canonical derivation by DeepEqual, exact
+  replay oracle with exact float watermarks and exact tx IDs;
+  late-join/resync/leave/quiescence with a bounded 250 ms quiet window;
+  CF-002 compatibility). Authorizes no recorder change, no capture run,
+  no NDJSON, no manifest flip. Records one discovered product fact: a
+  fresh subscriber's first answer uses the init-query object-tree
+  envelope at the current tx, while transactional refreshes use the
+  node-list envelope — both exact, pinned separately.
+- Shape proof: `cmd/instantd/runtime_fu01_capture_contract_test.go`
+  (`TestFU01CaptureContractQueryConcurrency`,
+  `TestFU01CaptureContractRoomFanout`) over production-mounted SSE
+  routes against owned fixtures (`INSTANT_TEST_INTEGRATION=1`):
+  per-subscriber raw retention, canonical derivation, replay of the
+  exact oracle from retention alone, bounded quiet proof, late joiners
+  (query C converges to identical final titles at the exact trigger tx;
+  room B late-joins + resyncs). Existing assembled tests untouched.
+- Evidence: focused `-race` PASS (`-count=1` and `-count=2`);
+  `TestCF002WSRecordCreatesNoArtifact` PASS (WS exclusion intact);
+  `gofmt`, `go vet ./cmd/instantd/`, `git diff --check` clean.
+- Remains gated: `corpusctl` multi-client record path (needs FU-02
+  scope decision for any manifest effect), checked-in NDJSON legs +
+  corpus replay for `rooms-fanout-positive`,
+  `query-concurrency-gap`, `refresh-convergence-concurrency`, all
+  manifest flips (`corpus/manifest.json` untouched, all rows stay
+  `gap`), v1/external (FU-04), `expectedState` (FU-03), WS capture
+  (excluded by enforcement). `followup-packets.md`,
+  `program-manifest.md` untouched; all terminal rows preserved.
