@@ -199,7 +199,7 @@ func cf003AssertSSEOrderedRefresh(t *testing.T, frame map[string]any, idAttr, ti
 		t.Fatalf("ordered refresh oracle must be non-empty")
 	}
 	gotTx, ok := frame["processed-tx-id"].(float64)
-	if !ok || int64(gotTx) != txID {
+	if !ok || gotTx != float64(txID) {
 		t.Fatalf("SSE concurrent refresh tx = %#v; want %d", frame["processed-tx-id"], txID)
 	}
 	if len(frame) != 3 || frame["op"] != "refresh-ok" {
