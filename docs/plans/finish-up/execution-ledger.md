@@ -1111,3 +1111,91 @@ per-row at execution-ledger.md:904-1047. Future flips route via
 FU-01 (multi-client rows), FU-02 scope decision (single-flow rows),
 FU-04 external (captured-v1 rows); FU-03 Option 1 already decided.
 CF-003 stays `PARTIAL`. No manifest, code, or test touched.
+
+## Coordinator run — DEC-001 single-node-alpha finish-up (2026-09-19)
+
+Baseline recaptured: HEAD `65d1df05eb51139a735cd755b09db4f42c745e2a` on
+`main`, clean tree (`git status --short` empty, no diff), go1.27.1
+darwin/arm64, UTC `2026-09-19T06:21:21Z`. Matches the invocation hint
+SHA; the hint's packet counts (29 alpha-required / 22 complete /
+CF-003+QR-005 partial / FR-001 pending / OP-003+OP-005+QR-001+FR-002
+blocked) are a starting hint only — each packet is reconciled against
+current source and its latest handoff before work begins.
+
+STAGE 0 control reconciliation (coordinator, no packet state changed):
+- `docs/plans/finish-up/README.md` stale
+  `READY_FOR_OWNER_SCOPE_DECISION` corrected to
+  `IN_PROGRESS_DEC001_SINGLE_NODE_ALPHA` with the recorded owner
+  decisions. Planning baseline retained as historical.
+- Supplied FU-02 decision recorded durably in
+  `docs/plans/finish-up/fu02-recorder-scope-decision.md` (Option A:
+  report-only raw capture + exact replay for the 8 already-accepted
+  single-flow HTTP/SSE legs; no general recorder expansion unless
+  evidence proves necessity; WS exclusion re-affirmed).
+- FU-01 contract (`fu01-multiclient-capture-contract.md`) and FU-03
+  Option 1 (`fu03-admin-presence-decision.md`) already on `main`;
+  preserved unchanged. `followup-packets.md`, `program-manifest.md`,
+  `corpus/manifest.json` untouched. No product or evidence packet
+  marked complete by this reconciliation.
+
+Live ledger for this run is maintained in this section and per-packet
+handoffs below. Next: STAGE 1 QR-003 corrective release-gate packet.
+
+## QR-003 corrective close-out (2026-09-19, HEAD 65d1df0 main + work below, go1.27.1 darwin/arm64)
+
+# Packet QR-003-corrective handoff
+
+Status: COMPLETE
+Candidate: HEAD `65d1df05eb51139a735cd755b09db4f42c745e2a` + uncommitted work below (accepted commit SHA recorded at close)
+Decision/profile: DEC-001-single-node-alpha-20260905 (QR-003 REQUIRED)
+Implementation agent: OpenCode / Muse Spark 1.3 free / xhigh
+Review agent: OpenAI / GPT-5.6 Sol / medium
+Repair cycle: 2
+
+## Ledger
+| Row | Result | Evidence | Remaining |
+| R1 lane selections explicit | GREEN | Per-lane case + lane comments in gate; per-lane zero/skip/allowed/required battery | None |
+| R2 zero required fails closed | GREEN | RELEASE_TEST_ZERO_TARGET per all 4 lanes rejects | None |
+| R3 skipped required fails closed | GREEN | Per-lane required-skip rejection incl. package-scoped corpus identities | None |
+| R4 outside-lane skips allowed | GREEN | Real reactive -short log (66 selected, 2 skipped, 0 disallowed) accepted by production gate; old any-skip would reject | None |
+| R5 child failures propagate | GREEN | RELEASE_TEST_FAIL_TARGET per vet + all 4 lanes exit 7 | None |
+| R6 real-suite pin | GREEN | Real log through actual copied gate; injected bare skip rejects | None |
+| R7 pre-existing checks intact | GREEN | Full battery 44/0: dirty/identity/hash/freshness/symlink/binary/evidence/lane/type/Linux/handoff/seam | None |
+
+## Changes
+- scripts/quality-release-gate.sh: lane_disallowed_skips (3 allowlisted outside-lane substrings), package-scoped corpus parent/scenario/skip helpers, per-lane run_test_target (hermetic allowlist / owned-DB strict / contract required-identities / unknown-lane die)
+- scripts/test-quality-release-gate.sh: per-lane fixtures + real-log-through-gate block; 44 checks
+
+## Verification
+| Command/run | Selected | Exit | Meaning |
+| bash scripts/test-quality-release-gate.sh | 44 checks | 0 | Full contract battery incl. real-suite R4/R6, decoy-package, short-only, allowlisted-skip rejections |
+| bash -n both scripts; git diff --check | n/a | 0 | Syntax/whitespace clean |
+| Real reactive hermetic log via production gate | 66 sel / 2 skip / 0 disallowed | accept; injected rejects | R4/R6 real-behavior proof |
+
+## Independent review
+- Verdict: ACCEPT (third Sol review; prior two REPAIR_REQUIRED findings repaired: parent/subtest conflation + mirrored helper; package-unscoped identity + decoy case)
+- Positively verified: R1-R7 per rows above; prior-cycle repairs; go.mod corpus identity; no broader claims inferred
+- Findings repaired: 3 across 2 cycles (see above)
+- Remaining findings: none
+- Evidence limitations: owned-DB lanes (test-integration/test-contract real runs) and end-to-end gate run not executed here; owned by phase-08 FR-002 on qualified Linux with owned DB
+
+## Not run
+- make test-unit full ./... real lane (long suite); make bench-acceptance real lane; make test-integration/test-contract real lanes (AUTH-RUNTIME-001 NOT_GRANTED, no DB contact); production gate end-to-end (belongs to FR-002)
+
+## Scope audit
+- Pre-existing changes preserved: STAGE-0 docs untouched by workers
+- Leased paths: only the two gate scripts
+- Coordinator-owned integration: STAGE-0 README/fu02/ledger-docs committed alongside in the same focused local commit (no push)
+- Unexpected changes: none
+
+## Artifact/provenance
+- Candidate SHA: accepted commit SHA recorded below at close
+- Binary/config digest: n/a (hermetic gate packet; binary match check preserved, not run end-to-end)
+- Campaign: n/a
+- Evidence paths/hashes: scripts/test-quality-release-gate.sh battery output (44 passed, 0 failed)
+- Environment identity: go1.27.1 darwin/arm64; no external fixture
+
+## Next prerequisite
+- STAGE 2A first bounded single-flow capture packet (FU-02 report-only), starting with corpus layout discovery
+
+QR-003-corrective accepted commit: `8d1c0fa0d359353507f0855556ac51e384d8700e` (local only, no push). Tree clean. QR-003 stays `COMPLETE / ACCEPTED_CONTRACT_GATE` (corrective closed).

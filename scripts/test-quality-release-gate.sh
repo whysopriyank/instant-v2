@@ -62,12 +62,68 @@ if [[ ${RELEASE_TEST_MUTATE_EVIDENCE_TARGET:-} == "$target" ]]; then printf chan
 if [[ $target == build ]]; then cp "$RELEASE_TEST_BINARY" "${@: -2:1}/bin/instantd"; fi
 case "$target" in test-unit|bench-acceptance|test-integration|test-contract)
   if [[ ${RELEASE_TEST_ZERO_TARGET:-} == "$target" ]]; then exit 0; fi
+  if [[ ${RELEASE_TEST_REPLAY_LOG_TARGET:-} == "$target" ]]; then
+    cat "${RELEASE_TEST_REPLAY_LOG_PATH:?missing replay log}"
+    exit 0
+  fi
   if [[ ${RELEASE_TEST_SKIP_TARGET:-} == "$target" ]]; then
     printf '{"Action":"skip","Package":"example/corpus","Test":"TestSelected"}\n'
     exit 0
   fi
-  if [[ $target == test-contract ]]; then printf '{"Action":"skip","Package":"example/corpus","Test":"TestSelected"}\n'; fi
-  printf '{"Action":"pass","Package":"example/corpus","Test":"TestSelected"}\n'
+  if [[ ${RELEASE_TEST_REQUIRED_SKIP_TARGET:-} == "$target" ]]; then
+    printf '{"Action":"pass","Package":"example/corpus","Test":"TestSelected"}\n'
+    printf '{"Action":"skip","Package":"example/corpus","Test":"TestRequiredSkip"}\n'
+    if [[ $target == test-contract ]]; then
+      printf '{"Action":"pass","Package":"github.com/instant-v2/instant-v2/internal/corpus","Test":"TestCorpusReplayIntegration"}\n'
+      printf '{"Action":"pass","Package":"github.com/instant-v2/instant-v2/internal/corpus","Test":"TestCorpusReplayIntegration/00-smoke"}\n'
+    fi
+    exit 0
+  fi
+  if [[ ${RELEASE_TEST_ALLOWED_SKIP_TARGET:-} == "$target" ]]; then
+    printf '{"Action":"output","Package":"example/corpus","Test":"TestOutsideLane","Output":"    foo_test.go:1: integration test: set INSTANT_TEST_INTEGRATION=1 and DATABASE_URL\\n"}\n'
+    printf '{"Action":"skip","Package":"example/corpus","Test":"TestOutsideLane"}\n'
+    printf '{"Action":"output","Package":"example/corpus","Test":"TestShortOutside","Output":"    bar_test.go:1: reporting test skipped in short mode\\n"}\n'
+    printf '{"Action":"skip","Package":"example/corpus","Test":"TestShortOutside"}\n'
+    printf '{"Action":"pass","Package":"example/corpus","Test":"TestSelected"}\n'
+    if [[ $target == test-contract ]]; then
+      printf '{"Action":"pass","Package":"github.com/instant-v2/instant-v2/internal/corpus","Test":"TestCorpusReplayIntegration"}\n'
+      printf '{"Action":"pass","Package":"github.com/instant-v2/instant-v2/internal/corpus","Test":"TestCorpusReplayIntegration/00-smoke"}\n'
+    fi
+    exit 0
+  fi
+  if [[ ${RELEASE_TEST_MISSING_REQUIRED_TARGET:-} == "$target" ]]; then
+    printf '{"Action":"pass","Package":"example/corpus","Test":"TestSelected"}\n'
+    exit 0
+  fi
+  if [[ ${RELEASE_TEST_SHORT_ONLY_TARGET:-} == "$target" ]]; then
+    printf '{"Action":"pass","Package":"example/corpus","Test":"TestSelected"}\n'
+    printf '{"Action":"pass","Package":"github.com/instant-v2/instant-v2/internal/corpus","Test":"TestCorpusReplayIntegration"}\n'
+    printf '{"Action":"output","Package":"github.com/instant-v2/instant-v2/internal/corpus","Test":"TestCorpusReplayIntegration/00-smoke","Output":"    integration_test.go:43: integration test: set INSTANT_TEST_INTEGRATION=1 and DATABASE_URL\\n"}\n'
+    printf '{"Action":"skip","Package":"github.com/instant-v2/instant-v2/internal/corpus","Test":"TestCorpusReplayIntegration/00-smoke"}\n'
+    exit 0
+  fi
+  if [[ ${RELEASE_TEST_REQUIRED_ALLOWLISTED_SKIP_TARGET:-} == "$target" ]]; then
+    printf '{"Action":"pass","Package":"example/corpus","Test":"TestSelected"}\n'
+    printf '{"Action":"pass","Package":"github.com/instant-v2/instant-v2/internal/corpus","Test":"TestCorpusReplayIntegration"}\n'
+    printf '{"Action":"pass","Package":"github.com/instant-v2/instant-v2/internal/corpus","Test":"TestCorpusReplayIntegration/00-smoke"}\n'
+    printf '{"Action":"output","Package":"github.com/instant-v2/instant-v2/internal/corpus","Test":"TestCorpusReplayIntegration/01-transact-refresh","Output":"    integration_test.go:43: integration test: set INSTANT_TEST_INTEGRATION=1 and DATABASE_URL\\n"}\n'
+    printf '{"Action":"skip","Package":"github.com/instant-v2/instant-v2/internal/corpus","Test":"TestCorpusReplayIntegration/01-transact-refresh"}\n'
+    exit 0
+  fi
+  if [[ ${RELEASE_TEST_DECOY_PACKAGE_TARGET:-} == "$target" ]]; then
+    printf '{"Action":"pass","Package":"example/corpus","Test":"TestSelected"}\n'
+    printf '{"Action":"pass","Package":"github.com/instant-v2/instant-v2/internal/corpus","Test":"TestCorpusReplayIntegration"}\n'
+    printf '{"Action":"pass","Package":"github.com/instant-v2/instant-v2/cmd/corpusctl","Test":"TestCorpusReplayIntegration/00-smoke"}\n'
+    exit 0
+  fi
+  if [[ $target == test-contract ]]; then
+    printf '{"Action":"skip","Package":"example/corpus","Test":"TestSelected"}\n'
+    printf '{"Action":"pass","Package":"example/corpus","Test":"TestSelected"}\n'
+    printf '{"Action":"pass","Package":"github.com/instant-v2/instant-v2/internal/corpus","Test":"TestCorpusReplayIntegration"}\n'
+    printf '{"Action":"pass","Package":"github.com/instant-v2/instant-v2/internal/corpus","Test":"TestCorpusReplayIntegration/00-smoke"}\n'
+  else
+    printf '{"Action":"pass","Package":"example/corpus","Test":"TestSelected"}\n'
+  fi
 esac
 EOF
 chmod +x "$fakebin/make"
@@ -100,8 +156,26 @@ jq '.lanes.container="run"' "$evidence/bad.json" >"$evidence/bad.tmp" && mv "$ev
 bad "wrong lane selection" "manifest schema" env PATH="$fakebin:$PATH" RELEASE_GATE_MANIFEST="$evidence/bad.json" RELEASE_CANDIDATE_SHA="$sha" RELEASE_CAMPAIGN_ID=campaign-1 DATABASE_URL=x bash "$gate"
 
 status_is "child failure propagated" 7 env PATH="$fakebin:$PATH" RELEASE_GATE_MANIFEST="$evidence/manifest.json" RELEASE_CANDIDATE_SHA="$sha" RELEASE_CAMPAIGN_ID=campaign-1 DATABASE_URL=x RELEASE_TEST_CALLS="$calls" RELEASE_TEST_BINARY="$evidence/candidate/instantd" RELEASE_TEST_FAIL_TARGET=vet bash "$gate"
+for lane in test-unit bench-acceptance test-integration test-contract; do
+  status_is "child failure propagates for $lane" 7 env PATH="$fakebin:$PATH" RELEASE_GATE_MANIFEST="$evidence/manifest.json" RELEASE_CANDIDATE_SHA="$sha" RELEASE_CAMPAIGN_ID=campaign-1 DATABASE_URL=x RELEASE_TEST_CALLS="$calls" RELEASE_TEST_BINARY="$evidence/candidate/instantd" RELEASE_TEST_FAIL_TARGET="$lane" bash "$gate"
+done
 bad "zero selected tests rejected" "test-unit selected zero tests" env PATH="$fakebin:$PATH" RELEASE_GATE_MANIFEST="$evidence/manifest.json" RELEASE_CANDIDATE_SHA="$sha" RELEASE_CAMPAIGN_ID=campaign-1 DATABASE_URL=x RELEASE_TEST_CALLS="$calls" RELEASE_TEST_BINARY="$evidence/candidate/instantd" RELEASE_TEST_ZERO_TARGET=test-unit bash "$gate"
+for lane in bench-acceptance test-integration test-contract; do
+  bad "zero selected tests rejected for $lane" "$lane selected zero tests" env PATH="$fakebin:$PATH" RELEASE_GATE_MANIFEST="$evidence/manifest.json" RELEASE_CANDIDATE_SHA="$sha" RELEASE_CAMPAIGN_ID=campaign-1 DATABASE_URL=x RELEASE_TEST_CALLS="$calls" RELEASE_TEST_BINARY="$evidence/candidate/instantd" RELEASE_TEST_ZERO_TARGET="$lane" bash "$gate"
+done
 bad "selected test skip rejected" "test-integration skipped selected tests" env PATH="$fakebin:$PATH" RELEASE_GATE_MANIFEST="$evidence/manifest.json" RELEASE_CANDIDATE_SHA="$sha" RELEASE_CAMPAIGN_ID=campaign-1 DATABASE_URL=x RELEASE_TEST_CALLS="$calls" RELEASE_TEST_BINARY="$evidence/candidate/instantd" RELEASE_TEST_SKIP_TARGET=test-integration bash "$gate"
+for lane in test-unit bench-acceptance test-contract; do
+  bad "skipped required test rejected for $lane" "$lane skipped required tests" env PATH="$fakebin:$PATH" RELEASE_GATE_MANIFEST="$evidence/manifest.json" RELEASE_CANDIDATE_SHA="$sha" RELEASE_CAMPAIGN_ID=campaign-1 DATABASE_URL=x RELEASE_TEST_CALLS="$calls" RELEASE_TEST_BINARY="$evidence/candidate/instantd" RELEASE_TEST_REQUIRED_SKIP_TARGET="$lane" bash "$gate"
+done
+bad "skipped required test rejected for test-integration" "test-integration skipped selected tests" env PATH="$fakebin:$PATH" RELEASE_GATE_MANIFEST="$evidence/manifest.json" RELEASE_CANDIDATE_SHA="$sha" RELEASE_CAMPAIGN_ID=campaign-1 DATABASE_URL=x RELEASE_TEST_CALLS="$calls" RELEASE_TEST_BINARY="$evidence/candidate/instantd" RELEASE_TEST_REQUIRED_SKIP_TARGET=test-integration bash "$gate"
+for lane in test-unit bench-acceptance test-contract; do
+  ok "outside-lane skips allowed for $lane" env PATH="$fakebin:$PATH" RELEASE_GATE_MANIFEST="$evidence/manifest.json" RELEASE_CANDIDATE_SHA="$sha" RELEASE_CAMPAIGN_ID=campaign-1 DATABASE_URL=x RELEASE_TEST_CALLS="$calls" RELEASE_TEST_BINARY="$evidence/candidate/instantd" RELEASE_TEST_ALLOWED_SKIP_TARGET="$lane" bash "$gate"
+done
+bad "outside-lane skips still fail owned-DB lane" "test-integration skipped selected tests" env PATH="$fakebin:$PATH" RELEASE_GATE_MANIFEST="$evidence/manifest.json" RELEASE_CANDIDATE_SHA="$sha" RELEASE_CAMPAIGN_ID=campaign-1 DATABASE_URL=x RELEASE_TEST_CALLS="$calls" RELEASE_TEST_BINARY="$evidence/candidate/instantd" RELEASE_TEST_ALLOWED_SKIP_TARGET=test-integration bash "$gate"
+bad "missing required contract test rejected" "did not select required TestCorpusReplayIntegration" env PATH="$fakebin:$PATH" RELEASE_GATE_MANIFEST="$evidence/manifest.json" RELEASE_CANDIDATE_SHA="$sha" RELEASE_CAMPAIGN_ID=campaign-1 DATABASE_URL=x RELEASE_TEST_CALLS="$calls" RELEASE_TEST_BINARY="$evidence/candidate/instantd" RELEASE_TEST_MISSING_REQUIRED_TARGET=test-contract bash "$gate"
+bad "short-only contract without owned-DB execution rejected" "missing required owned-DB TestCorpusReplayIntegration execution" env PATH="$fakebin:$PATH" RELEASE_GATE_MANIFEST="$evidence/manifest.json" RELEASE_CANDIDATE_SHA="$sha" RELEASE_CAMPAIGN_ID=campaign-1 DATABASE_URL=x RELEASE_TEST_CALLS="$calls" RELEASE_TEST_BINARY="$evidence/candidate/instantd" RELEASE_TEST_SHORT_ONLY_TARGET=test-contract bash "$gate"
+bad "required scenario skip with allowlisted message rejected" "test-contract skipped required tests" env PATH="$fakebin:$PATH" RELEASE_GATE_MANIFEST="$evidence/manifest.json" RELEASE_CANDIDATE_SHA="$sha" RELEASE_CAMPAIGN_ID=campaign-1 DATABASE_URL=x RELEASE_TEST_CALLS="$calls" RELEASE_TEST_BINARY="$evidence/candidate/instantd" RELEASE_TEST_REQUIRED_ALLOWLISTED_SKIP_TARGET=test-contract bash "$gate"
+bad "decoy-package scenario without corpus execution rejected" "missing required owned-DB TestCorpusReplayIntegration execution" env PATH="$fakebin:$PATH" RELEASE_GATE_MANIFEST="$evidence/manifest.json" RELEASE_CANDIDATE_SHA="$sha" RELEASE_CAMPAIGN_ID=campaign-1 DATABASE_URL=x RELEASE_TEST_CALLS="$calls" RELEASE_TEST_BINARY="$evidence/candidate/instantd" RELEASE_TEST_DECOY_PACKAGE_TARGET=test-contract bash "$gate"
 bad "built binary mismatch rejected" "built candidate binary does not match" env PATH="$fakebin:$PATH" RELEASE_GATE_MANIFEST="$evidence/manifest.json" RELEASE_CANDIDATE_SHA="$sha" RELEASE_CAMPAIGN_ID=campaign-1 DATABASE_URL=x RELEASE_TEST_CALLS="$calls" RELEASE_TEST_BINARY="$evidence/raw/result" bash "$gate"
 cp "$evidence/records/soak.json" "$evidence/records/soak.source-saved"
 bad "source evidence mutation rejected" "source evidence changed during release gate: records/soak.json" env PATH="$fakebin:$PATH" RELEASE_GATE_MANIFEST="$evidence/manifest.json" RELEASE_CANDIDATE_SHA="$sha" RELEASE_CAMPAIGN_ID=campaign-1 DATABASE_URL=x RELEASE_TEST_CALLS="$calls" RELEASE_TEST_BINARY="$evidence/candidate/instantd" RELEASE_TEST_MUTATE_EVIDENCE_TARGET=lint RELEASE_TEST_MUTATE_EVIDENCE_PATH="$evidence/records/soak.json" bash "$gate"
@@ -130,6 +204,30 @@ bad "evidence symlink rejected" "release evidence may not contain symlinks" "${b
 rm "$evidence/evidence-link"
 
 bad "production rejects test seams" "test seams are not accepted" env PATH="$fakebin:$PATH" RELEASE_GATE_TESTING=1 RELEASE_GATE_MANIFEST="$evidence/manifest.json" RELEASE_CANDIDATE_SHA="$sha" RELEASE_CAMPAIGN_ID=campaign-1 DATABASE_URL=x bash "$gate"
+
+# R4/R6: real-suite pin for the hermetic skip policy. Captures the real
+# ./internal/reactive selection (hermetic: INTEGRATION=0, -short) and feeds it
+# through the ACTUAL copied production gate ($gate) via the fake-make replay
+# harness, so the policy under test is the gate itself, not a mirrored jq
+# expression. Runs from the real repo root (not the fake $repo above).
+real_log="$tmp/real-hermetic.json"
+if ! (cd "$script_dir/.." && INSTANT_TEST_INTEGRATION=0 DATABASE_URL= TEST_DATABASE_URL= go test ./internal/reactive -count=1 -short -json >"$real_log" 2>&1); then
+  echo "FAIL: real hermetic selection did not run" >&2; fail=$((fail+1))
+else
+  if ! grep -q "integration test: set INSTANT_TEST_INTEGRATION=1 and DATABASE_URL" "$real_log" || ! grep -q "in short mode" "$real_log"; then
+    echo "FAIL: real hermetic fixture missing allowlisted reasons" >&2; fail=$((fail+1))
+  else
+    echo "PASS: real hermetic fixture contains both allowlisted reasons"; pass=$((pass+1))
+  fi
+  ok "real reactive log accepted by production gate" env PATH="$fakebin:$PATH" RELEASE_GATE_MANIFEST="$evidence/manifest.json" RELEASE_CANDIDATE_SHA="$sha" RELEASE_CAMPAIGN_ID=campaign-1 DATABASE_URL=x RELEASE_TEST_CALLS="$calls" RELEASE_TEST_BINARY="$evidence/candidate/instantd" RELEASE_TEST_REPLAY_LOG_TARGET=test-unit RELEASE_TEST_REPLAY_LOG_PATH="$real_log" bash "$gate"
+  cp "$real_log" "$tmp/real-injected.json"
+  printf '{"Action":"skip","Package":"example/corpus","Test":"TestRequiredSkip"}\n' >>"$tmp/real-injected.json"
+  bad "real reactive log with injected required skip rejected" "skipped required tests" env PATH="$fakebin:$PATH" RELEASE_GATE_MANIFEST="$evidence/manifest.json" RELEASE_CANDIDATE_SHA="$sha" RELEASE_CAMPAIGN_ID=campaign-1 DATABASE_URL=x RELEASE_TEST_CALLS="$calls" RELEASE_TEST_BINARY="$evidence/candidate/instantd" RELEASE_TEST_REPLAY_LOG_TARGET=test-unit RELEASE_TEST_REPLAY_LOG_PATH="$tmp/real-injected.json" bash "$gate"
+  # The pre-allowlist production rule (skipped==0) would reject this real log;
+  # run that OLD check inline as an assertion without modifying the gate.
+  old_skipped=$(jq -Rsr '[split("\n")[] | fromjson? | select((.Test? // "") != "")] | group_by(.Package,.Test) | map(.[-1]) | map(select(.Action=="skip")) | length' "$real_log")
+  if [[ $old_skipped -gt 0 ]]; then echo "PASS: old reject-every-skip policy would reject real hermetic lane (skipped=$old_skipped)"; pass=$((pass+1)); else echo "FAIL: real hermetic lane has no skips to prove R4" >&2; fail=$((fail+1)); fi
+fi
 
 echo "$pass passed, $fail failed"
 (( fail == 0 ))

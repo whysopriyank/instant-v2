@@ -1,7 +1,15 @@
 # Instant v2 finish-up program
 
-Status: `READY_FOR_OWNER_SCOPE_DECISION`
-Planning baseline: `5ccea252c70e47fda970caccf6c7feb5945d3968`
+Status: `IN_PROGRESS_DEC001_SINGLE_NODE_ALPHA`
+Owner decisions recorded: DEC-001 single-node-alpha (approved
+`DEC-001-single-node-alpha-20260905` + successor
+`DEC-001-rt001-bounded-rebinding-20260917`); FU-01 managed multi-client
+recorder path; FU-02 Option A report-only single-flow capture
+(`fu02-recorder-scope-decision.md`); FU-03 Option 1 stable 501 exclusion;
+WS recording excluded by enforcement; no v1-parity, provider,
+multi-node, replica, performance, publication, deployment, or canary
+claim selected.
+Planning baseline: `5ccea252c70e47fda970caccf6c7feb5945d3968` (historical)
 Last source audit: 2026-09-04
 
 ## Purpose
