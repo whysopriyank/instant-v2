@@ -94,7 +94,11 @@ func TestCF003AssembledSSELookupLifecycle(t *testing.T) {
 	// exact triggering watermark and the HTTP path must converge exactly.
 	lookupSeed := `lookup__id__"` + cf003EntityID + `"`
 	firstTx := transact([]any{"update", "todos", lookupSeed, map[string]any{"title": "lookup-two"}})
-	cf003AssertSSERefreshTodo(t, cf003ReadSSE(t, sse.scanner), idAttr, titleAttr, "lookup-two", firstTx)
+	firstRefresh := cf003ReadSSE(t, sse.scanner)
+	if txID, ok := firstRefresh["processed-tx-id"].(float64); !ok || txID != float64(firstTx) {
+		t.Fatalf("lookup update watermark = %#v; want exactly %d", firstRefresh["processed-tx-id"], firstTx)
+	}
+	cf003AssertSSERefreshTodo(t, firstRefresh, idAttr, titleAttr, "lookup-two")
 	todos := queryTodos()
 	if len(todos) != 1 {
 		t.Fatalf("lookup update todos = %#v; want exactly one row", todos)
@@ -113,27 +117,26 @@ func TestCF003AssembledSSELookupLifecycle(t *testing.T) {
 	}
 	refresh := cf003ReadSSE(t, sse.scanner)
 	txID, ok := refresh["processed-tx-id"].(float64)
-	if !ok || int64(txID) != secondTx {
+	if !ok || txID != float64(secondTx) {
 		t.Fatalf("lookup create watermark = %#v; want exactly %d", refresh["processed-tx-id"], secondTx)
+	}
+	if len(refresh) != 3 || refresh["op"] != "refresh-ok" {
+		t.Fatalf("lookup create envelope = %#v; want tx %d", refresh, secondTx)
 	}
 	comps, ok := refresh["computations"].([]any)
 	if !ok || len(comps) != 1 {
 		t.Fatalf("lookup create computations = %#v; want exactly one", refresh["computations"])
 	}
 	comp, _ := comps[0].(map[string]any)
+	if len(comp) != 2 || !reflect.DeepEqual(comp["instaql-query"], map[string]any{"todos": map[string]any{}}) {
+		t.Fatalf("lookup create computation = %#v", comp)
+	}
+	if _, hasDelta := comp["delta"]; hasDelta {
+		t.Fatalf("lookup create refresh carried delta: %#v", comp)
+	}
 	results, ok := comp["instaql-result"].([]any)
-	if !ok || len(results) != 1 {
-		t.Fatalf("lookup create result = %#v; want exactly one node", comp["instaql-result"])
-	}
-	node, _ := results[0].(map[string]any)
-	rows, ok := node["data"].(map[string]any)
-	if !ok {
-		t.Fatalf("lookup create node = %#v; want datalog data", node)
-	}
-	datalog, _ := rows["datalog-result"].(map[string]any)
-	joinRows, ok := datalog["join-rows"].([]any)
-	if !ok || len(joinRows) == 0 {
-		t.Fatalf("lookup create join-rows = %#v; want at least one row", datalog["join-rows"])
+	if !ok || len(results) == 0 {
+		t.Fatalf("lookup create result = %#v; want at least one node", comp["instaql-result"])
 	}
 	// Join-row grouping varies by plan (one row per triple or several
 	// triples per row), so flatten every triple and pin the exact total:
@@ -141,31 +144,67 @@ func TestCF003AssembledSSELookupLifecycle(t *testing.T) {
 	titles := map[string]string{}
 	eids := map[string]bool{}
 	triples := 0
-	for _, rawRow := range joinRows {
-		row, _ := rawRow.([]any)
-		if len(row) == 0 {
-			t.Fatalf("lookup create row = %#v; want at least one triple", rawRow)
+	for _, rawNode := range results {
+		node, _ := rawNode.(map[string]any)
+		if len(node) != 2 {
+			t.Fatalf("lookup create node = %#v; want exactly data plus child-nodes", rawNode)
 		}
-		for _, raw := range row {
-			triple, _ := raw.([]any)
-			if len(triple) != 3 {
-				t.Fatalf("lookup create triple = %#v; want exactly three parts", raw)
+		if children, _ := node["child-nodes"].([]any); len(children) != 0 {
+			t.Fatalf("lookup create child nodes = %#v; want none", node["child-nodes"])
+		}
+		rows, _ := node["data"].(map[string]any)
+		datalog, _ := rows["datalog-result"].(map[string]any)
+		joinRows, _ := datalog["join-rows"].([]any)
+		if len(joinRows) == 0 {
+			t.Fatalf("lookup create join-rows = %#v; want at least one row", datalog["join-rows"])
+		}
+		for _, rawRow := range joinRows {
+			row, _ := rawRow.([]any)
+			if len(row) == 0 {
+				t.Fatalf("lookup create row = %#v; want at least one triple", rawRow)
 			}
-			eid, _ := triple[0].(string)
-			attr, _ := triple[1].(string)
-			if eid == "" || attr == "" {
-				t.Fatalf("lookup create triple = %#v; want string entity and attr", raw)
-			}
-			triples++
-			eids[eid] = true
-			if attr == titleAttr {
-				title, _ := triple[2].(string)
-				titles[eid] = title
+			for _, raw := range row {
+				triple, _ := raw.([]any)
+				if len(triple) != 3 {
+					t.Fatalf("lookup create triple = %#v; want exactly three parts", raw)
+				}
+				eid, _ := triple[0].(string)
+				attr, _ := triple[1].(string)
+				value, _ := triple[2].(string)
+				if eid == "" || value == "" {
+					t.Fatalf("lookup create triple = %#v; want string entity and value", raw)
+				}
+				triples++
+				switch attr {
+				case idAttr:
+					if eid != value {
+						t.Fatalf("lookup create id triple = %#v", triple)
+					}
+					if eids[eid] {
+						t.Fatalf("lookup create duplicate id triple for %q", eid)
+					}
+					eids[eid] = true
+				case titleAttr:
+					if _, dup := titles[eid]; dup {
+						t.Fatalf("lookup create duplicate title triple for %q", eid)
+					}
+					titles[eid] = value
+				default:
+					t.Fatalf("lookup create triple has unexpected attr: %#v", triple)
+				}
 			}
 		}
 	}
 	if triples != 4 {
 		t.Fatalf("lookup create triples = %d; want exactly four", triples)
+	}
+	if len(eids) != len(titles) {
+		t.Fatalf("lookup create id/title coverage = ids %d titles %d", len(eids), len(titles))
+	}
+	for eid, title := range titles {
+		if !eids[eid] || title == "" {
+			t.Fatalf("lookup create entity %q incomplete: id=%v title=%q", eid, eids[eid], title)
+		}
 	}
 	// The absent-id lookup mints a fresh storage id rather than adopting the
 	// requested string, so discover it exactly: two entities, the seeded one
