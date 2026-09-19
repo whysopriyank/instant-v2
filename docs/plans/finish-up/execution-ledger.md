@@ -1100,3 +1100,14 @@ and all manifest flips remain gated (see below). One focused commit.
   `gap`), v1/external (FU-04), `expectedState` (FU-03), WS capture
   (excluded by enforcement). `followup-packets.md`,
   `program-manifest.md` untouched; all terminal rows preserved.
+
+## CF-003 manifest-standard pointer (2026-09-19, HEAD 6090c9ef82186cc4f9658af5dbc2aba7600aba13 clean, docs only)
+
+Standard recorded in
+`docs/plans/finish-up/cf003-manifest-standard-decision.md`: the 13
+gap rows stay `gap`; no flips without checked-in raw capture
+evidence. Assembled-route legs remain the durable local proof, cited
+per-row at execution-ledger.md:904-1047. Future flips route via
+FU-01 (multi-client rows), FU-02 scope decision (single-flow rows),
+FU-04 external (captured-v1 rows); FU-03 Option 1 already decided.
+CF-003 stays `PARTIAL`. No manifest, code, or test touched.
