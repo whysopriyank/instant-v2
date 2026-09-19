@@ -523,7 +523,7 @@
         "kind": "spec",
         "source": "docs/reference/03-protocol.md admin surface"
       },
-      "note": "FU-03 Option 1: enforced 501 exclusion per internal/adminapi/schema.go handlePresence, proven by TestCF003AssembledAdminPresenceExclusion @ 951175c (authorized exact 501, still 501 with live WS presence, 401 missing/foreign without disclosure); expectedState rewritten at HEAD 99c89f5, status stays gap."
+      "note": "FU-03 Option 1: enforced 501 exclusion per internal/adminapi/schema.go handlePresence, proven by TestCF003AssembledAdminPresenceExclusion @ 951175c (authorized exact 501, still 501 with live WS presence, 401 missing/foreign without disclosure); expectedState rewritten at HEAD 239be847, status stays gap."
     },
     {
       "id": "rooms-cross-node-unsupported",

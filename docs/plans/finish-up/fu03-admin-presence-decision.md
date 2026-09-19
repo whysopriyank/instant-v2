@@ -29,7 +29,7 @@ presence behind it (non-vacuous); missing/foreign credentials get exact
   `"GET /admin/rooms/presence is unsupported and returns stable 501"`;
   `status` stays `gap`; `oracle`/all other fields untouched; `note`
   cites the test + HEAD (see manifest). Rewritten at HEAD
-  `99c89f5`.
+  `239be847`.
 - Why `gap` is kept: `followup-packets.md` FU-03 authorizes only the
   `expectedState` text change + exclusion evidence, not a covered flip;
   `corpus/manifest.json` has no `covered-by-exclusion` status pattern
