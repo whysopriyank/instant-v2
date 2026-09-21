@@ -1636,3 +1636,35 @@ Repair cycle: 1
 - CF-003-2A8 (transactions-concurrency-gap) — last single-flow leg; then FU-01 multi-client recorder work
 
 CF-003-2A7 accepted commit: `bdfb3d04f33019e04b49ea2863a7ebf2b28b4f97` (local only, no push). Tree clean. CF-003 stays PARTIAL (16 covered / 6 gap / 4 unsupported).
+
+## CF-003-2A8 BLOCKED (2026-09-21, HEAD a363936, tree clean, go1.27.1 darwin/arm64)
+
+# Packet CF-003-2A8 handoff
+
+Status: BLOCKED
+Candidate: HEAD `a363936080804a0e8bb2f98ff2b43cb2403d583a`, clean tree (zero files changed; probe created, run, deleted)
+Decision/profile: DEC-001-single-node-alpha (FU-02 Option A report-only)
+Implementation agent: OpenCode / Muse Spark 1.3 free / xhigh
+Review agent: none (no flip artifact to review; BLOCKED by measurement, not by verdict)
+Repair cycle: 0 (no repair applicable — nothing written)
+
+## Ledger
+| Row | Result | Evidence | Remaining |
+| R1 deterministic capture | BLOCKED | 30 fresh-DB probes → 4 distinct exact-byte histories (winner race-a/b varies; loser-400 present-or-absent; winnerTx [2]/[2 3]/[3 2]; minted IDs per run). Pinned-history red proof FAILs 1/10 | Fault-scheduling primitive or owner row decision |
+| R2 exact replay | BLOCKED | No true byte sequence exists to replay; nothing written | Same as R1 |
+| R3 row stays gap | GREEN (held) | validate + validate-release green; 18/18 green; diff empty; expectedState untouched | None |
+| R4 exclusions | GREEN | WS fails closed; tree clean; no v1/FU files touched | None |
+
+## Changes
+None. Temp probe `cmd/instantd/zz_cf003_concurrency_probe_test.go` created, run (30 histories), deleted; tree byte-identical to baseline.
+
+## Verification
+- Assembled leg green at baseline; probe distributions + red-pin FAIL documented in worker handoff; WS-exclusion, validate, validate-release, 18/18 all green on the undisturbed tree.
+
+## Missing prerequisite (exact)
+Owner decision, exactly one of: (i) new packet with a fault-scheduling primitive forcing DB-level overlap (exactly-one winner + exactly one decoded 400 + fixed probe N); (ii) explicit expectedState rewrite to a deterministic property (claim-narrowing, standing rule bars worker from doing it); (iii) accept row stays gap (CF-003 closure via exception later).
+
+## Next prerequisite
+- Owner decision above. FU-01 multi-client workstream (2B) is row-independent and may proceed on owner go-ahead.
+
+Owner decision 2026-09-21 (2A-8): DEFER — transactions-concurrency-gap stays gap; proceed to FU-01 multi-client workstream (2B). No fault-scheduling build, no row rewrite. CF-003 single-flow report-only tally: 7 of 8 legs flipped (auth-denied, auth-refresh, conjunction, sse-lifecycle, rollback, cardinality-SSE, lookup); concurrency deferred.
