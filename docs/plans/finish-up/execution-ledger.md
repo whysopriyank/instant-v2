@@ -1486,3 +1486,97 @@ Repair cycle: 0
 - CF-003-2A6 (transactions-cardinality-boundary SSE/HTTP variants; WS variant excluded by enforcement)
 
 CF-003-2A5 accepted commit: `58f3aaac1c569baaef7abed590fb0d375fe34ebb` (local only, no push). Tree clean. CF-003 stays PARTIAL (14 covered / 8 gap / 4 unsupported).
+
+## CF-003-2A6 BLOCKED (2026-09-21, HEAD ba70cfc + uncommitted packet files, go1.27.1 darwin/arm64)
+
+# Packet CF-003-2A6 handoff
+
+Status: BLOCKED
+Candidate: HEAD `ba70cfc3924bd0452fb1a08f6b9108671d8da8f4` + uncommitted packet files (no commit; packet not accepted)
+Decision/profile: DEC-001-single-node-alpha (FU-02 Option A report-only)
+Implementation agent: OpenCode / Muse Spark 1.3 free / xhigh
+Review agent: OpenAI / GPT-5.6 Sol / medium
+Repair cycle: 1 (consumed; terminal review returned BLOCKED, not a repair round)
+
+## Ledger
+| Row | Result | Evidence | Remaining |
+| R1 capture (cardinality+denial SSE) | GREEN (bounded) | 1 connect/5 POSTs/5 frames, masking, determinism probed | Merge/cascade/required uncaptured — see block |
+| R2 replay + probe | GREEN (bounded) | Exact replay, probe tx==4, fault+mutation proofs | Same scope limit as R1 |
+| R3 single-row flip | BLOCKED | Flip as written requires narrowed expectedState — outside FU-02 authority | Owner manifest-scope decision |
+| R4 exclusions | GREEN | WS fails closed, neighbors gap, no v1 text | None |
+
+## Changes (uncommitted, preserved)
+- corpus/transactions-cardinality-boundary.json, corpus/fixtures/transactions-cardinality-boundary.json, cmd/instantd/runtime_cf003_cardinality_replay_test.go (NEW)
+- corpus/manifest.json: row flip WITH narrowed expectedState + residual note (the blocking edit)
+
+## Verification
+- Replay -race twice green; probe tx==4 on 2 fresh DBs; duplicate-commit fault fails as required; 3 mutations fail; validate + validate-release green; 18/18 green; WS-exclusion green; static clean. Evidence is real; only the flip authorization is missing.
+
+## Independent review
+- Verdict: BLOCKED. Narrowing expectedState to achieve the flip exceeds FU-02 authority (followup-packets.md FU-02 non-goals: no expectedState rewrite; manifest-standard: flips never by report-only text change; FU-03 precedent: expectedState rewrites need owner decisions). Machine-readable gap inventory for merge/cascade/required would disappear with no replacement row.
+- Probe assessed sound for "one commit per captured POST" (not general idempotency).
+
+## Coordinator fault note
+- The repair-1 authorization permitting expectedState narrowing as fallback exceeded the supplied owner decisions. The implementation followed that authorization correctly; the defect is coordinator scope error, not worker disobedience. Future repair authorizations must not permit claim-narrowing without an owner decision.
+
+## Missing prerequisite (exact)
+- Owner manifest-scope decision for transactions-cardinality-boundary, exactly one of: (a) approve narrowed expectedState (cardinality+denial SSE) with residual merge/cascade/required as explicit future work; (b) approve a row split (narrow covered SSE row + residual gap row); (c) select merge/cascade/required SSE assembled-leg + capture implementation scope beyond report-only; (d) accept the row staying gap (defers CF-003 closure question to an exception decision).
+
+## Next prerequisite
+- Owner decision above. Successor packets (2A-7 lookup, 2A-8 concurrency) paused until the decision lands, since the same over-claim pattern may recur and rule 18 bars starting successors without an accepted handoff.
+
+## CF-003-2A6 close-out (2026-09-21, HEAD ba70cfc + work below, go1.27.1 darwin/arm64)
+
+# Packet CF-003-2A6 handoff
+
+Status: COMPLETE (via owner scope decision after BLOCKED)
+Candidate: HEAD `ba70cfc3924bd0452fb1a08f6b9108671d8da8f4` + committed packet files below (accepted commit SHA at close)
+Decision/profile: DEC-001-single-node-alpha (FU-02 Option A report-only + owner manifest-scope decision 2a6-cardinality-scope-decision.md approving expectedState narrowing)
+Implementation agent: OpenCode / Muse Spark 1.3 free / xhigh
+Review agent: OpenAI / GPT-5.6 Sol / medium
+Repair cycle: 1 + BLOCKED-resolution (owner decision; confirmation review ACCEPT)
+
+## Ledger
+| Row | Result | Evidence | Remaining |
+| R1 SSE capture (cardinality+denial) | GREEN | 1 connect/5 POSTs/5 frames, masking, determinism probed | Merge/cascade/required explicitly residual (decision) |
+| R2 exact replay + probe | GREEN | Exact bytes/frames, 4-field binding, probe tx==4, fault+mutation proofs; -race twice | None |
+| R3 single-row flip | GREEN | Only this row gap→covered (14/8/4 → 15/7/4) under owner narrowing decision; validate + validate-release green; 18/18 green | None |
+| R4 exclusions | GREEN | WS fails closed + explicit; neighbors gap; no v1 text; single subscriber | None |
+
+## Changes
+- corpus/transactions-cardinality-boundary.json (NEW): self-bound envelope + SSE capture + excluded note
+- corpus/fixtures/transactions-cardinality-boundary.json (NEW): dedicated fixture == actual seed
+- corpus/manifest.json: fixtures[] entry + row flip (transport ws→sse, expectedState narrowed per owner decision, residual note)
+- cmd/instantd/runtime_cf003_cardinality_replay_test.go (NEW): exact replay + terminal probe
+- docs/plans/finish-up/2a6-cardinality-scope-decision.md (NEW): owner narrowing decision
+
+## Verification
+| Command/run | Selected | Exit | Meaning |
+| replay -race twice (owned fixture) | 1 | 0,0 | R2 |
+| probe tx==4 on 2 fresh DBs; duplicate-commit fault | — | 0 / FAIL as required | exactly-once-per-POST proof |
+| 4 mutations (id/fixture/body/probe) | — | FAIL as required | load-bearing; restored identical |
+| TestCorpusReplayIntegration | 18/18 | 0 | no regression |
+| validate / validate-release | full | 0,0 | R3 gates |
+| WS-record exclusion | 1 | 0 | R4 |
+| affected packages | full | 0 | no adjacent breakage |
+| gofmt/vet/diff-check | n/a | 0 | static clean |
+
+## Independent review
+- Verdicts: initial REPAIR_REQUIRED (2 High: row over-claim, exactly-once) → repair → BLOCKED (narrowing needs owner decision; probe sound) → owner approved narrowing → confirmation review ACCEPT (decision sufficient, tree conforms, residuals exclusion-only)
+- Coordinator fault recorded: repair-1 narrowing authorization exceeded supplied decisions; cured by explicit owner decision, not repeated
+- Remaining findings: none
+
+## Not run
+- Merge/cascade/required SSE legs (no assembled legs exist; explicitly residual); full-repo sweep; production gate end-to-end (FR-002); differential/v1 (FU-04 blocked)
+
+## Scope audit
+- Leased paths + coordinator decision doc; no validator/recorder/docs(other)/Makefile changes; unexpected changes none
+
+## Artifact/provenance
+- Candidate SHA: accepted commit SHA at close (below)
+- Environment: go1.27.1 darwin/arm64; owned instant_test_* fixtures only
+
+## Next prerequisite
+- CF-003-2A7 (transactions-lookup-lifecycle) via TestCF003AssembledSSELookupLifecycle; packet authors must NOT narrow claims without owner decisions (standing rule from this packet)
+
+CF-003-2A6 accepted commit: `6d80bcd096ef5cf7527378f882dadcc7490dc50a` (local only, no push). Tree clean. CF-003 stays PARTIAL (15 covered / 7 gap / 4 unsupported). Standing rule: no claim-narrowing in any packet without an owner decision.

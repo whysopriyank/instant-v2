@@ -49,6 +49,10 @@
     {
       "id": "transactions-rollback-error",
       "path": "fixtures/transactions-rollback-error.json"
+    },
+    {
+      "id": "transactions-cardinality-boundary",
+      "path": "fixtures/transactions-cardinality-boundary.json"
     }
   ],
   "surfaces": [
@@ -610,16 +614,18 @@
       "family": "transactions",
       "case": "boundary",
       "surface": "ws.transact.extended",
-      "transport": "ws",
-      "fixture": "required",
+      "transport": "sse",
+      "scenario": "transactions-cardinality-boundary",
+      "fixture": "transactions-cardinality-boundary",
       "owner": "internal/corpus",
-      "expectedState": "cardinality, merge, cascade and required checks preserve final state",
-      "status": "gap",
+      "expectedState": "cardinality-one final-value convergence and exact validation denial preserve final state",
+      "status": "covered",
       "oracle": {
-        "kind": "spec",
-        "source": "docs/reference/03-protocol.md transaction grammar"
+        "kind": "regression",
+        "source": "Authored v2 contract: exact corpus replay of the accepted assembled SSE leg TestCF003AssembledTransactionTransportMatrix @ 43ed443+e2d97ae via TestCF003CardinalityCaptureReplay. Not a captured v1 oracle. The WS variant remains excluded by enforcement (CF-002 record --transport ws fails closed), so no WS evidence is claimed."
       },
-      "note": "Only required-field retraction is currently corpus-covered."
+      "evidence": ["transactions-cardinality-boundary.json"],
+      "note": "Covered by checked-in raw SSE capture transactions-cardinality-boundary.json (one single-subscriber connect with exact status/Content-Type/Cache-Control, four POSTs with exact status/whole-body/Content-Type covering init, positive transact, exact validation denial, and the same-batch cardinality-one batch, plus the terminal 401 unknown sse session teardown, and five ordered stream data frames compared whole-result under the masking rule: handshake, protocol-init attrs, transact-ok watermark exactly 2, exact 400 denial, cardinality transact-ok watermark exactly 3) replayed exactly by cmd/instantd/runtime_cf003_cardinality_replay_test.go::TestCF003CardinalityCaptureReplay on the owned isolated transactions-cardinality-boundary fixture (app 00000000-0000-4000-8000-000000000003); convergence is proven live over the query path with exact whole-body bytes and whole-result DeepEqual lengths-before-elements (baseline, positive write, post-denial byte-identical proving the denial mutates nothing, cardinality final value winning exactly once), the seed admin transact runs live (tx-id watermark and X-admin-token never checked in), session/token/machine/attr values are never checked in (sentinel substitution/masking with live freshness, linkage, ordering, and no-leak asserts), and terminal quiescence plus dead-session teardown prove no unclaimed mutation. The WS legs of the transport matrix stay excluded by enforcement: no WS evidence is checked in and no WS claim is made. Merge/cascade/required legs remain unflipped as future work: no accepted assembled SSE-capturable leg proves deep-merge preservation convergence, cascade-delete convergence, or required-field denial over the single-subscriber SSE path (merge and delete exist only as live /admin/transact boundary evidence in the neighboring transactions-rollback-error replay; required retraction is WS corpus evidence only and WS recording stays excluded by enforcement). FU-02 Option A report-only; no v1-parity claim."
     },
     {
       "id": "transactions-lookup-lifecycle",
