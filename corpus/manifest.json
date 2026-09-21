@@ -53,6 +53,10 @@
     {
       "id": "transactions-cardinality-boundary",
       "path": "fixtures/transactions-cardinality-boundary.json"
+    },
+    {
+      "id": "transactions-lookup-lifecycle",
+      "path": "fixtures/transactions-lookup-lifecycle.json"
     }
   ],
   "surfaces": [
@@ -607,7 +611,7 @@
         "source": "Authored v2 contract: exact corpus replay of the accepted assembled legs TestCF003AssembledTransactionMatrix @ ec78ad7 and TestCF003AssembledTransactionTransportMatrix @ 43ed443 via TestCF003RollbackCaptureReplay. Not a captured v1 oracle."
       },
       "evidence": ["transactions-rollback-error.json"],
-      "note": "Covered by checked-in raw capture transactions-rollback-error.json (baseline query exact one-entity state, failing low-level two-step batch with exact 400 carrying the stable unique-constraint marker, post-rollback query byte-identical to baseline proving no partial write, cardinality query exact final-value, merge query exact preservation, deleted query exact empty set) replayed exactly by cmd/instantd/runtime_cf003_rollback_replay_test.go::TestCF003RollbackCaptureReplay on the owned isolated transactions-rollback-error fixture (app 00000000-0000-4000-8000-000000000003); the four mutating transact successes run live (tx-id watermarks and X-admin-token never checked in) with strictly advancing tx-ids, the run-minted attr UUIDs in the failing request stay sentinel-masked by the stated rule with live substitution counts and no-leak asserts, and whole-result DeepEqual lengths-before-elements guards every state. The timing-dependent same-lookup concurrent leg is excluded with reason (start barrier encourages but does not force DB overlap; assembled 10x-race proof is boundary evidence only); cardinality/merge/delete legs are boundary evidence for the neighboring transactions-cardinality-boundary and transactions-lookup-lifecycle rows, which stay gap, as does transactions-concurrency-gap. FU-02 Option A report-only; no v1-parity claim."
+      "note": "Covered by checked-in raw capture transactions-rollback-error.json (baseline query exact one-entity state, failing low-level two-step batch with exact 400 carrying the stable unique-constraint marker, post-rollback query byte-identical to baseline proving no partial write, cardinality query exact final-value, merge query exact preservation, deleted query exact empty set) replayed exactly by cmd/instantd/runtime_cf003_rollback_replay_test.go::TestCF003RollbackCaptureReplay on the owned isolated transactions-rollback-error fixture (app 00000000-0000-4000-8000-000000000003); the four mutating transact successes run live (tx-id watermarks and X-admin-token never checked in) with strictly advancing tx-ids, the run-minted attr UUIDs in the failing request stay sentinel-masked by the stated rule with live substitution counts and no-leak asserts, and whole-result DeepEqual lengths-before-elements guards every state. The timing-dependent same-lookup concurrent leg is excluded with reason (start barrier encourages but does not force DB overlap; assembled 10x-race proof is boundary evidence only); cardinality/merge/delete legs are boundary evidence for the neighboring transactions-cardinality-boundary and transactions-lookup-lifecycle rows (transactions-lookup-lifecycle now covered by its own 2A-7 capture), as does transactions-concurrency-gap which stays gap. FU-02 Option A report-only; no v1-parity claim."
     },
     {
       "id": "transactions-cardinality-boundary",
@@ -633,15 +637,17 @@
       "case": "lifecycle",
       "surface": "ws.transact.lookup",
       "transport": "sse",
-      "fixture": "unique",
+      "scenario": "transactions-lookup-lifecycle",
+      "fixture": "transactions-lookup-lifecycle",
       "owner": "internal/corpus",
       "expectedState": "lookup mutation persists and is visible over the selected stream",
-      "status": "gap",
+      "status": "covered",
       "oracle": {
-        "kind": "spec",
-        "source": "docs/reference/03-protocol.md transaction grammar"
+        "kind": "regression",
+        "source": "Authored v2 contract: exact corpus replay of the accepted assembled leg TestCF003AssembledSSELookupLifecycle @ 63b82d0+2340195+f904b42 via TestCF003LookupCaptureReplay. Not a captured v1 oracle."
       },
-      "note": "SSE transaction evidence is not yet authored."
+      "evidence": ["transactions-lookup-lifecycle.json"],
+      "note": "Covered by checked-in raw SSE capture transactions-lookup-lifecycle.json (one single-subscriber connect with exact status/Content-Type/Cache-Control, three POSTs with exact status/whole-body/Content-Type covering init, add-query, and the terminal 401 unknown sse session teardown, and six ordered stream data frames compared whole-result under the masking rule: handshake, protocol-init attrs, add-query-ok, initial tree at processed-tx-id exactly 0, lookup-update refresh-ok watermark exactly 2, absent-id mint refresh-ok watermark exactly 3) replayed exactly by cmd/instantd/runtime_cf003_lookup_replay_test.go::TestCF003LookupCaptureReplay on the owned isolated transactions-lookup-lifecycle fixture (app 00000000-0000-4000-8000-000000000003); convergence is proven live over the query path with exact whole-body bytes and whole-result DeepEqual lengths-before-elements (baseline lookup-one, post-update lookup-two, two-entity lookup-two plus fresh in id order with a strict child-nodes oracle on every node-list refresh), the seed and both lookup admin transacts run live (tx-id watermarks and X-admin-token never checked in), session/token/machine/attr/minted-fresh-eid values are never checked in (sentinel substitution/masking with live freshness, linkage, ordering, and no-leak asserts), terminal quiescence plus dead-session teardown prove no unclaimed mutation, and an isolated watermark probe returns exactly tx-id 4 proving exactly-once. FU-02 Option A report-only; no v1-parity claim."
     },
     {
       "id": "transactions-concurrency-gap",

@@ -1580,3 +1580,59 @@ Repair cycle: 1 + BLOCKED-resolution (owner decision; confirmation review ACCEPT
 - CF-003-2A7 (transactions-lookup-lifecycle) via TestCF003AssembledSSELookupLifecycle; packet authors must NOT narrow claims without owner decisions (standing rule from this packet)
 
 CF-003-2A6 accepted commit: `6d80bcd096ef5cf7527378f882dadcc7490dc50a` (local only, no push). Tree clean. CF-003 stays PARTIAL (15 covered / 7 gap / 4 unsupported). Standing rule: no claim-narrowing in any packet without an owner decision.
+
+## CF-003-2A7 close-out (2026-09-21, HEAD 8d3a5ee + work below, go1.27.1 darwin/arm64)
+
+# Packet CF-003-2A7 handoff
+
+Status: COMPLETE
+Candidate: HEAD `8d3a5ee378346bde58032be78649266bb6e68050` + uncommitted packet files below (accepted commit SHA at close)
+Decision/profile: DEC-001-single-node-alpha (FU-02 Option A report-only)
+Implementation agent: OpenCode / Muse Spark 1.3 free / xhigh
+Review agent: OpenAI / GPT-5.6 Sol / medium
+Repair cycle: 1
+
+## Ledger
+| Row | Result | Evidence | Remaining |
+| R1 raw SSE capture | GREEN | 1 connect/3 POSTs/6 frames @0/2/3; fresh-mint masked w/ live discovery; seed+transacts+query bodies live-oracled | None |
+| R2 exact replay | GREEN | Binding incl. 4-field fixture, exact bytes/frames, retarget-vs-mint, strict child-nodes, quiet+probe tx4, disjointness assert; -race twice; mutation+fault proofs | None |
+| R3 single-row flip | GREEN | Only lookup-lifecycle gap→covered (15/7/4 → 16/6/4); expectedState unchanged; validate + validate-release green; 18/18 green | None |
+| R4 exclusions | GREEN | WS fails closed; 4 packet files; single subscriber; no v1 text | None |
+
+## Changes
+- corpus/transactions-lookup-lifecycle.json (NEW): self-bound envelope + SSE capture + excluded note
+- corpus/fixtures/transactions-lookup-lifecycle.json (NEW): dedicated fixture == actual seed (declared `unique` abandoned)
+- corpus/manifest.json: fixtures[] entry + single-row flip + one-sentence cross-row note fix (rollback row; no normative field touched)
+- cmd/instantd/runtime_cf003_lookup_replay_test.go (NEW): exact replay + disjointness assert
+
+## Verification
+| Command/run | Selected | Exit | Meaning |
+| replay -race twice (owned fixture) | 1 | 0,0 | R2 |
+| broken-mint fault (probe UUID) | 1 | FAIL pre-probe | disjointness load-bearing; restored identical |
+| identity/body mutations | 1 each | FAIL | binding load-bearing; restored identical |
+| duplicate-commit fault | 1 | FAIL probe 5v4 | exactly-once-per-POST proof |
+| TestCorpusReplayIntegration | 18/18 | 0 | no regression |
+| validate / validate-release | full | 0,0 | R3 gates |
+| WS-record exclusion | 1 | 0 | R4 |
+| affected packages full | full | 0 | no adjacent breakage |
+| gofmt/vet/diff-check | n/a | 0 | static clean |
+
+## Independent review
+- Verdict: ACCEPT (second review; first: REPAIR_REQUIRED on probe disjointness + stale cross-row sentence)
+- Findings repaired: 2 (disjointness assert w/ close hygiene; one-sentence note fix, field-level proven)
+- Remaining findings: none
+
+## Not run
+- Full-repo sweep (focused lanes instead); production gate end-to-end (FR-002); differential/v1 (FU-04 blocked)
+
+## Scope audit
+- Leased paths only (manifest row + fixtures[] entry + one-sentence note fix + 3 new files); transients deleted; unexpected changes none
+
+## Artifact/provenance
+- Candidate SHA: accepted commit SHA at close (below)
+- Environment: go1.27.1 darwin/arm64; owned instant_test_* fixtures only
+
+## Next prerequisite
+- CF-003-2A8 (transactions-concurrency-gap) — last single-flow leg; then FU-01 multi-client recorder work
+
+CF-003-2A7 accepted commit: `bdfb3d04f33019e04b49ea2863a7ebf2b28b4f97` (local only, no push). Tree clean. CF-003 stays PARTIAL (16 covered / 6 gap / 4 unsupported).
