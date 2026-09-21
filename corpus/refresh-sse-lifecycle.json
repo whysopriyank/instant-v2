@@ -1,0 +1,190 @@
+{
+  "scenario": "refresh-sse-lifecycle",
+  "id": "refresh-sse-lifecycle",
+  "transport": "sse",
+  "status": "covered",
+  "fixture": "refresh-sse-lifecycle",
+  "source": "Report-only single-flow capture of the already-accepted assembled leg TestCF003AssembledSSERefreshAndReconnect (@ ec78ad7, 3x race + Sol ACCEPT) under FU-02 Option A; no corpusctl recorder behavior change, no v1 oracle. One subscriber only: two strictly sequential connections on the owned isolated refresh-sse-lifecycle fixture (app 00000000-0000-4000-8000-000000000003); the second connection opens only after the first session's terminal 401 teardown is observed. Seed (title sse-initial) and trigger (title sse-refresh) transacts run live; every GET/POST exchange and all 9 stream data frames replay exactly under the documented masking rule.",
+  "redaction": "CF-002 discipline: volatile transport headers (Date, Content-Length, Transfer-Encoding) excluded; SSE heartbeat comment records (: ping keepalives, timing-dependent) excluded — only parsed data-payload objects are compared, key order insignificant. Masking rule (mechanical, enforced by the replay test): session-bearing string values are never checked in. The checked-in POST bodies and stream frames carry sentinel placeholders <sse-transport-session-1>, <sse-protocol-session-1>, <sse-token-1>, <sse-machine-id>, <sse-transport-session-2>, <sse-protocol-session-2>, <sse-token-2>, <sse-attr-id-todos-id>, <sse-attr-id-todos-title> in exactly the positions the live server emits random values (transport handshake session-id/sse-token/machine-id, POST session_id/sse_token, protocol-init session-id, attr id fields, refresh join-row attr positions). The replay test substitutes the live values into the templates (POSTs) and masks the live frames back to the sentinels (stream) before whole-result reflect.DeepEqual; any checked-in real session value (any sess- substring) or missing sentinel fails the test before any byte is replayed. Application payload keys (titles, entity IDs, op names, event IDs, app-id, forward-identities) are retained exactly and remain comparison-significant. No timestamps, DSNs, or database URLs appear in these bytes.",
+  "excluded": "Excluded with reason: (1) the seed and trigger admin transacts (POST /admin/transact) — their responses carry per-database transaction watermarks and their requests carry the credential-bearing X-admin-token header, so exact byte check-in is inappropriate; both run live step for step with the accepted assembled leg (200 with positive tx-id asserted live, never checked in; refresh processed-tx-id asserted exactly equal to the live trigger tx-id as float64). (2) Teardown-poll intermediate 200 empty envelopes — the count of 200s before the dead-reader teardown lands is timing-dependent; only the terminal 401 unknown sse session exchange is checked in and it is asserted live after a bounded poll, mirroring the accepted leg. (3) Reconnect credential values — fresh crypto-random session-id/token per connection by construction; values never checked in, freshness asserted live (second credentials differ from first, protocol session differs from transport session by format), convergence asserted live (reconnect attrs identical, reconnect tree carries the refresh title). Heartbeat comments are excluded per the redaction rule above, not a behavior exclusion.",
+  "connects": [
+    {
+      "request": {
+        "method": "GET",
+        "target": "/runtime/sse?app_id=00000000-0000-4000-8000-000000000003"
+      },
+      "response": {
+        "status": 200,
+        "headers": {"Content-Type": ["text/event-stream"], "Cache-Control": ["no-cache"]}
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "target": "/runtime/sse?app_id=00000000-0000-4000-8000-000000000003"
+      },
+      "response": {
+        "status": 200,
+        "headers": {"Content-Type": ["text/event-stream"], "Cache-Control": ["no-cache"]}
+      }
+    }
+  ],
+  "posts": [
+    {
+      "request": {
+        "method": "POST",
+        "target": "/runtime/sse",
+        "headers": {"Content-Type": ["application/json"]},
+        "body": "{\"app_id\":\"00000000-0000-4000-8000-000000000003\",\"machine_id\":\"cf003-sse\",\"messages\":[{\"app-id\":\"00000000-0000-4000-8000-000000000003\",\"op\":\"init\"}],\"session_id\":\"<sse-transport-session-1>\",\"sse_token\":\"<sse-token-1>\"}"
+      },
+      "response": {
+        "status": 200,
+        "headers": {"Content-Type": ["application/json"]},
+        "body": "{}\n"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "target": "/runtime/sse",
+        "headers": {"Content-Type": ["application/json"]},
+        "body": "{\"app_id\":\"00000000-0000-4000-8000-000000000003\",\"machine_id\":\"cf003-sse\",\"messages\":[{\"client-event-id\":\"cf003-add-query\",\"op\":\"add-query\",\"q\":{\"todos\":{}}}],\"session_id\":\"<sse-transport-session-1>\",\"sse_token\":\"<sse-token-1>\"}"
+      },
+      "response": {
+        "status": 200,
+        "headers": {"Content-Type": ["application/json"]},
+        "body": "{}\n"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "target": "/runtime/sse",
+        "headers": {"Content-Type": ["application/json"]},
+        "body": "{\"app_id\":\"00000000-0000-4000-8000-000000000003\",\"machine_id\":\"cf003-sse\",\"messages\":null,\"session_id\":\"<sse-transport-session-1>\",\"sse_token\":\"<sse-token-1>\"}"
+      },
+      "response": {
+        "status": 401,
+        "headers": {"Content-Type": ["text/plain; charset=utf-8"]},
+        "body": "unknown sse session\n"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "target": "/runtime/sse",
+        "headers": {"Content-Type": ["application/json"]},
+        "body": "{\"app_id\":\"00000000-0000-4000-8000-000000000003\",\"machine_id\":\"cf003-sse\",\"messages\":[{\"app-id\":\"00000000-0000-4000-8000-000000000003\",\"op\":\"init\"}],\"session_id\":\"<sse-transport-session-2>\",\"sse_token\":\"<sse-token-2>\"}"
+      },
+      "response": {
+        "status": 200,
+        "headers": {"Content-Type": ["application/json"]},
+        "body": "{}\n"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "target": "/runtime/sse",
+        "headers": {"Content-Type": ["application/json"]},
+        "body": "{\"app_id\":\"00000000-0000-4000-8000-000000000003\",\"machine_id\":\"cf003-sse\",\"messages\":[{\"client-event-id\":\"cf003-reconnect-query\",\"op\":\"add-query\",\"q\":{\"todos\":{}}}],\"session_id\":\"<sse-transport-session-2>\",\"sse_token\":\"<sse-token-2>\"}"
+      },
+      "response": {
+        "status": 200,
+        "headers": {"Content-Type": ["application/json"]},
+        "body": "{}\n"
+      }
+    }
+  ],
+  "stream": [
+    {
+      "connection": 1,
+      "data": {"op": "init-ok", "machine-id": "<sse-machine-id>", "session-id": "<sse-transport-session-1>", "sse-token": "<sse-token-1>"}
+    },
+    {
+      "connection": 1,
+      "data": {
+        "op": "init-ok",
+        "session-id": "<sse-protocol-session-1>",
+        "app-status": {"status": "active"},
+        "auth": {"admin?": false, "app": {"id": "00000000-0000-4000-8000-000000000003"}, "user": null},
+        "attrs": [
+          {"cardinality": "one", "checked-data-type": null, "forward-identity": ["00000000-0000-4000-8000-000000000003", "todos", "id"], "id": "<sse-attr-id-todos-id>", "index?": true, "primary?": true, "required?": true, "unique?": true, "value-type": "blob"},
+          {"cardinality": "one", "checked-data-type": null, "forward-identity": ["00000000-0000-4000-8000-000000000003", "todos", "title"], "id": "<sse-attr-id-todos-title>", "index?": false, "required?": false, "unique?": false, "value-type": "blob"}
+        ]
+      }
+    },
+    {
+      "connection": 1,
+      "data": {"client-event-id": "cf003-add-query", "op": "add-query-ok"}
+    },
+    {
+      "connection": 1,
+      "data": {
+        "op": "refresh-ok",
+        "processed-tx-id": 0,
+        "computations": [
+          {"instaql-query": {"todos": {}}, "instaql-result": {"todos": [{"id": "00000000-0000-4000-8000-000000000004", "title": "sse-initial"}]}}
+        ]
+      }
+    },
+    {
+      "connection": 1,
+      "data": {
+        "op": "refresh-ok",
+        "processed-tx-id": 2,
+        "computations": [
+          {
+            "instaql-query": {"todos": {}},
+            "instaql-result": [
+              {
+                "child-nodes": [],
+                "data": {
+                  "datalog-result": {
+                    "join-rows": [
+                      [
+                        ["00000000-0000-4000-8000-000000000004", "<sse-attr-id-todos-id>", "00000000-0000-4000-8000-000000000004"],
+                        ["00000000-0000-4000-8000-000000000004", "<sse-attr-id-todos-title>", "sse-refresh"]
+                      ]
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "connection": 2,
+      "data": {"op": "init-ok", "machine-id": "<sse-machine-id>", "session-id": "<sse-transport-session-2>", "sse-token": "<sse-token-2>"}
+    },
+    {
+      "connection": 2,
+      "data": {
+        "op": "init-ok",
+        "session-id": "<sse-protocol-session-2>",
+        "app-status": {"status": "active"},
+        "auth": {"admin?": false, "app": {"id": "00000000-0000-4000-8000-000000000003"}, "user": null},
+        "attrs": [
+          {"cardinality": "one", "checked-data-type": null, "forward-identity": ["00000000-0000-4000-8000-000000000003", "todos", "id"], "id": "<sse-attr-id-todos-id>", "index?": true, "primary?": true, "required?": true, "unique?": true, "value-type": "blob"},
+          {"cardinality": "one", "checked-data-type": null, "forward-identity": ["00000000-0000-4000-8000-000000000003", "todos", "title"], "id": "<sse-attr-id-todos-title>", "index?": false, "required?": false, "unique?": false, "value-type": "blob"}
+        ]
+      }
+    },
+    {
+      "connection": 2,
+      "data": {"client-event-id": "cf003-reconnect-query", "op": "add-query-ok"}
+    },
+    {
+      "connection": 2,
+      "data": {
+        "op": "refresh-ok",
+        "processed-tx-id": 0,
+        "computations": [
+          {"instaql-query": {"todos": {}}, "instaql-result": {"todos": [{"id": "00000000-0000-4000-8000-000000000004", "title": "sse-refresh"}]}}
+        ]
+      }
+    }
+  ]
+}

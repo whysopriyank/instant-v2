@@ -1376,3 +1376,58 @@ Repair cycle: 0
 - CF-003-2A4 (refresh-sse-lifecycle) via TestCF003AssembledSSERefreshAndReconnect
 
 CF-003-2A3 accepted commit: `3eaae428688ae15039060ba4c835f7cf4999d098` (local only, no push). Tree clean. CF-003 stays PARTIAL (12 covered / 10 gap / 4 unsupported).
+
+## CF-003-2A4 close-out (2026-09-21, HEAD 37085c0 + work below, go1.27.1 darwin/arm64)
+
+# Packet CF-003-2A4 handoff
+
+Status: COMPLETE
+Candidate: HEAD `37085c0fa86e699a6eefbd6e8d69d15191107096` + uncommitted packet files below (accepted commit SHA at close)
+Decision/profile: DEC-001-single-node-alpha (FU-02 Option A report-only; first SSE leg)
+Implementation agent: OpenCode / Muse Spark 1.3 free / xhigh
+Review agent: OpenAI / GPT-5.6 Sol / medium
+Repair cycle: 1
+
+## Ledger
+| Row | Result | Evidence | Remaining |
+| R1 raw SSE capture | GREEN | 2 connects + 5 POSTs + 9 frames under sentinel-masking rule; volatile excluded with reasons | None |
+| R2 exact replay | GREEN | Exact POSTs/frames, float watermarks, teardown/reconnect order, side-effect asserts; 250ms terminal quiet on both streams; -race -count=2; 4 mutations + 2 injection proofs | None |
+| R3 single-row flip | GREEN | Only refresh-sse-lifecycle gap→covered (12/10/4 → 13/9/4); validate + validate-release green; 18/18 green | None |
+| R4 exclusions | GREEN | WS fails closed; single-subscriber sequential; nothing else touched; no v1 text | None |
+
+## Changes
+- corpus/refresh-sse-lifecycle.json (NEW): self-bound envelope + connects/posts/stream + masking/redaction/excluded docs
+- corpus/fixtures/refresh-sse-lifecycle.json (NEW): dedicated fixture == actual seed
+- corpus/manifest.json: fixtures[] entry + single-row flip (expectedState unchanged)
+- cmd/instantd/runtime_cf003_sse_lifecycle_replay_test.go (NEW): exact replay + cf003AssertSSEQuiet both streams
+
+## Verification
+| Command/run | Selected | Exit | Meaning |
+| replay -race -count=2 (owned fixture) | 1 x2 | 0 | R2 incl. repair |
+| 4 mutations + 2 throwaway injections | — | FAIL as required | binding + quiet load-bearing; throwaways deleted |
+| TestCorpusReplayIntegration | 18/18 | 0 | no regression |
+| validate / validate-release | full | 0,0 | R3 gates |
+| WS-record exclusion | 1 | 0 | R4 |
+| cmd/instantd package | full | 0 | affected package |
+| gofmt/vet/diff-check | n/a | 0 | static clean |
+
+## Independent review
+- Verdict: ACCEPT (second review; first: REPAIR_REQUIRED on terminal quiescence only; masking/teardown/exclusions/single-subscriber accepted in both)
+- Findings repaired: 1 (bounded 250ms quiet both streams; EOF-inside-window correctly fails per sse.go hold-open semantics)
+- Remaining findings: none
+
+## Not run
+- Full-repo sweep (focused lanes instead); production gate end-to-end (FR-002); differential/v1 (FU-04 blocked)
+
+## Scope audit
+- Leased paths only (manifest row + fixtures[] entry + 3 new files); mid-work backup-clobber incident detected/recovered/re-proven by worker, no residue
+- Unexpected changes: none
+
+## Artifact/provenance
+- Candidate SHA: accepted commit SHA at close (below)
+- Environment: go1.27.1 darwin/arm64; owned instant_test_* fixtures only
+
+## Next prerequisite
+- CF-003-2A5 (transactions-rollback-error) via TestCF003AssembledTransactionMatrix
+
+CF-003-2A4 accepted commit: `3fcc0fb67bab0e23d1ca90b54d011e48d9e05125` (local only, no push). Tree clean. CF-003 stays PARTIAL (13 covered / 9 gap / 4 unsupported).

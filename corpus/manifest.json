@@ -41,6 +41,10 @@
     {
       "id": "query-conjunction-gap",
       "path": "fixtures/query-conjunction-gap.json"
+    },
+    {
+      "id": "refresh-sse-lifecycle",
+      "path": "fixtures/refresh-sse-lifecycle.json"
     }
   ],
   "surfaces": [
@@ -467,15 +471,17 @@
       "case": "lifecycle",
       "surface": "sse",
       "transport": "sse",
-      "fixture": "smoke",
+      "scenario": "refresh-sse-lifecycle",
+      "fixture": "refresh-sse-lifecycle",
       "owner": "internal/corpus",
       "expectedState": "SSE handshake, updates and reconnect completion are ordered",
-      "status": "gap",
+      "status": "covered",
       "oracle": {
-        "kind": "spec",
-        "source": "docs/reference/03-protocol.md SSE fallback"
+        "kind": "regression",
+        "source": "Authored v2 contract: exact corpus replay of the accepted assembled leg TestCF003AssembledSSERefreshAndReconnect @ ec78ad7 via TestCF003SSERefreshLifecycleCaptureReplay. Not a captured v1 oracle."
       },
-      "note": "The adapter is available; a checked-in scenario is still pending."
+      "evidence": ["refresh-sse-lifecycle.json"],
+      "note": "Covered by checked-in raw capture refresh-sse-lifecycle.json (two sequential single-subscriber connects with exact status/Content-Type/Cache-Control, five POSTs with exact status/whole-body/Content-Type including the terminal 401 unknown sse session teardown, nine ordered stream data frames compared whole-result under the masking rule: handshake, protocol-init attrs, add-query acks, zero-watermark initial trees, admin-triggered refresh with exact attr IDs and exact float64 trigger tx-id watermark, reconnect with fresh credentials, stable attrs and converged refresh-title tree) replayed exactly by cmd/instantd/runtime_cf003_sse_lifecycle_replay_test.go::TestCF003SSERefreshLifecycleCaptureReplay on the owned isolated refresh-sse-lifecycle fixture (app 00000000-0000-4000-8000-000000000003); session/token/machine/attr values are never checked in (crypto-random per run) and are substituted/masked by the stated sentinel rule with live freshness, linkage, ordering, and no-unclaimed-mutation asserts. FU-02 Option A report-only; no v1-parity claim."
     },
     {
       "id": "refresh-convergence-concurrency",
