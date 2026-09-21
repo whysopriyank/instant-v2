@@ -37,6 +37,10 @@
     {
       "id": "auth-http-refresh-lifecycle",
       "path": "fixtures/auth-http-refresh-lifecycle.json"
+    },
+    {
+      "id": "query-conjunction-gap",
+      "path": "fixtures/query-conjunction-gap.json"
     }
   ],
   "surfaces": [
@@ -377,15 +381,17 @@
       "case": "boundary",
       "surface": "ws.query.filter",
       "transport": "http",
-      "fixture": "posts",
+      "scenario": "query-conjunction-gap",
+      "fixture": "query-conjunction-gap",
       "owner": "internal/corpus",
       "expectedState": "conjunction and ordering remain stable over the HTTP query path",
-      "status": "gap",
+      "status": "covered",
       "oracle": {
-        "kind": "spec",
-        "source": "docs/reference/03-protocol.md InstaQL surface"
+        "kind": "regression",
+        "source": "Authored v2 contract: exact corpus replay of the accepted assembled leg TestCF003AssembledQueryConjunctionAndOrder @ 31d5539 (strict whole-result oracle @ b293a5c) via TestCF003ConjunctionCaptureReplay. Not a captured v1 oracle."
       },
-      "note": "HTTP query adapter exists, but no checked-in query exchange uses it."
+      "evidence": ["query-conjunction-gap.json"],
+      "note": "Covered by checked-in raw capture query-conjunction-gap.json (unfiltered baseline exact three-ID order, single-field $gt/$lt conjunction, contradictory empty set, multi-field team+$gte conjunction, asc/desc exact orders with ID-derived cursors, limit-2 first page plus cursor-held continuation partitioning all three entities) replayed exactly by cmd/instantd/runtime_cf003_conjunction_replay_test.go::TestCF003ConjunctionCaptureReplay on the owned isolated query-conjunction-gap fixture (app 00000000-0000-4000-8000-000000000003); the seed transact runs live (tx-id watermark and X-admin-token never checked in) with whole-result DeepEqual lengths-before-elements, page-info boundary exactness, continuation-cursor linkage, and a second byte-identical replay pass proving the read-only path. FU-02 Option A report-only; no v1-parity claim."
     },
     {
       "id": "query-relations-positive",

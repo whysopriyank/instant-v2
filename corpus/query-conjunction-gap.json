@@ -1,0 +1,116 @@
+{
+  "scenario": "query-conjunction-gap",
+  "id": "query-conjunction-gap",
+  "transport": "http",
+  "status": "covered",
+  "fixture": "query-conjunction-gap",
+  "source": "Report-only single-flow capture of the already-accepted assembled leg TestCF003AssembledQueryConjunctionAndOrder (@ 31d5539, strict whole-result oracle @ b293a5c) under FU-02 Option A; no corpusctl recorder behavior change, no v1 oracle. The three fixed-UUID todos are seeded live and every query runs over the production-mounted POST /runtime/framework/query path, so exact whole-body replay is deterministic.",
+  "redaction": "CF-002 discipline: volatile transport headers (Date, Content-Length, Transfer-Encoding) excluded; the app-id request header is load-bearing for the query path and is pinned exactly; no credential-bearing admin headers appear in these bytes (the seed transact's X-admin-token is never checked in); application payload keys retained exactly and remain comparison-significant. No tokens, timestamps, DSNs, or database URLs appear in these bytes.",
+  "excluded": "The seed transact (POST /admin/transact writing the three fixed-UUID todos) is excluded from these bytes with reason: its response carries a transaction watermark (tx-id) tied to database state rather than query-path behavior, and its request carries the credential-bearing X-admin-token header, so exact byte check-in is inappropriate. The seed is performed live by the replay test (200 with positive tx-id asserted live, never checked in), mirroring the accepted assembled leg step for step. Query results project only stored fields plus ID-derived cursors, so every checked-in query leg replays byte-exactly.",
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "target": "/runtime/framework/query",
+        "headers": {"app-id": ["00000000-0000-4000-8000-000000000003"]},
+        "body": "{\"query\":{\"todos\":{}}}"
+      },
+      "response": {
+        "status": 200,
+        "headers": {"Content-Type": ["application/json"]},
+        "body": "{\"data\":{\"todos\":[{\"id\":\"00000000-0000-4000-8000-000000000004\",\"priority\":1,\"team\":\"red\",\"title\":\"cf003-alpha\"},{\"id\":\"00000000-0000-4000-8000-000000000006\",\"priority\":2,\"team\":\"red\",\"title\":\"cf003-beta\"},{\"id\":\"00000000-0000-4000-8000-000000000007\",\"priority\":3,\"team\":\"blue\",\"title\":\"cf003-gamma\"}]}}\n"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "target": "/runtime/framework/query",
+        "headers": {"app-id": ["00000000-0000-4000-8000-000000000003"]},
+        "body": "{\"query\":{\"todos\":{\"$\":{\"where\":{\"priority\":{\"$gt\":1,\"$lt\":3}}}}}}"
+      },
+      "response": {
+        "status": 200,
+        "headers": {"Content-Type": ["application/json"]},
+        "body": "{\"data\":{\"todos\":[{\"id\":\"00000000-0000-4000-8000-000000000006\",\"priority\":2,\"team\":\"red\",\"title\":\"cf003-beta\"}]}}\n"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "target": "/runtime/framework/query",
+        "headers": {"app-id": ["00000000-0000-4000-8000-000000000003"]},
+        "body": "{\"query\":{\"todos\":{\"$\":{\"where\":{\"priority\":{\"$gt\":3,\"$lt\":1}}}}}}"
+      },
+      "response": {
+        "status": 200,
+        "headers": {"Content-Type": ["application/json"]},
+        "body": "{\"data\":{\"todos\":[]}}\n"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "target": "/runtime/framework/query",
+        "headers": {"app-id": ["00000000-0000-4000-8000-000000000003"]},
+        "body": "{\"query\":{\"todos\":{\"$\":{\"where\":{\"priority\":{\"$gte\":2},\"team\":\"red\"}}}}}"
+      },
+      "response": {
+        "status": 200,
+        "headers": {"Content-Type": ["application/json"]},
+        "body": "{\"data\":{\"todos\":[{\"id\":\"00000000-0000-4000-8000-000000000006\",\"priority\":2,\"team\":\"red\",\"title\":\"cf003-beta\"}]}}\n"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "target": "/runtime/framework/query",
+        "headers": {"app-id": ["00000000-0000-4000-8000-000000000003"]},
+        "body": "{\"query\":{\"todos\":{\"$\":{\"order\":{\"direction\":\"asc\",\"k\":\"priority\"}}}}}"
+      },
+      "response": {
+        "status": 200,
+        "headers": {"Content-Type": ["application/json"]},
+        "body": "{\"data\":{\"todos\":[{\"id\":\"00000000-0000-4000-8000-000000000004\",\"priority\":1,\"team\":\"red\",\"title\":\"cf003-alpha\"},{\"id\":\"00000000-0000-4000-8000-000000000006\",\"priority\":2,\"team\":\"red\",\"title\":\"cf003-beta\"},{\"id\":\"00000000-0000-4000-8000-000000000007\",\"priority\":3,\"team\":\"blue\",\"title\":\"cf003-gamma\"}]},\"page-info\":{\"startCursor\":\"[\\\"00000000-0000-4000-8000-000000000004\\\",\\\"\\\",null]\",\"endCursor\":\"[\\\"00000000-0000-4000-8000-000000000007\\\",\\\"\\\",null]\",\"hasNextPage\":false,\"hasPreviousPage\":false}}\n"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "target": "/runtime/framework/query",
+        "headers": {"app-id": ["00000000-0000-4000-8000-000000000003"]},
+        "body": "{\"query\":{\"todos\":{\"$\":{\"order\":{\"direction\":\"desc\",\"k\":\"priority\"}}}}}"
+      },
+      "response": {
+        "status": 200,
+        "headers": {"Content-Type": ["application/json"]},
+        "body": "{\"data\":{\"todos\":[{\"id\":\"00000000-0000-4000-8000-000000000007\",\"priority\":3,\"team\":\"blue\",\"title\":\"cf003-gamma\"},{\"id\":\"00000000-0000-4000-8000-000000000006\",\"priority\":2,\"team\":\"red\",\"title\":\"cf003-beta\"},{\"id\":\"00000000-0000-4000-8000-000000000004\",\"priority\":1,\"team\":\"red\",\"title\":\"cf003-alpha\"}]},\"page-info\":{\"startCursor\":\"[\\\"00000000-0000-4000-8000-000000000007\\\",\\\"\\\",null]\",\"endCursor\":\"[\\\"00000000-0000-4000-8000-000000000004\\\",\\\"\\\",null]\",\"hasNextPage\":false,\"hasPreviousPage\":false}}\n"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "target": "/runtime/framework/query",
+        "headers": {"app-id": ["00000000-0000-4000-8000-000000000003"]},
+        "body": "{\"query\":{\"todos\":{\"$\":{\"limit\":2,\"order\":{\"direction\":\"asc\",\"k\":\"priority\"}}}}}"
+      },
+      "response": {
+        "status": 200,
+        "headers": {"Content-Type": ["application/json"]},
+        "body": "{\"data\":{\"todos\":[{\"id\":\"00000000-0000-4000-8000-000000000004\",\"priority\":1,\"team\":\"red\",\"title\":\"cf003-alpha\"},{\"id\":\"00000000-0000-4000-8000-000000000006\",\"priority\":2,\"team\":\"red\",\"title\":\"cf003-beta\"}]},\"page-info\":{\"startCursor\":\"[\\\"00000000-0000-4000-8000-000000000004\\\",\\\"\\\",null]\",\"endCursor\":\"[\\\"00000000-0000-4000-8000-000000000006\\\",\\\"\\\",null]\",\"hasNextPage\":true,\"hasPreviousPage\":false}}\n"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "target": "/runtime/framework/query",
+        "headers": {"app-id": ["00000000-0000-4000-8000-000000000003"]},
+        "body": "{\"query\":{\"todos\":{\"$\":{\"after\":\"[\\\"00000000-0000-4000-8000-000000000006\\\",\\\"\\\",null]\",\"limit\":2,\"order\":{\"direction\":\"asc\",\"k\":\"priority\"}}}}}"
+      },
+      "response": {
+        "status": 200,
+        "headers": {"Content-Type": ["application/json"]},
+        "body": "{\"data\":{\"todos\":[{\"id\":\"00000000-0000-4000-8000-000000000007\",\"priority\":3,\"team\":\"blue\",\"title\":\"cf003-gamma\"}]},\"page-info\":{\"startCursor\":\"[\\\"00000000-0000-4000-8000-000000000007\\\",\\\"\\\",null]\",\"endCursor\":\"[\\\"00000000-0000-4000-8000-000000000007\\\",\\\"\\\",null]\",\"hasNextPage\":false,\"hasPreviousPage\":true}}\n"
+      }
+    }
+  ]
+}

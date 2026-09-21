@@ -1322,3 +1322,57 @@ Repair cycle: 1
 - CF-003-2A3 (query-conjunction-gap) via TestCF003AssembledQueryConjunctionAndOrder
 
 CF-003-2A2 accepted commit: `f1c5a407da1fd15ad02ee2f8b4a0cc5e280b7be5` (local only, no push). Tree clean. CF-003 stays PARTIAL (11 covered / 11 gap / 4 unsupported).
+
+## CF-003-2A3 close-out (2026-09-21, HEAD b439621 + work below, go1.27.1 darwin/arm64)
+
+# Packet CF-003-2A3 handoff
+
+Status: COMPLETE
+Candidate: HEAD `b439621112b4527ace3ad851c4deaf69d69d1693` + uncommitted packet files below (accepted commit SHA at close)
+Decision/profile: DEC-001-single-node-alpha (FU-02 Option A report-only)
+Implementation agent: OpenCode / Muse Spark 1.3 free / xhigh
+Review agent: OpenAI / GPT-5.6 Sol / medium
+Repair cycle: 0
+
+## Ledger
+| Row | Result | Evidence | Remaining |
+| R1 raw capture | GREEN | 8 deterministic exchanges (baseline/conjunction/contradiction/asc/desc/page1/continuation); fixed UUIDs; seed transact excluded with reason | None |
+| R2 exact replay | GREEN | Exact bytes+CT, 4-field binding, DeepEqual lengths-first, page/cursor linkage, 2nd identical pass; -race twice; 2 mutation proofs | None |
+| R3 single-row flip | GREEN | Only query-conjunction-gap gap→covered (11/11/4 → 12/10/4); validate + validate-release green; 18/18 green | None |
+| R4 exclusions | GREEN | WS fails closed; no other files/rows; no v1 text | None |
+
+## Changes
+- corpus/query-conjunction-gap.json (NEW): self-bound envelope + 8 exchanges + excluded note
+- corpus/fixtures/query-conjunction-gap.json (NEW): dedicated fixture == actual seed (declared `posts` correctly abandoned)
+- corpus/manifest.json: fixtures[] entry + single-row flip (expectedState unchanged)
+- cmd/instantd/runtime_cf003_conjunction_replay_test.go (NEW): exact replay + live seed + 4-field binding
+
+## Verification
+| Command/run | Selected | Exit | Meaning |
+| replay -race twice (owned fixture) | 1 | 0,0 | R2 |
+| 2 mutations (capture app-id, fixture admin) | 1 each | FAIL pre-replay | binding load-bearing; restored identical |
+| TestCorpusReplayIntegration | 18/18 | 0 | no regression |
+| validate / validate-release | full | 0,0 | R3 gates |
+| WS-record exclusion | 1 | 0 | R4 |
+| assembled leg + 2 predecessor replays -race | 3 | 0 | no adjacent breakage |
+| gofmt/vet/diff-check | n/a | 0 | static clean |
+
+## Independent review
+- Verdict: ACCEPT (first review; seed exclusion ruled legitimate setup exclusion; cursors deterministic; no stale posts reference; no tautology)
+- Findings repaired: 0
+- Remaining findings: none
+
+## Not run
+- Full-repo sweep (focused lanes instead); production gate end-to-end (FR-002); differential/v1 (FU-04 blocked)
+
+## Scope audit
+- Leased paths only; probe file deleted; no validator/recorder/docs/Makefile changes; unexpected changes none
+
+## Artifact/provenance
+- Candidate SHA: accepted commit SHA at close (below)
+- Environment: go1.27.1 darwin/arm64; owned instant_test_* fixtures only
+
+## Next prerequisite
+- CF-003-2A4 (refresh-sse-lifecycle) via TestCF003AssembledSSERefreshAndReconnect
+
+CF-003-2A3 accepted commit: `3eaae428688ae15039060ba4c835f7cf4999d098` (local only, no push). Tree clean. CF-003 stays PARTIAL (12 covered / 10 gap / 4 unsupported).
