@@ -1431,3 +1431,58 @@ Repair cycle: 1
 - CF-003-2A5 (transactions-rollback-error) via TestCF003AssembledTransactionMatrix
 
 CF-003-2A4 accepted commit: `3fcc0fb67bab0e23d1ca90b54d011e48d9e05125` (local only, no push). Tree clean. CF-003 stays PARTIAL (13 covered / 9 gap / 4 unsupported).
+
+## CF-003-2A5 close-out (2026-09-21, HEAD c52a4bc + work below, go1.27.1 darwin/arm64)
+
+# Packet CF-003-2A5 handoff
+
+Status: COMPLETE
+Candidate: HEAD `c52a4bc0ae158b7f6d0d308e38182647391509bd` + uncommitted packet files below (accepted commit SHA at close)
+Decision/profile: DEC-001-single-node-alpha (FU-02 Option A report-only)
+Implementation agent: OpenCode / Muse Spark 1.3 free / xhigh
+Review agent: OpenAI / GPT-5.6 Sol / medium
+Repair cycle: 0
+
+## Ledger
+| Row | Result | Evidence | Remaining |
+| R1 raw capture | GREEN | 6 exchanges (baseline/400-fail/post-rollback-identical/cardinality/merge/deleted); attr UUIDs sentinel-masked (proven volatile); PG error bytes stable across 2 fresh DBs | None |
+| R2 exact replay | GREEN | Exact bytes+CT, 4-field binding, no-partial-write byte-identity, live mutators with advancing tx; -race twice; 3 mutation proofs | None |
+| R3 single-row flip | GREEN | Only transactions-rollback-error gap→covered (13/10/4 → 14/8/4); validate + validate-release green; 18/18 green | None |
+| R4 exclusions | GREEN | WS fails closed; neighbors stay gap; no v1 text | None |
+
+## Changes
+- corpus/transactions-rollback-error.json (NEW): self-bound envelope + 6 exchanges + excluded note
+- corpus/fixtures/transactions-rollback-error.json (NEW): dedicated fixture == actual seed
+- corpus/manifest.json: fixtures[] entry + single-row flip (expectedState unchanged)
+- cmd/instantd/runtime_cf003_rollback_replay_test.go (NEW): exact replay + live mutators
+
+## Verification
+| Command/run | Selected | Exit | Meaning |
+| replay -race twice (owned fixture) | 1 | 0,0 | R2 |
+| 3 mutations | 1 each | FAIL pre-replay/exact | binding load-bearing; restored identical |
+| byte-stability across 2 fresh DBs | 7 bodies | identical | determinism proof |
+| TestCorpusReplayIntegration | 18/18 | 0 | no regression |
+| validate / validate-release | full | 0,0 | R3 gates |
+| WS-record exclusion | 1 | 0 | R4 |
+| affected packages full | full | 0 | no adjacent breakage |
+| gofmt/vet/diff-check | n/a | 0 | static clean |
+
+## Independent review
+- Verdict: ACCEPT (first review; 400 PG-error bytes acceptable within qualified PG17 envelope with independently asserted stable marker; seed/cardinality-live design and neighbor boundaries accepted)
+- Findings repaired: 0
+- Remaining findings: none (one non-blocking observation recorded above)
+
+## Not run
+- Live concurrent same-lookup race (excluded by design, assembled 10x proof cited); full-repo sweep; production gate end-to-end (FR-002); differential/v1 (FU-04 blocked)
+
+## Scope audit
+- Leased paths only; scratch probe deleted; no validator/recorder/docs/Makefile changes; unexpected changes none
+
+## Artifact/provenance
+- Candidate SHA: accepted commit SHA at close (below)
+- Environment: go1.27.1 darwin/arm64; owned instant_test_* fixtures only
+
+## Next prerequisite
+- CF-003-2A6 (transactions-cardinality-boundary SSE/HTTP variants; WS variant excluded by enforcement)
+
+CF-003-2A5 accepted commit: `58f3aaac1c569baaef7abed590fb0d375fe34ebb` (local only, no push). Tree clean. CF-003 stays PARTIAL (14 covered / 8 gap / 4 unsupported).

@@ -45,6 +45,10 @@
     {
       "id": "refresh-sse-lifecycle",
       "path": "fixtures/refresh-sse-lifecycle.json"
+    },
+    {
+      "id": "transactions-rollback-error",
+      "path": "fixtures/transactions-rollback-error.json"
     }
   ],
   "surfaces": [
@@ -589,15 +593,17 @@
       "case": "denied-error",
       "surface": "ws.transact.rollback",
       "transport": "http",
-      "fixture": "smoke",
+      "scenario": "transactions-rollback-error",
+      "fixture": "transactions-rollback-error",
       "owner": "internal/corpus",
       "expectedState": "failed multi-step transaction leaves no partial write",
-      "status": "gap",
+      "status": "covered",
       "oracle": {
-        "kind": "spec",
-        "source": "docs/reference/03-protocol.md transaction grammar"
+        "kind": "regression",
+        "source": "Authored v2 contract: exact corpus replay of the accepted assembled legs TestCF003AssembledTransactionMatrix @ ec78ad7 and TestCF003AssembledTransactionTransportMatrix @ 43ed443 via TestCF003RollbackCaptureReplay. Not a captured v1 oracle."
       },
-      "note": "The HTTP transaction path needs an authored exchange."
+      "evidence": ["transactions-rollback-error.json"],
+      "note": "Covered by checked-in raw capture transactions-rollback-error.json (baseline query exact one-entity state, failing low-level two-step batch with exact 400 carrying the stable unique-constraint marker, post-rollback query byte-identical to baseline proving no partial write, cardinality query exact final-value, merge query exact preservation, deleted query exact empty set) replayed exactly by cmd/instantd/runtime_cf003_rollback_replay_test.go::TestCF003RollbackCaptureReplay on the owned isolated transactions-rollback-error fixture (app 00000000-0000-4000-8000-000000000003); the four mutating transact successes run live (tx-id watermarks and X-admin-token never checked in) with strictly advancing tx-ids, the run-minted attr UUIDs in the failing request stay sentinel-masked by the stated rule with live substitution counts and no-leak asserts, and whole-result DeepEqual lengths-before-elements guards every state. The timing-dependent same-lookup concurrent leg is excluded with reason (start barrier encourages but does not force DB overlap; assembled 10x-race proof is boundary evidence only); cardinality/merge/delete legs are boundary evidence for the neighboring transactions-cardinality-boundary and transactions-lookup-lifecycle rows, which stay gap, as does transactions-concurrency-gap. FU-02 Option A report-only; no v1-parity claim."
     },
     {
       "id": "transactions-cardinality-boundary",

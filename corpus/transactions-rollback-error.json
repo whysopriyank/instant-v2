@@ -1,0 +1,90 @@
+{
+  "scenario": "transactions-rollback-error",
+  "id": "transactions-rollback-error",
+  "transport": "http",
+  "status": "covered",
+  "fixture": "transactions-rollback-error",
+  "source": "Report-only single-flow capture of the already-accepted assembled HTTP legs TestCF003AssembledTransactionMatrix (@ ec78ad7, 10x race + Sol ACCEPT) and TestCF003AssembledTransactionTransportMatrix (@ 43ed443) under FU-02 Option A; no corpusctl recorder behavior change, no v1 oracle. The fixed-UUID todo is seeded live and every leg runs over the production-mounted POST /admin/transact and POST /runtime/framework/query routes, so exact whole-body replay is deterministic across fresh isolated DBs (proven byte-identical on two runs).",
+  "redaction": "CF-002 discipline: volatile transport headers (Date, Content-Length, Transfer-Encoding) excluded; the app-id request header is load-bearing for the query path and is pinned exactly; the credential-bearing X-admin-token request header is never checked in (attached live by the replay test). Application payload keys retained exactly and remain comparison-significant. The run-minted todos/title and todos/id catalog attr UUIDs are crypto-random per run (observed distinct across fresh DBs) and are sentinel-masked in the one checked-in failing request body by the stated rule (__CF003_TITLE_ATTR__/__CF003_ID_ATTR__ substituted with the live schema-resolved values; substitution counts asserted, no live attr UUID present in checked-in bytes, no sentinel present in sent bytes). Transaction watermarks (tx-id) are never checked in. No tokens, timestamps, DSNs, or database URLs appear in these bytes.",
+  "excluded": "The four mutating transact successes (baseline seed, same-batch cardinality-one batch, deep-merge batch, delete-by-lookup) are excluded from these bytes with reason: each 200 response carries a transaction watermark (tx-id) tied to database state rather than rollback behavior, and each request carries the credential-bearing X-admin-token header, so exact byte check-in is inappropriate. Each runs live in file order with exact shape asserts (200 with strictly advancing positive tx-id, mirroring the accepted assembled leg). The same-lookup concurrent convergence leg is excluded from these bytes with reason: it is timing-dependent (the start barrier encourages but does not force DB-level overlap), so no byte sequence can pin it deterministically; the assembled 10x-race proof stands as boundary evidence only and transactions-concurrency-gap stays gap. The cardinality final-value, merge-preservation, and delete exact-state legs are boundary evidence for the neighboring transactions-cardinality-boundary and transactions-lookup-lifecycle rows and do not flip those rows; the WS/SSE denial legs of the transport matrix stay with their accepted tests and are not reproduced here.",
+  "exchanges": [
+    {
+      "request": {
+        "method": "POST",
+        "target": "/runtime/framework/query",
+        "headers": {"app-id": ["00000000-0000-4000-8000-000000000003"]},
+        "body": "{\"query\":{\"todos\":{}}}"
+      },
+      "response": {
+        "status": 200,
+        "headers": {"Content-Type": ["application/json"]},
+        "body": "{\"data\":{\"todos\":[{\"id\":\"00000000-0000-4000-8000-000000000004\",\"title\":\"tx-baseline\"}]}}\n"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "target": "/admin/transact",
+        "headers": {},
+        "body": "{\"app-id\":\"00000000-0000-4000-8000-000000000003\",\"steps\":[[\"add-triple\",\"00000000-0000-4000-8000-000000000004\",\"__CF003_TITLE_ATTR__\",\"must-roll-back\"],[\"add-triple\",\"00000000-0000-4000-8000-000000000043\",\"__CF003_ID_ATTR__\",\"00000000-0000-4000-8000-000000000004\"]]}"
+      },
+      "response": {
+        "status": 400,
+        "headers": {"Content-Type": ["application/json"]},
+        "body": "{\"message\":\"triple insert: unique constraint violated (av_ignore_nulls_index) [ERROR: duplicate key value violates unique constraint \\\"av_ignore_nulls_index\\\" (SQLSTATE 23505)]\"}\n"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "target": "/runtime/framework/query",
+        "headers": {"app-id": ["00000000-0000-4000-8000-000000000003"]},
+        "body": "{\"query\":{\"todos\":{}}}"
+      },
+      "response": {
+        "status": 200,
+        "headers": {"Content-Type": ["application/json"]},
+        "body": "{\"data\":{\"todos\":[{\"id\":\"00000000-0000-4000-8000-000000000004\",\"title\":\"tx-baseline\"}]}}\n"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "target": "/runtime/framework/query",
+        "headers": {"app-id": ["00000000-0000-4000-8000-000000000003"]},
+        "body": "{\"query\":{\"todos\":{}}}"
+      },
+      "response": {
+        "status": 200,
+        "headers": {"Content-Type": ["application/json"]},
+        "body": "{\"data\":{\"todos\":[{\"id\":\"00000000-0000-4000-8000-000000000004\",\"title\":\"tx-last\"}]}}\n"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "target": "/runtime/framework/query",
+        "headers": {"app-id": ["00000000-0000-4000-8000-000000000003"]},
+        "body": "{\"query\":{\"todos\":{}}}"
+      },
+      "response": {
+        "status": 200,
+        "headers": {"Content-Type": ["application/json"]},
+        "body": "{\"data\":{\"todos\":[{\"id\":\"00000000-0000-4000-8000-000000000004\",\"meta\":{\"a\":1,\"b\":2},\"title\":\"tx-last\"}]}}\n"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "target": "/runtime/framework/query",
+        "headers": {"app-id": ["00000000-0000-4000-8000-000000000003"]},
+        "body": "{\"query\":{\"todos\":{}}}"
+      },
+      "response": {
+        "status": 200,
+        "headers": {"Content-Type": ["application/json"]},
+        "body": "{\"data\":{\"todos\":[]}}\n"
+      }
+    }
+  ]
+}
