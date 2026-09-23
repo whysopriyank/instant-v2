@@ -25,3 +25,9 @@ func writeEvidenceInDir(d *ReservedDir, target string, value any, hooks writeHoo
 func writeEvidenceWithHooks(path string, value any, hooks writeHooks) error {
 	return errors.New("descriptor-relative evidence writing is unsupported on this platform")
 }
+
+// WriteRawEvidence mirrors the unix raw-byte publisher's contract on
+// platforms without descriptor-relative reservation support.
+func (d *ReservedDir) WriteRawEvidence(filename string, payload []byte) error {
+	return errors.New("descriptor-relative evidence writing is unsupported on this platform")
+}

@@ -69,3 +69,40 @@ reservation, failure cleanup closes only the descriptor-pinned reservation and
 may leave private incomplete residue in place as untrusted and ineligible; it
 never deletes through the output pathname, which may have been concurrently
 replaced. The managed path never records WebSocket frames.
+
+## Managed multi-client recording (FU-01 capture contract)
+
+`--mode managed-record-multiclient` runs the same candidate-bound lifecycle
+above (clean-tree gate, build from `--repo`, owned `instant_test_*` database,
+loopback, identity, reset) with two concurrent SSE topologies over the
+production-mounted `GET /runtime/sse` + `POST /runtime/sse` path, per
+[fu01-multiclient-capture-contract](../../docs/plans/finish-up/fu01-multiclient-capture-contract.md):
+
+- shared-query: subscribers A and B race `add-query` through a start barrier,
+  converge to one identical ordered snapshot, converge again to identical
+  refresh frames at one exact trigger tx, then late joiner C converges to the
+  identical final snapshot at the same tx (init-tree envelope pinned
+  separately from the peers' transactional node-list envelope);
+- shared-room: A joins solo, B late-joins to the exact two-member snapshot, B
+  resyncs explicitly, A updates presence for both peers, A broadcasts
+  peer-only with the exact sender session, B leaves and A converges to the
+  exact one-member snapshot.
+
+Every post-handshake data frame is retained verbatim per subscriber as genuine
+NDJSON (`fu01-query-{a,b,c}.ndjson`, `fu01-room-{a,b}.ndjson`, one
+`{"subscriber","seq","frame"}` object per line) plus a `fu01-capture-facts.json`
+envelope (trigger tx IDs, attr IDs, titles, room ID, 250ms quiet-window bound;
+no session IDs, tokens, or DSNs) and a checksummed `manifest.json`. Any
+cross-subscriber divergence fails the capture; after the final expected frame
+per subscriber a bounded 250ms quiet window proves quiescence. PASS is
+emitted only after manifest checksums verify and the full oracle (every
+retained frame, init/ack payloads, op-step ordering on both room streams,
+session relationships, snapshots, watermarks, no-delta, no-quorum DeepEqual)
+is re-run from the disk artifacts alone. Example:
+
+```sh
+go run ./cmd/corpusctl --mode managed-record-multiclient --output-dir /tmp/fu01run1
+```
+
+This packet builds and proves the recorder only; no corpus manifest row is
+flipped here (flips belong to later packets).

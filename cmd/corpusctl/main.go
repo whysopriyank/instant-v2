@@ -58,8 +58,8 @@ func run(args []string, out, diagnostic io.Writer) int {
 	var fixtureFlag, fixtureIDFlag string
 	flags := flag.NewFlagSet("corpusctl", flag.ContinueOnError)
 	flags.SetOutput(diagnostic)
-	flags.StringVar(&o.mode, "mode", "replay", "validate, validate-release, replay, differential, record (http/sse only; ws unsupported), or managed-record (candidate-bound local HTTP+SSE capture)")
-	flags.StringVar(&o.transport, "transport", "ws", "ws, http, or sse (replay or record mode; ws record unsupported; ignored by managed-record)")
+	flags.StringVar(&o.mode, "mode", "replay", "validate, validate-release, replay, differential, record (http/sse only; ws unsupported), managed-record (candidate-bound local HTTP+SSE capture), or managed-record-multiclient (candidate-bound FU-01 multi-client SSE capture)")
+	flags.StringVar(&o.transport, "transport", "ws", "ws, http, or sse (replay or record mode; ws record unsupported; ignored by managed-record and managed-record-multiclient)")
 	flags.StringVar(&o.corpusDir, "corpus", "corpus", "corpus directory or one .ndjson file")
 	flags.StringVar(&o.releaseEnvelope, "release-envelope", "", "release-envelope document (required for validate-release)")
 	flags.StringVar(&o.suite, "suite", "", "suite/filename substring")
@@ -67,9 +67,9 @@ func run(args []string, out, diagnostic io.Writer) int {
 	flags.StringVar(&o.other, "other", "", "pinned v1 WebSocket URL for differential")
 	flags.StringVar(&o.v1Path, "v1-path", "../instant", "local pinned v1 checkout")
 	flags.StringVar(&o.v1Ref, "v1-ref", "", "expected v1 commit (defaults to corpus manifest)")
-	flags.StringVar(&o.outputDir, "output-dir", "", "new private evidence files (required for differential, record, and managed-record)")
-	flags.StringVar(&o.repo, "repo", ".", "repository path for managed-record (candidate SHA and binary build; must be clean)")
-	flags.StringVar(&o.databaseURL, "database-url", "", "admin PostgreSQL URL for managed-record (defaults to DATABASE_URL; never recorded)")
+	flags.StringVar(&o.outputDir, "output-dir", "", "new private evidence files (required for differential, record, managed-record, and managed-record-multiclient)")
+	flags.StringVar(&o.repo, "repo", ".", "repository path for managed-record and managed-record-multiclient (candidate SHA and binary build; must be clean)")
+	flags.StringVar(&o.databaseURL, "database-url", "", "admin PostgreSQL URL for managed-record and managed-record-multiclient (defaults to DATABASE_URL; never recorded)")
 	flags.StringVar(&endpointIDFlag, "endpoint-id", "", "caller-supplied target endpoint identity for record mode")
 	flags.StringVar(&endpointFlag, "endpoint", "", "alias for --endpoint-id")
 	flags.StringVar(&sourceIDFlag, "source-id", "", "caller-supplied source revision/deployment identity for record mode")
@@ -104,6 +104,8 @@ func run(args []string, out, diagnostic io.Writer) int {
 	switch o.mode {
 	case "managed-record":
 		return runManagedRecord(o, out, diagnostic)
+	case "managed-record-multiclient":
+		return runManagedMulticlient(o, out, diagnostic)
 	case "validate", "validate-release":
 		if o.suite != "" {
 			return fail(fmt.Errorf("validate checks the entire corpus; --suite is not supported"))
