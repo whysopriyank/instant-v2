@@ -1,0 +1,242 @@
+{
+  "scenario": "rooms-fanout-positive",
+  "id": "rooms-fanout-positive",
+  "transport": "sse",
+  "status": "covered",
+  "fixture": "rooms-fanout-positive",
+  "source": "FU-01 2B-3 room leg: checked-in raw per-subscriber SSE capture produced by the accepted recorder `corpusctl --mode managed-record-multiclient` (docs/plans/finish-up/fu01-multiclient-capture-contract.md) at candidate 67718bc0342cc631f5fb963678b58f8338e0ca28 (git clean, go1.27.1 darwin/arm64), owned isolated fixture DB instant_test_017b99da6b1339270e187ad1 / fixture app <room-app-id> (recorded live as 6273cd63-2659-440a-b42f-750086ec263f, masked here per the redaction rule since app IDs are random per capture run), precondition apps=1 title=\"fu01-managed\" attrs=0 triples=0 idents=0 rows=[], final apps=1 title=\"fu01-managed\" attrs=2 triples=6 idents=2 rows=[...] (query-leg state recorded in the same run; the room leg itself needs no DB rows). Two SSE subscribers (room-A, room-B) share room \"fu01-room\" over the production-mounted GET/POST /runtime/sse path: A joins solo (ack+presence, either order), B late-joins to the exact two-member snapshot (ack+presence, either order, both peers converge), B explicitly resyncs via refresh-presence, A set-presence fans the exact updated snapshot to both peers (ack+presence, either order), A client-broadcasts peer-only (topic chat) -- B alone receives the exact server-broadcast carrying A's exact sender session with no echo to the sender -- and B leaves, converging survivor A to the exact one-member snapshot. Every post-handshake data frame is retained verbatim per subscriber with (subscriber, seq); the recorder's 250ms bounded quiet window (mcQuietWindow) proved quiescence on both streams at capture time. Replayed by cmd/instantd/runtime_fu01_room_replay_test.go::TestFU01RoomCaptureReplay, which reruns this exact flow live against the owned isolated Postgres fixture declared by corpus/fixtures/rooms-fanout-positive.json (the deterministic cf003 seed identity reused via cf003PostgresMux) and asserts every one of the 15 checked-in frames exactly (whole-frame reflect.DeepEqual after sentinel substitution), both as each frame arrives live and again from retention alone. Report-only exact corpus replay of the already-accepted assembled leg TestCF003AssembledRoomFanoutSSE (cmd/instantd/runtime_cf003_room_sse_test.go) plus the FU-01 contract shape proof TestFU01CaptureContractRoomFanout (cmd/instantd/runtime_fu01_capture_contract_test.go); not a captured v1 oracle; no corpusctl recorder behavior change.",
+  "redaction": "CF-002-style mechanical masking rule (enforced by the replay test): session-bearing string values and the per-run fixture app id are never checked in. The checked-in stream frames carry sentinel placeholders <room-a-session>, <room-b-session>, <room-app-id> in exactly the positions the live server emits random values (A's and B's mounted protocol session ids -- used both as the session-id field on each subscriber's own init-ok frame and as presence-map keys / server-broadcast session-id -- and the fixture app id inside auth.app.id on each init-ok frame). The replay test substitutes the live session ids and app id into the checked-in templates via full JSON round-trip substitution (never raw string surgery) before whole-frame reflect.DeepEqual, both as each frame arrives live and again from retention alone; any checked-in real session value (any \"sess-\" substring) or an unsubstituted sentinel left in a rendered template fails the test before any byte is replayed. Sentinel occurrence counts are pinned exactly: <room-a-session> 9, <room-b-session> 6, <room-app-id> 2. Room id \"fu01-room\", peer ids \"peer-a\"/\"peer-b\", client-event-ids, topic \"chat\", and presence/broadcast payload data (mood/message values) are deterministic capture facts and remain comparison-significant, never masked. The transport hello (pre-handshake) is excluded from retention per the contract (section 3); heartbeat comment records carry no data payload and are excluded per CF-002 discipline.",
+  "excluded": "Excluded with reason: this recorder (corpusctl --mode managed-record-multiclient) persists per-subscriber decoded data frames only, not raw HTTP request/response bytes, so no connects/posts sections are checked in (unlike the single-flow transactions-lookup-lifecycle capture). The two SSE connects (GET /runtime/sse) and every POST /runtime/sse message are therefore exercised live on each replay with the same 200 {}\\n acknowledgement shape as the accepted assembled leg TestCF003AssembledRoomFanoutSSE; only the resulting per-subscriber data frames are checked in and byte-compared. Session/token values (including the transport-hello sse-token) are excluded from retention entirely, matching the contract's retention rule.",
+  "stream": [
+    {
+      "subscriber": "room-A",
+      "seq": 0,
+      "data": {
+        "app-status": {
+          "status": "active"
+        },
+        "attrs": [],
+        "auth": {
+          "admin?": false,
+          "app": {
+            "id": "<room-app-id>"
+          },
+          "user": null
+        },
+        "op": "init-ok",
+        "session-id": "<room-a-session>"
+      }
+    },
+    {
+      "subscriber": "room-A",
+      "seq": 1,
+      "data": {
+        "client-event-id": "join-a",
+        "op": "join-room-ok",
+        "room-id": "fu01-room"
+      }
+    },
+    {
+      "subscriber": "room-A",
+      "seq": 2,
+      "data": {
+        "data": {
+          "<room-a-session>": {
+            "data": {
+              "mood": "ok"
+            },
+            "peer": "peer-a"
+          }
+        },
+        "op": "refresh-presence",
+        "room-id": "fu01-room"
+      }
+    },
+    {
+      "subscriber": "room-A",
+      "seq": 3,
+      "data": {
+        "data": {
+          "<room-b-session>": {
+            "data": {},
+            "peer": "peer-b"
+          },
+          "<room-a-session>": {
+            "data": {
+              "mood": "ok"
+            },
+            "peer": "peer-a"
+          }
+        },
+        "op": "refresh-presence",
+        "room-id": "fu01-room"
+      }
+    },
+    {
+      "subscriber": "room-A",
+      "seq": 4,
+      "data": {
+        "client-event-id": "presence-a",
+        "op": "set-presence-ok",
+        "room-id": "fu01-room"
+      }
+    },
+    {
+      "subscriber": "room-A",
+      "seq": 5,
+      "data": {
+        "data": {
+          "<room-b-session>": {
+            "data": {},
+            "peer": "peer-b"
+          },
+          "<room-a-session>": {
+            "data": {
+              "mood": "great"
+            },
+            "peer": "peer-a"
+          }
+        },
+        "op": "refresh-presence",
+        "room-id": "fu01-room"
+      }
+    },
+    {
+      "subscriber": "room-A",
+      "seq": 6,
+      "data": {
+        "client-event-id": "broadcast-a",
+        "op": "client-broadcast-ok"
+      }
+    },
+    {
+      "subscriber": "room-A",
+      "seq": 7,
+      "data": {
+        "data": {
+          "<room-a-session>": {
+            "data": {
+              "mood": "great"
+            },
+            "peer": "peer-a"
+          }
+        },
+        "op": "refresh-presence",
+        "room-id": "fu01-room"
+      }
+    },
+    {
+      "subscriber": "room-B",
+      "seq": 0,
+      "data": {
+        "app-status": {
+          "status": "active"
+        },
+        "attrs": [],
+        "auth": {
+          "admin?": false,
+          "app": {
+            "id": "<room-app-id>"
+          },
+          "user": null
+        },
+        "op": "init-ok",
+        "session-id": "<room-b-session>"
+      }
+    },
+    {
+      "subscriber": "room-B",
+      "seq": 1,
+      "data": {
+        "client-event-id": "join-b",
+        "op": "join-room-ok",
+        "room-id": "fu01-room"
+      }
+    },
+    {
+      "subscriber": "room-B",
+      "seq": 2,
+      "data": {
+        "data": {
+          "<room-b-session>": {
+            "data": {},
+            "peer": "peer-b"
+          },
+          "<room-a-session>": {
+            "data": {
+              "mood": "ok"
+            },
+            "peer": "peer-a"
+          }
+        },
+        "op": "refresh-presence",
+        "room-id": "fu01-room"
+      }
+    },
+    {
+      "subscriber": "room-B",
+      "seq": 3,
+      "data": {
+        "data": {
+          "<room-b-session>": {
+            "data": {},
+            "peer": "peer-b"
+          },
+          "<room-a-session>": {
+            "data": {
+              "mood": "ok"
+            },
+            "peer": "peer-a"
+          }
+        },
+        "op": "refresh-presence",
+        "room-id": "fu01-room"
+      }
+    },
+    {
+      "subscriber": "room-B",
+      "seq": 4,
+      "data": {
+        "data": {
+          "<room-b-session>": {
+            "data": {},
+            "peer": "peer-b"
+          },
+          "<room-a-session>": {
+            "data": {
+              "mood": "great"
+            },
+            "peer": "peer-a"
+          }
+        },
+        "op": "refresh-presence",
+        "room-id": "fu01-room"
+      }
+    },
+    {
+      "subscriber": "room-B",
+      "seq": 5,
+      "data": {
+        "data": {
+          "data": {
+            "message": "hello"
+          },
+          "peer": "peer-a"
+        },
+        "op": "server-broadcast",
+        "room-id": "fu01-room",
+        "session-id": "<room-a-session>",
+        "topic": "chat"
+      }
+    },
+    {
+      "subscriber": "room-B",
+      "seq": 6,
+      "data": {
+        "client-event-id": "leave-b",
+        "op": "leave-room-ok",
+        "room-id": "fu01-room"
+      }
+    }
+  ]
+}

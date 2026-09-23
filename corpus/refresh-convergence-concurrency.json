@@ -1,0 +1,115 @@
+{
+  "scenario": "refresh-convergence-concurrency",
+  "id": "refresh-convergence-concurrency",
+  "transport": "sse",
+  "status": "covered",
+  "fixture": "query-concurrency-gap",
+  "source": "Raw evidence basis: managed-record-multiclient SSE capture via corpusctl --mode managed-record-multiclient at candidate 67718bc0342cc631f5fb963678b58f8338e0ca28 (clean tree; fu01-query-a.ndjson, fu01-query-b.ndjson, fu01-query-c.ndjson, fu01-capture-facts.json), which established the retained-frame shape (node-list refresh-ok for the peers already subscribed, init-tree refresh-ok for a late joiner per contract §4) and the deterministic facts replayed exactly below: a single committed admin change lands as trigger transaction watermark tx-id 2 on a fresh isolated database (seed tx 1), and every stream goes quiet inside a bounded 250ms window. This envelope's checked-in bytes are captured live from cmd/instantd/runtime_fu01_query_replay_test.go::TestFU01QueryCaptureReplay running that same shape against the owned deterministic query-concurrency-gap fixture (app 00000000-0000-4000-8000-000000000003, fixed entity IDs) rather than replaying the recorder's random per-run UUIDs verbatim; the contract's shape-proof harness TestFU01CaptureContractQueryConcurrency and the accepted assembled leg TestCF003AssembledSSEQueryConcurrencyOrderedSnapshot share this same deterministic entity/title/event-id convention.",
+  "redaction": "CF-002 discipline: volatile transport headers excluded; SSE heartbeat comment records excluded; the transport-level handshake hello frame is excluded from retention per contract §3. Masking rule (mechanical, enforced by the replay test): session-bearing and schema-minted string values are never checked in. The checked-in frames carry sentinel placeholders <fu01-session-C>, <fu01-attr-id-todos-id>, <fu01-attr-id-todos-title> in exactly the positions the live server emits random values (protocol-init session-id for the late joiner, schema attr ids embedded in the peers' node-list refresh triples). Entity IDs, the app ID, titles, op names, and event IDs are fixed literals chosen by the owned fixture and are never masked; they remain comparison-significant. No POST request/response bytes are checked in (see excluded). The replay test masks live frames back to the sentinels before whole-result reflect.DeepEqual; any checked-in real session value (any live-session-prefix substring) or missing sentinel fails the test before any byte is replayed. No timestamps, DSNs, or database URLs appear in these bytes.",
+  "excluded": "Excluded with reason: (1) the transport handshake hello for the late joiner — excluded from retention by contract §3, asserted only for distinctness/freshness live, never checked in. (2) The trigger admin transact (POST /admin/transact, one entity retitled) — its response carries a per-database transaction watermark and its request carries the credential-bearing X-admin-token header; it runs live with a positive strictly-advancing tx-id asserted live (deterministic tx-id 2 on a fresh isolated database with the deterministic tx-1 seed from query-concurrency-gap.json's evidence, re-asserted exactly). (3) SSE POST request/response bytes for the late joiner's init and add-query — always exactly 200 {}\\n regardless of session content; the cf003 helpers already assert this exactly live. Heartbeat comments are excluded per the redaction rule, not a behavior exclusion.",
+  "stream": [
+    {
+      "subscriber": "A",
+      "seq": 3,
+      "frame": {
+        "op": "refresh-ok",
+        "processed-tx-id": 2,
+        "computations": [
+          {
+            "instaql-query": {"todos": {}},
+            "instaql-result": [
+              {
+                "child-nodes": [],
+                "data": {
+                  "datalog-result": {
+                    "join-rows": [
+                      [
+                        ["00000000-0000-4000-8000-000000000004", "<fu01-attr-id-todos-id>", "00000000-0000-4000-8000-000000000004"],
+                        ["00000000-0000-4000-8000-000000000004", "<fu01-attr-id-todos-title>", "conc-alpha"],
+                        ["00000000-0000-4000-8000-000000000006", "<fu01-attr-id-todos-id>", "00000000-0000-4000-8000-000000000006"],
+                        ["00000000-0000-4000-8000-000000000006", "<fu01-attr-id-todos-title>", "conc-beta-2"],
+                        ["00000000-0000-4000-8000-000000000007", "<fu01-attr-id-todos-id>", "00000000-0000-4000-8000-000000000007"],
+                        ["00000000-0000-4000-8000-000000000007", "<fu01-attr-id-todos-title>", "conc-gamma"]
+                      ]
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "subscriber": "B",
+      "seq": 3,
+      "frame": {
+        "op": "refresh-ok",
+        "processed-tx-id": 2,
+        "computations": [
+          {
+            "instaql-query": {"todos": {}},
+            "instaql-result": [
+              {
+                "child-nodes": [],
+                "data": {
+                  "datalog-result": {
+                    "join-rows": [
+                      [
+                        ["00000000-0000-4000-8000-000000000004", "<fu01-attr-id-todos-id>", "00000000-0000-4000-8000-000000000004"],
+                        ["00000000-0000-4000-8000-000000000004", "<fu01-attr-id-todos-title>", "conc-alpha"],
+                        ["00000000-0000-4000-8000-000000000006", "<fu01-attr-id-todos-id>", "00000000-0000-4000-8000-000000000006"],
+                        ["00000000-0000-4000-8000-000000000006", "<fu01-attr-id-todos-title>", "conc-beta-2"],
+                        ["00000000-0000-4000-8000-000000000007", "<fu01-attr-id-todos-id>", "00000000-0000-4000-8000-000000000007"],
+                        ["00000000-0000-4000-8000-000000000007", "<fu01-attr-id-todos-title>", "conc-gamma"]
+                      ]
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "subscriber": "C",
+      "seq": 0,
+      "frame": {
+        "op": "init-ok",
+        "session-id": "<fu01-session-C>",
+        "app-status": {"status": "active"},
+        "auth": {"admin?": false, "app": {"id": "00000000-0000-4000-8000-000000000003"}, "user": null},
+        "attrs": [
+          {"cardinality": "one", "checked-data-type": null, "forward-identity": ["00000000-0000-4000-8000-000000000003", "todos", "id"], "id": "<fu01-attr-id-todos-id>", "index?": true, "primary?": true, "required?": true, "unique?": true, "value-type": "blob"},
+          {"cardinality": "one", "checked-data-type": null, "forward-identity": ["00000000-0000-4000-8000-000000000003", "todos", "title"], "id": "<fu01-attr-id-todos-title>", "index?": false, "required?": false, "unique?": false, "value-type": "blob"}
+        ]
+      }
+    },
+    {
+      "subscriber": "C",
+      "seq": 1,
+      "frame": {"client-event-id": "fu01-query-c", "op": "add-query-ok"}
+    },
+    {
+      "subscriber": "C",
+      "seq": 2,
+      "frame": {
+        "op": "refresh-ok",
+        "processed-tx-id": 2,
+        "computations": [
+          {
+            "instaql-query": {"todos": {}},
+            "instaql-result": {
+              "todos": [
+                {"id": "00000000-0000-4000-8000-000000000004", "title": "conc-alpha"},
+                {"id": "00000000-0000-4000-8000-000000000006", "title": "conc-beta-2"},
+                {"id": "00000000-0000-4000-8000-000000000007", "title": "conc-gamma"}
+              ]
+            }
+          }
+        ]
+      }
+    }
+  ]
+}
