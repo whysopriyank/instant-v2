@@ -1263,7 +1263,7 @@ func mcCaptureQueryLeg(ctx context.Context, r *managedResources) (map[string][]m
 	var q mcQueryRun
 	logs := map[string][]mcFrame{}
 	fail := func(err error) (map[string][]mcFrame, mcQueryRun, error) {
-		return nil, mcQueryRun{}, err
+		return nil, q, err
 	}
 
 	for i := 0; i < 3; i++ {
@@ -1548,7 +1548,7 @@ func mcCaptureRoomLeg(ctx context.Context, r *managedResources) (map[string][]mc
 	var rm mcRoomRun
 	logs := map[string][]mcFrame{}
 	fail := func(err error) (map[string][]mcFrame, mcRoomRun, error) {
-		return nil, mcRoomRun{}, err
+		return nil, rm, err
 	}
 
 	a, err := mcOpenSSE(ctx, r.baseURL, r.appStr, "room-A")
