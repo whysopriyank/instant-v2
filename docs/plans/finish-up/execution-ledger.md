@@ -1668,3 +1668,20 @@ Owner decision, exactly one of: (i) new packet with a fault-scheduling primitive
 - Owner decision above. FU-01 multi-client workstream (2B) is row-independent and may proceed on owner go-ahead.
 
 Owner decision 2026-09-21 (2A-8): DEFER — transactions-concurrency-gap stays gap; proceed to FU-01 multi-client workstream (2B). No fault-scheduling build, no row rewrite. CF-003 single-flow report-only tally: 7 of 8 legs flipped (auth-denied, auth-refresh, conjunction, sse-lifecycle, rollback, cardinality-SSE, lookup); concurrency deferred.
+
+## FU-01 2B + QR-005 + FR-001 close-out (2026-09-23, go1.27.1 darwin/arm64)
+
+Coordinator: Claude Opus 5.5 (Claude Code), parallel subagents; reviewers: independent Claude code-reviewer agents.
+
+| Packet | Result | Commits | Evidence | Review |
+| FU-01 2B-1 recorder (`corpusctl --mode managed-record-multiclient`) | COMPLETE | `67718bc` + repair `4ed6451` | hermetic + owned-DB legs green -race; E2E acceptance (2 runs on separate owned DBs + 1-byte tamper rejected) green on clean tree; real capture PASS @ 67718bc (7 artifacts, 0600, no DSN/token in facts) | REPAIR_REQUIRED → repaired: failure paths now close leg subs; JSON writer delegates to the single raw atomic-write body. Deferred (TD-004): bootstrap duplicated from `managed.go` — not refactored to avoid touching the accepted CF-002 path |
+| FU-01 2B-2 query (`query-concurrency-gap`, `refresh-convergence-concurrency`) | COMPLETE | `d3dece3` + note fix | `TestFU01QueryCaptureReplay` -race x2; 3 mutations FAIL then restored byte-identical; validate + validate-release 0 | ACCEPT on exactness; repair: manifest notes now state the query envelopes are harness captures on a deterministic fixture of the recorder-proven shape (recorder mints random IDs), matching each envelope's `source` |
+| FU-01 2B-3 room (`rooms-fanout-positive`) | COMPLETE | `d3dece3` | `TestFU01RoomCaptureReplay` -race x2; envelope = recorder bytes masked (sentinel counts pinned); 3 product mutations in `internal/sync/rooms.go` (sender session, echo, presence drop) FAIL, restored sha-identical | ACCEPT |
+| QR-005 supply-chain pins | COMPLETE | `d6b2dec` | preflight exit 0 / findings []; contract tests 22/22; `go mod verify` ok. Actions → commit SHAs, postgres:17 + golang:1.25-alpine → sha256 digests, runners → ubuntu-24.04, golangci-lint + ripgrep → curl + sha256sum -c | ACCEPT (SHAs/digests/checksums re-verified upstream; installs fail closed) |
+| FR-001 documentation truth | COMPLETE | `b2f56dd` + contract addendum | 18 current docs reconciled (Go 1.25, single-node only, LISTEN/NOTIFY not WAL, no CI signing/publish, admin presence 501, DA-006A done / DA-006B blocked, Apple excluded, counts 18 scenarios + 19/3/4); historical reports labelled not rewritten; links + make targets checked | ACCEPT on counts/claims; repair: stale FU-01 contract status updated with dated addendum |
+
+CF-003 now 19 covered / 3 gap / 4 unsupported. Remaining gaps are all owner-decided: `refresh-delta-boundary` (WS recording excluded by enforcement), `rooms-presence-lifecycle` (FU-03 stable 501, status kept gap), `transactions-concurrency-gap` (2A-8 DEFER). CF-003 cannot reach COMPLETE without an owner decision to accept these as exceptions (or to mark them excluded/unsupported).
+
+Not run: full-repo sweep beyond affected packages; FR-002 immutable acceptance; anything external (DA-006B, DA-008B, CF-004/005, OP-003..006, QR-001).
+
+Next prerequisite: owner decision on the CF-003 residual-gap exception; then FR-002 on one clean immutable SHA (needs the external/environment packets or owner-approved exceptions for them).

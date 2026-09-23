@@ -6,6 +6,8 @@ Owner decisions recorded: DEC-001 single-node-alpha (approved
 `DEC-001-rt001-bounded-rebinding-20260917`); FU-01 managed multi-client
 recorder path; FU-02 Option A report-only single-flow capture
 (`fu02-recorder-scope-decision.md`); FU-03 Option 1 stable 501 exclusion;
+FU-01 2B executed 2026-09-23 (recorder + 3 multi-client flips, CF-003
+19/3/4); QR-005 pins and FR-001 docs accepted 2026-09-23;
 WS recording excluded by enforcement; no v1-parity, provider,
 multi-node, replica, performance, publication, deployment, or canary
 claim selected.

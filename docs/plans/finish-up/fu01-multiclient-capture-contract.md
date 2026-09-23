@@ -1,12 +1,15 @@
 # FU-01 — Multi-client stream capture contract (candidate side, preparatory slice)
 
-**Status:** contract defined as a preparatory slice; replay legs and
-manifest flips remain gated (see "Remains gated" below). This document
-satisfies FU-01 acceptance criteria 1–3 **as definition only**: it states
-the raw-evidence contract whose existence would let a future packet flip
-`rooms-fanout-positive`, `query-concurrency-gap`, and
-`refresh-convergence-concurrency` by replay. It authorizes no recorder
-change, no capture run, no NDJSON leg, and no manifest flip.
+**Status (2026-09-23 addendum):** executed. Recorder `corpusctl --mode
+managed-record-multiclient` landed at `67718bc` (review repair `4ed6451`);
+the three rows flipped gap→covered at `d3dece3` (CF-003 19/3/4) via
+checked-in masked envelopes + exact replay tests
+(`TestFU01QueryCaptureReplay`, `TestFU01RoomCaptureReplay`). The room
+envelope is the recorder's bytes, masked; the two query envelopes are
+harness captures on a deterministic fixture of the recorder-proven shape
+(the recorder mints random entity IDs). The text below is the original
+preparatory-slice definition, kept as written; §6 "Remains gated" is
+superseded by this addendum except the WS, v1-parity, and FU-03 items.
 
 **Parent packet:** `docs/plans/finish-up/followup-packets.md` FU-01
 (proposed). That file is untouched by this slice; all four FU packets

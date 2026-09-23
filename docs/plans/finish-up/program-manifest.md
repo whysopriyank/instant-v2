@@ -32,7 +32,7 @@ its packet against current source and the latest handoff before changing status.
 | 19 | EV-006 benchsmoke wiring | 04 | `COMPLETE / HISTORICAL_ENTRYPOINT_ENFORCED` | F-002 harness-entrypoint decision | build + smoke |
 | 20 | CF-001 COPY acceptance | 05 | `COMPLETE / ACCEPTED_POSTGRES_COPY` | F-002, owned PostgreSQL | DB integration |
 | 21 | CF-002 recorder/fixtures | 05 | `COMPLETE / ACCEPTED_CANDIDATE_BOUND_LOCAL_CAPTURE` | F-002 surfaces | integrated capture |
-| 22 | CF-003 matrix closure | 05 | `PARTIAL / HTTP_SSE_PERMISSION_MULTICLIENT_TRANSACTION_ROOM_DELTA_ACCEPTED_MATRIX_PENDING` | selected product packets, CF-002 | real-path matrix |
+| 22 | CF-003 matrix closure | 05 | `PARTIAL / 19_COVERED_3_GAP_4_UNSUPPORTED_REMAINING_GAPS_OWNER_DECIDED` | selected product packets, CF-002 | real-path matrix |
 | 23 | CF-004 pinned-v1 environment | 05 | `BLOCKED / EXTERNAL_EVIDENCE` | F-002, service authority | qualified v1 runtime |
 | 24 | CF-005 differential | 05 | `BLOCKED / EXTERNAL_EVIDENCE` | CF-003/004 | compatibility + independent review |
 | 25 | OP-001 publisher recovery | 06 | `NOT_SELECTED / CONDITIONAL_DEFECT` | multi-node selected | fault integration + distributed review |
@@ -45,8 +45,8 @@ its packet against current source and the latest handoff before changing status.
 | 32 | QR-002 comparative performance | 07 | `NOT_SELECTED / MISSING_EVIDENCE` | EV-005/006, CF-005, QR-001 | qualified comparison |
 | 33 | QR-003 composed gate | 07 | `COMPLETE / ACCEPTED_CONTRACT_GATE` | selected packet interfaces stable | gate contract tests |
 | 34 | QR-004 publish/sign/SBOM | 07 | `NOT_SELECTED / ASSEMBLY_GAP` | publish selected, QR-003 | dry-run workflow evidence |
-| 35 | QR-005 supply-chain inputs | 07 | `PARTIAL / INVENTORY_PREFLIGHT_ACCEPTED_PINS_PENDING` | release workflow selected | static + release review |
-| 36 | FR-001 documentation truth | 08 | `PENDING / DOCUMENTATION_DEFECT` | all selected behavior resolved | link/source/evidence review |
+| 35 | QR-005 supply-chain inputs | 07 | `COMPLETE / ACCEPTED_PINNED_INPUTS_SECURITY_REVIEWED` | release workflow selected | static + release review |
+| 36 | FR-001 documentation truth | 08 | `COMPLETE / ACCEPTED_DOCS_RECONCILED_20260923` | all selected behavior resolved | link/source/evidence review |
 | 37 | FR-002 immutable acceptance | 08 | `BLOCKED / RELEASE_EVIDENCE` | FR-001, QR-003, all selected packets | clean independent gate |
 | 38 | FR-003 publication | 08 | `NOT_SELECTED / EXTERNAL_MUTATION` | FR-002, publish authority | external verification |
 | 39 | FR-004 canary/rollback | 08 | `NOT_SELECTED / EXTERNAL_MUTATION` | FR-002/003, deploy authority | deployment evidence |
