@@ -168,7 +168,7 @@ type Subscription interface {
 
 ## 7. Stack
 
-Go `^1.24`, `jackc/pgx/v5`, `jackc/pglogrepl`, `github.com/cel-go/cel-go` (reference impl),
+Go `^1.25`, `jackc/pgx/v5`, `jackc/pglogrepl`, `github.com/cel-go/cel-go` (reference impl),
 `coder/websocket`, `aws-sdk-go-v2` (s3), `golang-jwt/jwt/v5` + `jwks-rsa`, `chi` or stdlib mux,
 `slog`, `otel-go`, `goose`.
 
@@ -205,6 +205,6 @@ arbitrary-node writes safe for semantics that require serialization.
 | Peer invalidation | `internal/bus` uses a dedicated LISTEN connection and optional `INSTANT_V2_INVALIDATION_BUS=postgres`; raw events are idempotent and degrade safely when payloads are large. | The two-Store end-to-end peer-refresh test is still missing; delivery depends on Postgres availability, and there is no NATS/Redis transport. |
 | WAL/checkpoint | `internal/waltail` decodes pgoutput, checks `wal_level`, and coalesces durable checkpoint writes. | Live PG17 logical-decoding tests exist; production wiring and pcap corpus remain follow-up work. |
 | Rooms/presence | `internal/sync.RoomHub` provides bounded, full-snapshot in-process fan-out. | Cross-node rooms are unsupported; sticky routing is an operational requirement for multi-node room use. |
-| Admin presence | `/admin/rooms/presence` is authenticated but returns an empty object because `adminapi` cannot import `sync.RoomHub`. | Wiring a read-only presence projection is still open. |
+| Admin presence | `/admin/rooms/presence` is authenticated and returns a stable, explicit `501` (`{"type":"unsupported","message":"admin presence is unsupported"}`); an empty successful response would be indistinguishable from a room with no members. | This is the approved FU-03 exclusion, not an open wiring gap; a read-only presence projection is unselected for this alpha. |
 | Auth | Guest and bounded local Google/GitHub authorization-code flows are assembled; PKCE, one-time state/code, Google nonce/JWKS verification, provider timeout, and configuration failure are covered locally. | Real-provider acceptance is not established; direct ID-token exchange and Apple/custom providers are unsupported; magic-code delivery is excluded for the alpha. |
 | Required attributes | Catalog persistence, wire `required?`, tx validation, update-attr required-only patch, and backup compatibility are implemented. | Broader frozen corpus coverage is still incomplete. |

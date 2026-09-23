@@ -6,7 +6,7 @@ phones home: the daemon talks to one Postgres and to your clients, nothing else.
 ## Quickstart
 
 Requirements: Postgres 15+ with `wal_level=logical` (reactive sync streams changes
-via logical replication), Go 1.24+ or Docker.
+via logical replication), Go 1.25+ or Docker.
 
 ```sh
 # 1. Postgres with logical WAL
@@ -20,7 +20,10 @@ go run ./cmd/instantd            # or: docker run -p 8080:8080 ghcr.io/<you>/ins
 ```
 
 The daemon creates its schema on boot (embedded migrations under an advisory
-lock — safe to run multiple replicas against one DB).
+lock, so a concurrent boot cannot race the migration step). This alpha's
+release profile is single-node only (DEC-001): running more than one
+`instantd` instance against one database is not a qualified or supported
+topology in this release.
 
 ## Configuration
 
@@ -72,7 +75,7 @@ OP-004; container execution itself is outside DA-001.
 | `INSTANT_V2_PG_LOCK_TIMEOUT` | `5s` | DDL/row-lock wait ceiling on both pools (`0` disables) |
 | `INSTANT_V2_PG_IDLE_TX_TIMEOUT` | `30s` | Kills connections left idle inside an open transaction (`0` disables) |
 | `INSTANT_V2_WS_COMPRESSION` | `disabled` | permessage-deflate: `no-context-takeover` or `context-takeover` (docs/09 §T2.2) |
-| `INSTANT_V2_INVALIDATION_BUS` | `none` | `postgres` enables LISTEN/NOTIFY invalidation across nodes — required when running >1 instantd against one DB (docs/09 §T2.4) |
+| `INSTANT_V2_INVALIDATION_BUS` | `none` | `postgres` enables LISTEN/NOTIFY invalidation across peer processes; this config knob exists, but running more than one `instantd` against one DB is not a qualified or supported topology for this single-node alpha (DEC-001; docs/09 §T2.4) |
 | `INSTANT_V2_NODE_ID` | hostname | Node identity in logs and `/health` |
 | `INSTANT_V2_METRICS_ADDR` | `127.0.0.1:9465` | Prometheus scrape endpoint (`/metrics`); set empty to disable |
 | `INSTANT_OAUTH_GOOGLE_CLIENT_ID` | _(required)_ | Google authorization-code client ID |

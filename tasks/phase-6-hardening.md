@@ -39,7 +39,7 @@ paired, reproducible v1/V2 measurement.
 - [x] Browser examples replay — vite-vanilla ported with self-host URI overrides; exact browser surface driven via frozen @instantdb/core 1.0.65 from the example's node_modules (subscribeQuery snapshot on enriched ack, transact add/toggle/delete, live push each mutation). Visual browser verification NOT performed (no working browser device in session); found+fixed app-status 'ok'→'active' conformance bug during replay.
 - [x] Corpus fixture regeneration — 00-smoke rewritten to real v1 shapes (init-ok auth/app-status:'active', enriched add-query-ok); canonicalizer normalizes volatile session-id; replay green; chaos corpus step green.
 - [x] S3 backup backend — ObjectStore interface + minio-go S3Store; /object export-download + restore-object routes; fake-S3 tests under -race.
-- [x] Signed release publishing — goreleaser check passes; snapshot builds all 4 targets; cosign keygen→sign-blob→verify proven offline; CI does keyless signing at tag time (UPGRADE.md documents secrets + offline smoke).
+- [~] Signed release publishing — goreleaser check passes; snapshot builds all 4 targets; cosign keygen→sign-blob→verify proven offline (local dry-run only). No CI workflow actually runs `goreleaser release` or signs at tag time: `.github/workflows/ci.yml` only runs on push-to-main/PR and never invokes goreleaser. A tag-triggered publish/sign workflow is unbuilt and requires FR-003 owner authorization (DEC-001: tag/publish/sign/SBOM/canary unselected).
 - [ ] BLOCKED (user decision): live v1 differential/capacity baseline steady-state throughput within 30% of v1's Postgres-bound ceiling (the gate is regression protection, not ambition).
 
 ## 6D — Docs + examples + release
@@ -47,7 +47,7 @@ paired, reproducible v1/V2 measurement.
 - [x] Docs narrative: "self-host first" getting-started, replacing hosted-docs assumptions (`instantdb.com` → local). → docs/guides/07-selfhost.md
 - [x] `examples/python-script` replayed end-to-end against instantd with the frozen PyPI SDK (high-level tx ops, admin query, merge, where-filters, LIVE subscriptions over `/admin/subscribe-query` SSE with push-on-write). Browser-based examples remain OPEN (need browser harness).
       FOUND+FIXED during replay: `/admin/transact` lacked high-level→low-level tx lowering (`internal/transact/highlevel.go` port of admin/model.clj); admin writes did not invalidate subscribers (OnCommit bridge); `/admin/subscribe-query` did not exist.
-- [x] Signed container image (`goreleaser`), SBOM, `UPGRADE.md` for v1 self-host operators, migration guide for admin tokens. → .goreleaser.yaml (cosign sign-blob for image+checksums, syft SBOM step), UPGRADE.md; actual publishing happens at tag time
+- [~] Container image signing/SBOM design (`goreleaser`), `UPGRADE.md` for v1 self-host operators, migration guide for admin tokens. → .goreleaser.yaml (cosign sign-blob for image+checksums, syft SBOM step), UPGRADE.md; no CI workflow runs this at tag time yet (see 6C above; FR-003 unselected)
 - [ ] `v1.0.0` tag; post-release corpus stewardship note (who adds scenarios for new ops).
 
 ## Phase 6 exit gate — the repo is maintainable

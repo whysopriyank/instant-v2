@@ -1,5 +1,9 @@
 # Production code-quality verification
 
+Historical (baseline `5f78ca0877c1a8c04b173e5c502e8c948ecfb965`, 2026-08-31) —
+superseded by the finish-up program's execution ledger; not current-candidate
+status.
+
 Date: 2026-08-31. Baseline: `5f78ca0877c1a8c04b173e5c502e8c948ecfb965` on
 `main`; result is an uncommitted working tree, not a published release.
 

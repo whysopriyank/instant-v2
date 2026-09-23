@@ -12,9 +12,9 @@ and verified before a differential run. The local checkout includes
 that v1 is running. Authored regression expectations and the protocol schema do
 not substitute for an actual v1 comparison.
 
-## Current coverage (2026-08-31)
+## Current coverage (reconciled 2026-09-23)
 
-The manifest contains **16 authored v2 regression scenarios and zero recorded v1
+The manifest contains **18 authored v2 regression scenarios and zero recorded v1
 oracles**. The original smoke and transact/refresh paths remain stable. The real
 v2 replay test creates a private database and seeds each scenario through the
 platform migrations and transactor. Package-level tests additionally cover
@@ -27,7 +27,7 @@ backups, WS/SSE flows, rooms, delta/incremental refresh, and live pgoutput.
 | Auth/OAuth | Focused and live-DB local-provider tests | Google/GitHub authorization-code lifecycle, PKCE, nonce/JWKS, replay, expiry, and startup configuration are covered locally; real-provider acceptance is absent, and direct ID-token plus Apple/custom flows are unsupported. |
 | Queries/transactions/perms | Focused and live-DB tests | Full v1 scenario matrix and JS optimistic-evaluation harness are not checked in. |
 | WAL/invalidation | Live PG17 pgoutput test plus direct-notify/bus tests | Production assembly uses post-commit notification; tailer-driven ack ordering is not the running path. |
-| Presence/rooms | In-process WS tests | No cross-node ephemeral-state bus; admin presence endpoint currently returns `{}`. |
+| Presence/rooms | In-process WS tests | No cross-node ephemeral-state bus; admin presence endpoint returns a stable `501` unsupported response, not `{}`. |
 | Storage/backups | Real-DB and S3/fake-store tests | Broad SDK HTTP corpus remains open. |
 | Performance | Wave 5 hardened harness plus named smoke/soak and microbenchmarks | The accepted contract is implemented with deterministic paired artifacts and offline replay; Wave 6 paired live V1/V2 measurement is still required before comparative claims. |
 
@@ -48,7 +48,7 @@ corpus/
   00-smoke.ndjson
   01-transact-refresh.ndjson
   02-subscription-lifecycle.ndjson
-  ...                         # 16 default scenarios; see manifest.json
+  ...                         # 18 default scenarios; see manifest.json
 ```
 
 The checked-in scenario format is a sequence of `meta`, `c2s`, and `s2c`

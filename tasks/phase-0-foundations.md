@@ -12,7 +12,7 @@ exit gate remains open.
 
 ## 0.1  Repo scaffold
 
-- [ ] `go.mod` pinned to Go `^1.24` with real `require` entries (first `go mod tidy` green)
+- [ ] `go.mod` pinned to Go `^1.25` with real `require` entries (first `go mod tidy` green)
 - [ ] `.golangci.yml` (span of `staticcheck`+`govet`+`errcheck`+`ineffassign`; no pedantic noise)
 - [ ] `Dockerfile` (multi-stage, distroless final) + `.dockerignore`
 - [ ] GH Actions `ci.yml`: `make vet lint test corpus-check` on every push

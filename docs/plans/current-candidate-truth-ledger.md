@@ -1,5 +1,11 @@
 # Current-candidate truth ledger (F-001)
 
+Historical (candidate `26a1caf9`, captured 2026-09-06). This is the F-001
+snapshot for that candidate, not a living document; the working tree has moved
+far beyond it (see `docs/plans/finish-up/execution-ledger.md` and
+`docs/plans/finish-up/program-manifest.md` for current status). Preserved as
+historical evidence, not rewritten.
+
 Packet: `F-001` in `docs/plans/finish-up/01-scope-and-decisions.md`.
 Candidate: `26a1caf9856110b711315aaed4c5cbeaec3bbc36` on `main`, captured
 `2026-09-06T17:29:15Z` (clean tree at capture: G1 `20433cd`, G2 `e8565ce`,

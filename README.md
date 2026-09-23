@@ -11,8 +11,11 @@ Single-binary, self-host-first realtime backend providing:
 - InstaQL queries over an EAV triple store in Postgres (datalog-compiled CTEs)
 - Optimistic multiplayer transactions (tx-steps / InstaML wire grammar)
 - CEL-based per-app permissions
-- WebSocket sync with WAL-tail invalidation, presence, rooms, streams
-- Auth (magic code, OAuth/OIDC), Admin API, file storage (S3-compatible)
+- WebSocket sync with post-commit invalidation (optional Postgres LISTEN/NOTIFY
+  across peer processes; the WAL tailer is a separately verified component, not
+  the production serving path), presence, rooms
+- Auth (magic code, OAuth/OIDC), Admin API, local-disk file storage with
+  HMAC-presigned URLs (object/S3 backup storage is a separate, alpha-excluded path)
 
 ## Non-goals (v2)
 
@@ -66,7 +69,7 @@ partial.
 
 | Area | Status | Evidence / remaining boundary |
 |---|---|---|
-| Foundations, protocol schema, migrations | Partial | `internal/protocol`, embedded migrations, and corpus tooling exist; 16 authored regression scenarios run against isolated v2 fixtures, not the original ≥50-scenario or genuine v1-oracle gate. |
+| Foundations, protocol schema, migrations | Partial | `internal/protocol`, embedded migrations, and corpus tooling exist; 18 authored regression scenarios run against isolated v2 fixtures, not the original ≥50-scenario or genuine v1-oracle gate. |
 | Storage, catalog, triple CRUD | Complete for the implemented surface | Real-Postgres storage tests, typed value encoding, catalog flags, batching, limits, and migrations are covered. |
 | Transactions and permissions | Partial | Tx-step, CEL, cascades, required attributes, and admin bypass are implemented and tested; rules persistence is not wired into every write plane. |
 | Query engine | Partial | InstaQL, pagination, indexes, local evaluation, and differential fixtures exist; broad v1 corpus and JS-harness coverage remain incomplete. |

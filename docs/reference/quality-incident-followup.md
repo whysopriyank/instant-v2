@@ -1,5 +1,8 @@
 # Quality-run delivery and database incident follow-up
 
+Historical (baseline `5f78ca0877c1a8c04b173e5c502e8c948ecfb965`, 2026-08-31) —
+incident record preserved as-is; not current-candidate status.
+
 Date: 2026-08-31. Source baseline:
 `5f78ca0877c1a8c04b173e5c502e8c948ecfb965`, branch `main`.
 

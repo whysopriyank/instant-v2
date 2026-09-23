@@ -55,10 +55,10 @@ for a real service. `relations.json` seeds the forward-relation regression.
 | 18 | Aliased cardinality-one forward relation retains reference/child projection |
 
 The manifest records 22 narrowly covered surfaces, six gaps and three unsupported
-surfaces, with zero v1 captures. The matrix currently has 26 entries: 9 covered,
-13 gaps, and 4 unsupported cases. Remaining gaps include the full
-cardinality/merge/cascade matrix, token auth, multi-client room fanout, delta
-refresh, SSE and HTTP/SDK capture. Dynamic data-dependent view rules are an
+surfaces, with zero v1 captures. The matrix currently has 26 entries: 19 covered,
+3 gaps, and 4 unsupported cases. Remaining gaps include the full
+cardinality/merge/cascade matrix, token auth, delta
+refresh, and HTTP/SDK capture. Dynamic data-dependent view rules are an
 explicit DA-004V exclusion: the `ws.permissions.dynamic` surface and
 `permissions-ws-dynamic-view-exclusion` row are `unsupported`, and package/DB
 tests do not become corpus or release acceptance. Sync/stream acknowledgement

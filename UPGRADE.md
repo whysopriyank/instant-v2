@@ -35,30 +35,45 @@ stack) who want to move to the Go daemon.
      transactions).
 3. **Admin tokens carry over** — same `app_admin_tokens` table. Hosted-style
    `*-admin-token` env vars have no equivalent; tokens live in the DB only.
-4. **OAuth apps**: re-set provider secrets via env (`INSTANT_OAUTH_APPLE_KEY_P8`
-   etc.). v1's stored OAuth config rows are honored where present.
-5. **Start v2 replicas.** Multiple instances are safe: migrations take an advisory
-   lock; invalidation flows through logical-replication WAL tailing, not cluster
-   gossip.
+4. **OAuth apps**: re-set provider secrets via env (`INSTANT_OAUTH_GOOGLE_CLIENT_ID`/
+   `_SECRET`, `INSTANT_OAUTH_GITHUB_CLIENT_ID`/`_SECRET`). Apple OAuth is explicitly
+   excluded from this alpha (DEC-001): `INSTANT_OAUTH_APPLE_KEY_P8` exists in
+   source but is not wired into the builtin provider list. v1's stored OAuth
+   config rows are honored where present for Google/GitHub.
+5. **Single-node deployment.** This alpha release profile is single-node only
+   (DEC-001): run exactly one `instantd` against the database. Migrations take
+   an advisory lock so a restart cannot race a concurrent boot, but running more
+   than one `instantd` instance against one database is not a qualified or
+   supported topology in this release. The production invalidation path is
+   post-commit notification, optionally propagated to peer processes via
+   Postgres LISTEN/NOTIFY (`INSTANT_V2_INVALIDATION_BUS=postgres`); the
+   WAL-based logical-replication tailer (`internal/waltail`) is a separately
+   verified component, not the production serving path.
 
 ## Rollback
 
-Because v2 is additive on the same tables, stopping instantd and restarting v1
-against the same `DATABASE_URL` is a valid rollback path within a release.
+v2's migrations are additive on v1's existing tables on the boot ("up") path,
+so stopping instantd and restarting v1 against the same `DATABASE_URL` is
+architecturally compatible. This has not been exercised as a formal drill
+(the backup/restore drill, OP-006, is not yet run) — treat it as an
+unverified fallback, not an accepted rollback procedure.
 
 ## Cutting a signed release
 
-1. Tag: `git tag vX.Y.Z && git push origin vX.Y.Z` — CI (.github/workflows/ci.yml) runs
-   `goreleaser release --clean`. Requires these repo secrets/variables:
-   - `GITHUB_TOKEN` (automatic), `COSIGN_YES=true` (keyless OIDC signing)
-   - `GITHUB_REPOSITORY` is provided by Actions.
-2. Artifacts per release: tar.gz archives (linux/darwin × amd64/arm64),
-   checksums.txt (cosign-signed), SBOMs, multi-arch GHCR manifest
-   `ghcr.io/<repo>:<tag>` + `:latest`, per-arch image digests signed keyless.
-3. Local dry-run without publishing:
+No CI workflow currently publishes a release: `.github/workflows/ci.yml` runs
+only on push to `main` and on pull requests, and does not invoke `goreleaser`.
+Tag/publish/sign/SBOM/canary are explicitly unselected for this alpha
+(DEC-001; FR-003/FR-004 and QR-004 remain `NOT_SELECTED`). The committed
+`.goreleaser.yaml` describes the intended archive/SBOM/GHCR/cosign shape for a
+future release workflow, but only its local dry-run commands are real today:
+
+1. Local dry-run without publishing:
    - `goreleaser check`
    - `goreleaser build --snapshot --clean`
-4. Offline signing smoke (no Rekor/network):
+2. Offline signing smoke (no Rekor/network):
    `cosign sign-blob --key k.key --signing-config sc.json --new-bundle-format --bundle b.bundle FILE`
    then verify with `--bundle b.bundle --insecure-ignore-tlog`.
    Current cosign CLI refuses `--tlog-upload=false`; use a signing-config.
+
+Publishing a real tagged release requires a new owner-authorized CI workflow
+(FR-003) that does not exist yet.

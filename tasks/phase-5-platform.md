@@ -8,12 +8,13 @@ Three packages ship in parallel on disjoint paths. None may touch the protocol s
 ## Current status (2026-08-28)
 
 Partial. Admin/runtime/storage routes, injected-provider/direct id-token tests,
-JWKS, backup import/export, and S3-compatible storage components are
-implemented and tested. The main assembly does not configure builtin
-Google/GitHub/custom OIDC auth-code exchanges; their token/userinfo URLs and
-auth-code nonce generation/validation remain deferred. The HTTP corpus is
-smaller than the planned matrix, the admin presence projection is still `{}`,
-and Apple’s end-to-end token exchange remains deferred.
+JWKS, backup import/export, and S3-compatible backup components are
+implemented and tested. The main assembly configures builtin Google/GitHub
+auth-code exchange (token/userinfo URLs, nonce generation/validation; DA-006A);
+real-provider acceptance is `BLOCKED` (DA-006B). The HTTP corpus is smaller
+than the planned matrix, admin presence is a stable explicit `501` (FU-03
+exclusion, not an open `{}` wiring gap), and Apple's end-to-end token exchange
+is explicitly excluded for this alpha.
 
 ## 5A — `internal/adminapi` (owner: `adminapi`)
 
@@ -41,8 +42,9 @@ Runtime is the end-user REST plane (every call couples to `authAPI.ts` field spe
 - [~] `POST /runtime/signout`, `GET /runtime/oauth/{start,callback,token,id_token}`,
       `GET /runtime/openid-configuration` (per-app discovery URL passthrough).
       Direct id-token/JWKS and Apple signer paths are tested; builtin
-      auth-code provider configuration, nonce handling, and Apple token
-      exchange remain deferred.
+      Google/GitHub auth-code provider configuration and nonce handling are
+      implemented (DA-006A); Apple token exchange is explicitly excluded for
+      this alpha.
 - [ ] `GET /runtime/session` (WS upgrade) and `GET /runtime/sse` delegating to `internal/sync` — no duplicate session state.
 - [ ] Tests: corpus HTTP suites `corpus/http/runtime-*.ndjson`; WireMock-style record/restore of JWKS endpoints.
 

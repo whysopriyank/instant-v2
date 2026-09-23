@@ -22,7 +22,7 @@ gate.
 | 2 — transactor/perms | Partial | Tx-step validation, CEL checks, cascades, required attributes, and admin bypass are covered; rules persistence is not wired through every write plane. |
 | 3 — query | Partial | InstaQL, datalog plans, pagination, local evaluation, and index-oriented tests exist; broad v1/JS differential coverage remains open. |
 | 4 — reactive sync | Partial | WS/SSE, groups, incremental/delta refresh, direct post-commit invalidation, optional peer bus, and isolated pgoutput tests exist; full-session corpus, 5k×30-minute soak, production WAL-tail assembly, and cross-node write ordering are not all complete. |
-| 5 — platform | Partial | Admin/runtime/storage APIs, injected-provider/direct id-token tests, JWKS, backups, and S3-compatible routes exist; builtin auth-code provider configuration, nonce handling, HTTP corpus breadth, admin presence projection, and Apple end-to-end exchange remain open. |
+| 5 — platform | Partial | Admin/runtime/storage APIs, backups, and S3-compatible backup routes exist; builtin Google/GitHub auth-code exchange (token/userinfo URLs, nonce handling) is configured (DA-006A), but real-provider acceptance is `BLOCKED` (DA-006B); HTTP corpus breadth remains open; admin presence is an explicit stable-501 exclusion (FU-03), not an open wiring gap; Apple is explicitly excluded for this alpha. |
 | 6 — hardening/release | Partial | Security, rate limits, queue gates, chaos, race checks, and the accepted Wave 5 comparative harness landed; paired live V1/V2 Wave 6 measurement remains open. |
 
 “Complete for implemented scope” means the code and focused tests cover the
@@ -210,9 +210,10 @@ a dual-impl harness (server and JS optimistic path must agree).
    redis/nats interface stub).
 4. **Authn** (`authn`): direct JWT verify (JWKS), injected-provider test paths,
    magic-code email, hashed opaque refresh-token lifecycle, and Apple signer
-   support. The main assembly does not configure builtin OIDC/GitHub/Google
-   auth-code exchanges; nonce handling and Apple end-to-end token exchange
-   remain deferred.
+   support. The main assembly configures builtin Google/GitHub auth-code
+   exchange including nonce handling (DA-006A); real-provider acceptance is
+   `BLOCKED` (DA-006B), and Apple end-to-end token exchange is explicitly
+   excluded for this alpha.
 
 ### Exit gate (the service is shippable here)
 

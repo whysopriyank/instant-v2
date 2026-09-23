@@ -234,12 +234,14 @@ the frozen compat surface for phase 1–4.
 - Refresh tokens are **opaque secrets stored hashed**, looked up by re-running an InstaQL
   query on `$userRefreshTokens.hashedToken` (model/app_user.clj:155-176). Not JWT.
 - OAuth: direct id-token verification (including injected-provider test paths)
-  with RS256/ES256 JWKS support is implemented and tested. Apple ES256
-  client-secret key loading/minting is also unit-tested. The main assembly does
-  not configure builtin Google/GitHub/custom OIDC auth-code exchanges; builtin
-  token/userinfo URLs are absent from runtime configuration, and auth-code
-  nonce generation/validation remains deferred. Apple’s end-to-end exchange is
-  therefore not currently available.
+  with RS256/ES256 JWKS support is implemented and tested. Builtin Google/GitHub
+  authorization-code exchange (token/userinfo URLs, PKCE, mandatory Google nonce
+  binding/JWKS verification) is configured in the main assembly (DA-006A); real
+  Google/GitHub provider acceptance against a live provider is still `BLOCKED` on
+  external evidence (DA-006B). Apple is explicitly excluded for this alpha (no
+  Apple OAuth claim): Apple ES256 client-secret key loading/minting is
+  unit-tested only, with no wired id-token/userinfo path, so Apple's end-to-end
+  exchange is not available.
 - PKCE everywhere (migration 15).
 
 ## 11. What must NOT change without an ADR

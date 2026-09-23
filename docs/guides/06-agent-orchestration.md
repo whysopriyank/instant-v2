@@ -146,7 +146,7 @@ golangci-lint run ./internal/PACKAGE
 Replace `PACKAGE` with the assigned package. `make bootstrap` only tidies modules
 and creates directories; it does not provision PostgreSQL. `make corpus` fails
 explicitly because recording is not implemented. The manifest currently contains
-16 authored regression scenarios, not recorded v1 oracles; see the
+18 authored regression scenarios, not recorded v1 oracles; see the
 [corpus contracts](../../corpus/README.md) for coverage and known failing probes.
 
 Available agents are whatever the harness lists under `task` (see AGENTS.md at the repo root).

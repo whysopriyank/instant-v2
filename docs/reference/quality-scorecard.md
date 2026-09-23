@@ -1,5 +1,9 @@
 # Code-quality scorecard
 
+Historical (baseline `5f78ca0877c1a8c04b173e5c502e8c948ecfb965`, 2026-08-31) —
+superseded by the finish-up program's execution ledger; not current-candidate
+status.
+
 Snapshot: 2026-08-31, working tree based on `5f78ca0877c1a8c04b173e5c502e8c948ecfb965`.
 This records the approved quality work and remaining limits, not a release or
 production-readiness certification. Changes were still uncommitted when measured.
