@@ -75,9 +75,9 @@ clone_base() {
 current_before=$(git -C "$repo_root" status --porcelain --untracked-files=all)
 current_status=0
 current_output=$(bash "$source_preflight") || current_status=$?
-ok "current known unresolved inputs fail closed" test "$current_status" -ne 0
-ok "current report is valid JSON" jq -e '.status == "FAIL" and (.findings|length > 0)' <<<"$current_output"
-ok "current classes include known unresolved inputs" jq -e 'any(.actions[]?; .classification == "mutable_tag") and any(.images[]?; .classification == "tag_only") and any(.runner_labels[]?; .classification == "mutable_latest") and any(.runtime_tool_acquisitions[]?; .classification == "non_content_bound")' <<<"$current_output"
+ok "current tree pins are accepted" test "$current_status" -eq 0
+ok "current report is valid JSON" jq -e '.status == "PASS" and (.findings|length == 0)' <<<"$current_output"
+ok "current classes have no unresolved inputs" jq -e 'all(.actions[]?; .status == "resolved") and all(.images[]?; .status == "resolved") and all(.runner_labels[]?; .status == "resolved") and all(.runtime_tool_acquisitions[]?; .status == "resolved")' <<<"$current_output"
 current_after=$(git -C "$repo_root" status --porcelain --untracked-files=all)
 ok "current-tree scan does not mutate the worktree" test "$current_before" = "$current_after"
 

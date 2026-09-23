@@ -18,20 +18,24 @@ permissions:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       DATABASE_URL: postgres://instant:instant@localhost:5432/instant_v2_test?sslmode=disable
       PGPASSWORD: instant
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
       - name: Install pinned linter
-        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1
+        run: |
+          curl -fsSLo golangci-lint.tar.gz https://github.com/golangci/golangci-lint/releases/download/v2.13.1/golangci-lint-2.13.1-linux-amd64.tar.gz && printf 'b17bfbc9d4aaa48be7f4f1ce3240bc3d8200c870c072bacf15c26219e2cfb9cc  golangci-lint.tar.gz\n' | sha256sum -c -
+          tar -xzf golangci-lint.tar.gz
+          sudo install -m 0755 golangci-lint-2.13.1-linux-amd64/golangci-lint /usr/local/bin/golangci-lint
+          rm -rf golangci-lint.tar.gz golangci-lint-2.13.1-linux-amd64
       - name: Ensure fixture-audit prerequisite
-        run: command -v rg || (sudo apt-get update && sudo apt-get install -y ripgrep)
+        run: command -v rg || ( curl -fsSLo ripgrep.tar.gz https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-unknown-linux-musl.tar.gz && printf '33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c  ripgrep.tar.gz\n' | sha256sum -c - && tar -xzf ripgrep.tar.gz && sudo install -m 0755 ripgrep-15.2.0-x86_64-unknown-linux-musl/rg /usr/local/bin/rg )
       - name: Static checks and build
         run: make vet lint build
       - name: Hermetic unit and race tests
@@ -43,7 +47,7 @@ jobs:
           docker rm -f ci-pg 2>/dev/null || true
           docker run -d --name ci-pg \
             -e POSTGRES_USER=instant -e POSTGRES_PASSWORD=instant \
-            -e POSTGRES_DB=instant_v2_test -p 5432:5432 postgres:17 \
+            -e POSTGRES_DB=instant_v2_test -p 5432:5432 postgres:17@sha256:f4c66b820c6f974249089d3d16d86a3698eae11e8746eb6644b2271031e91232 \
             -c wal_level=logical -c max_connections=200
           ready=0
           for i in $(seq 1 30); do
@@ -65,10 +69,10 @@ jobs:
         run: docker rm -f ci-pg 2>/dev/null || true
 
   container:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Container startup, health, non-root identity, and TLS roots
         run: make container-verify
 
@@ -77,7 +81,7 @@ jobs:
   # the lag + RSS budgets guard delivery latency and unbounded growth at CI
   # scale. Budgets are deliberately generous — gates regressions, not perf.
   soak-gate:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
       DATABASE_URL: postgres://instant:instant@localhost:5432/instant_bench_ci_${{ github.run_id }}_${{ github.run_attempt }}?sslmode=disable
@@ -85,8 +89,8 @@ jobs:
       PGPASSWORD: instant
       BENCHMARK_MARKER: ci-soak-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
       - name: Start postgres
@@ -94,7 +98,7 @@ jobs:
           docker rm -f soak-pg 2>/dev/null || true
           docker run -d --name soak-pg \
             -e POSTGRES_USER=instant -e POSTGRES_PASSWORD=instant -e POSTGRES_DB=postgres \
-            -p 5432:5432 postgres:17
+            -p 5432:5432 postgres:17@sha256:f4c66b820c6f974249089d3d16d86a3698eae11e8746eb6644b2271031e91232
           ready=0
           for i in $(seq 1 30); do
             if docker exec soak-pg pg_isready -U instant -d postgres | grep -q "accepting connections"; then
@@ -156,7 +160,7 @@ jobs:
         run: tail -100 instantd.log
       - name: Upload short soak artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ci-soak-${{ github.run_id }}-${{ github.run_attempt }}
           path: |

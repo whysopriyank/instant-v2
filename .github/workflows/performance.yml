@@ -43,7 +43,7 @@ permissions:
 
 jobs:
   bounded-v2-smoke:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       PGPASSWORD: instant
@@ -53,8 +53,8 @@ jobs:
       REQUESTED_SESSIONS: ${{ inputs.smoke_sessions || '300' }}
       REQUESTED_DURATION: ${{ inputs.smoke_duration || '60s' }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
       - name: Resolve disposable run names
@@ -80,7 +80,7 @@ jobs:
           docker rm -f perf-pg 2>/dev/null || true
           docker run -d --name perf-pg \
             -e POSTGRES_USER=instant -e POSTGRES_PASSWORD=instant -e POSTGRES_DB="$DB_NAME" \
-            -p 5432:5432 postgres:17 -c wal_level=logical
+            -p 5432:5432 postgres:17@sha256:f4c66b820c6f974249089d3d16d86a3698eae11e8746eb6644b2271031e91232 -c wal_level=logical
           ready=0
           for i in $(seq 1 45); do
             if docker exec perf-pg pg_isready -U instant -d "$DB_NAME" | grep -q "accepting connections"; then
@@ -154,7 +154,7 @@ jobs:
           fi
       - name: Upload performance bundle
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: performance-${{ github.run_id }}-${{ github.run_attempt }}
           path: benchmarks/results/perf-${{ github.run_id }}-${{ github.run_attempt }}
