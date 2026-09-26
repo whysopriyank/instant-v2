@@ -135,7 +135,7 @@ func runManifest(args []string) int {
 	}
 	handoffs := make([]manifestHandoff, 0, len(inputs))
 	for _, in := range inputs {
-		if in.State != "GREEN" && !(in.Packet == "DA-004V" && in.State == "ACCEPTED_EXCEPTION") {
+		if in.State != "GREEN" && (in.Packet != "DA-004V" || in.State != "ACCEPTED_EXCEPTION") {
 			fmt.Fprintf(os.Stderr, "manifest: refusing: packet %s state %q is not accepted\n", in.Packet, in.State)
 			return 1
 		}
@@ -300,7 +300,7 @@ func validateManifest(evidenceRoot string, m gateManifest, candidate, campaign s
 			return fmt.Errorf("duplicate handoff %q", h.Packet)
 		}
 		seen[h.Packet] = true
-		if h.State != "GREEN" && !(h.Packet == "DA-004V" && h.State == "ACCEPTED_EXCEPTION") {
+		if h.State != "GREEN" && (h.Packet != "DA-004V" || h.State != "ACCEPTED_EXCEPTION") {
 			return fmt.Errorf("handoff %s state %q not accepted", h.Packet, h.State)
 		}
 		if h.CandidateSHA != candidate || h.CampaignID != campaign {

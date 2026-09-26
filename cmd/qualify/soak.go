@@ -117,12 +117,6 @@ var soakKnownLedgerStates = map[string]bool{
 	"resolved": true, "terminal": true,
 }
 
-// soakKnownEventNames is the exact set of evidence event names cmd/soak/main.go emits.
-var soakKnownEventNames = map[string]bool{
-	"run_started": true, "scheduler_error": true, "scheduler_finished": true,
-	"progress": true, "run_finished": true, "lag_diagnostic": true,
-}
-
 // soakAllowedEventFields is the exact payload field set per event name, taken
 // from the Emit call sites in cmd/soak/main.go (plus the EventWriter
 // envelope "event"/"at" from internal/benchharness/observe.go). Any other

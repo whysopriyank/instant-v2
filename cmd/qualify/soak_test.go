@@ -397,7 +397,7 @@ func TestSoakOutputTagsPinned(t *testing.T) {
 		`Emit("progress"`, `Emit("run_finished"`, `Emit("lag_diagnostic"`,
 	} {
 		if !strings.Contains(string(mainSrc), emit) {
-			t.Fatalf("main.go no longer emits %s: update soakKnownEventNames", emit)
+			t.Fatalf("main.go no longer emits %s: update soakAllowedEventFields", emit)
 		}
 	}
 	// The event envelope (event/at keys) lives in benchharness/observe.go;

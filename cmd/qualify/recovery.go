@@ -677,14 +677,18 @@ func (d *recoveryDriver) finalizeOutcome(o *outcomeEvidence, ledger *txLedger, u
 	if subs != nil {
 		o.SubSnapshots = snapSubscribers(subs)
 	}
-	d.recordOutcomeArtifact(*o)
+	// Missing outcome evidence fails the outcome closed rather than PASSing
+	// without its artifact.
+	if err := d.recordOutcomeArtifact(*o); err != nil && o.HarnessError == "" {
+		o.HarnessError = "outcome artifact: " + err.Error()
+	}
 }
 
 // recordOutcomeArtifact writes the per-outcome evidence file (ledger with
 // submitted/acked/errored ids and server tx ids, subscriber final sets,
 // oracle set, partial count, precondition evidence, timings, exit status,
 // close codes) and registers it in the lane's artifact list.
-func (d *recoveryDriver) recordOutcomeArtifact(ev outcomeEvidence) {
+func (d *recoveryDriver) recordOutcomeArtifact(ev outcomeEvidence) error {
 	ev.Ledger = append([]*txRecord{}, ev.Ledger...)
 	// Normalize nils to empty arrays/objects so artifacts never carry JSON
 	// nulls where the schema documents a list.
@@ -735,20 +739,18 @@ func (d *recoveryDriver) recordOutcomeArtifact(ev outcomeEvidence) {
 	}
 	path := filepath.Join(d.eventsDir, "recovery-"+ev.ID+".json")
 	if err := writeJSONFile(path, doc); err != nil {
-		fmt.Fprintln(d.log, "recovery: artifact write:", err)
-		return
+		return fmt.Errorf("write: %w", err)
 	}
 	rel, err := filepath.Rel(d.evidenceRoot, path)
 	if err != nil {
-		fmt.Fprintln(d.log, "recovery: artifact rel:", err)
-		return
+		return fmt.Errorf("rel: %w", err)
 	}
 	ref, err := HashFileArtifact(d.evidenceRoot, filepath.ToSlash(rel))
 	if err != nil {
-		fmt.Fprintln(d.log, "recovery: artifact hash:", err)
-		return
+		return fmt.Errorf("hash: %w", err)
 	}
 	d.artifacts = append(d.artifacts, ref)
+	return nil
 }
 
 // dbAlive reports whether the given DSN accepts a connection right now.
