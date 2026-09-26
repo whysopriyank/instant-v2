@@ -129,6 +129,9 @@ EOF
 chmod +x "$fakebin/make"
 
 calls="$tmp/calls"
+# This contract test runs inside the real gate, which exports these; every
+# case below must see only the values it sets explicitly.
+unset DATABASE_URL RELEASE_GATE_MANIFEST RELEASE_CANDIDATE_SHA RELEASE_CAMPAIGN_ID
 base=(env PATH="$fakebin:$PATH" RELEASE_GATE_MANIFEST="$evidence/manifest.json" RELEASE_CANDIDATE_SHA="$sha" RELEASE_CAMPAIGN_ID=campaign-1 DATABASE_URL=postgres://redacted RELEASE_TEST_CALLS="$calls" RELEASE_TEST_BINARY="$evidence/candidate/instantd" bash "$gate")
 
 pass=0
