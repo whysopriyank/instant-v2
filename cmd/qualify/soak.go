@@ -590,7 +590,7 @@ func runSoakLive(cfg runSoakConfig) int {
 	seedCmd.Env = append(os.Environ(), "BENCHMARK_MARKER=qualify-soak")
 	seedOut, err := seedCmd.Output()
 	if err != nil {
-		return failLane(cfg.out, "QR-001", cfg.started, map[string]any{"error": fmt.Sprintf("soaksetup: %v", err)}, nil)
+		return failLane(cfg.out, "QR-001", cfg.started, map[string]any{"error": commandError("soaksetup", err).Error()}, nil)
 	}
 	var appID, attrID string
 	for _, line := range strings.Split(string(seedOut), "\n") {

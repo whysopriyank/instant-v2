@@ -426,7 +426,7 @@ func (d *recoveryDriver) seedFixture(ctx context.Context, dbURL string) (appID, 
 	cmd.Env = append(os.Environ(), "BENCHMARK_MARKER=qualify-recovery")
 	out, err := cmd.Output()
 	if err != nil {
-		return "", "", fmt.Errorf("soaksetup: %w\n%s", err, out)
+		return "", "", commandError("soaksetup", err)
 	}
 	for _, line := range strings.Split(string(out), "\n") {
 		if v, ok := strings.CutPrefix(line, "APP="); ok {

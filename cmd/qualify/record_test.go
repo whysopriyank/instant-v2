@@ -252,3 +252,11 @@ func validateGateRecordFile(path string) error {
 }
 
 func itoa(n int64) string { return strconv.FormatInt(n, 10) }
+
+func TestCommandErrorIncludesStderr(t *testing.T) {
+	_, err := exec.Command("sh", "-c", "echo 'soaksetup: too many clients' >&2; exit 2").Output()
+	got := commandError("soaksetup", err).Error()
+	if !strings.Contains(got, "exit status 2") || !strings.Contains(got, "too many clients") {
+		t.Fatalf("stderr not carried: %q", got)
+	}
+}

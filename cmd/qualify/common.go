@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -216,4 +219,15 @@ func writeJSONFile(path string, v any) error {
 		return err
 	}
 	return f.Close()
+}
+
+// commandError describes a failed helper command including its stderr, so a
+// setup failure (e.g. soaksetup exit 2) is diagnosable from the lane result
+// instead of being reduced to an exit status.
+func commandError(name string, err error) error {
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && len(bytes.TrimSpace(ee.Stderr)) > 0 {
+		return fmt.Errorf("%s: %w: %s", name, err, bytes.TrimSpace(ee.Stderr))
+	}
+	return fmt.Errorf("%s: %w", name, err)
 }

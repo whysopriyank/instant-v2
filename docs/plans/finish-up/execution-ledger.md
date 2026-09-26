@@ -2445,3 +2445,16 @@ old code ("declared stalled 3s after its first write") and passes on the
 fix, including a genuine 23 s gap still being detected; 20× -race ok.
 Evidence from attempt 1 is not reused: a new candidate requires a full new
 campaign.
+
+### Official attempt 2 — FAIL, harness setup error without diagnostics (2026-09-26)
+
+Campaign `alpha-20260926b` on `cef3594` (cutiewhy): build ✓ (470bb95f…),
+native PASS (1889 tests, 0 skip, 77 platform checks); recovery 6/7 PASS —
+`crash-during-publication` never ran its fault: fixture seeding failed with
+`soaksetup: exit status 2` and the harness discarded soaksetup's stderr, so
+the cause is unrecoverable. Ruled out: 63-char per-outcome database name
+(reproduced and seeds fine on postgres:17); no connection/error lines in the
+lane log. Harness repair: helper failures now carry the command's stderr
+(`commandError`, test `TestCommandErrorIncludesStderr`) in both recovery
+and soak seeding. No blind retry was added (it could mask a real resource
+leak). New candidate → full new campaign.
