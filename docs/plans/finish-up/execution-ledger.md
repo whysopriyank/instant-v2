@@ -2472,3 +2472,15 @@ database name reached 64 bytes (attempt 1's id stayed at 63 and passed).
 Fixes: `printf '%s'` sanitization in campaign/gate/assemble scripts;
 `outcomeDatabaseName` bounds derived names to 63 bytes with a hash suffix
 (test `TestOutcomeDatabaseNameFitsPostgresLimit`). Product unaffected.
+
+### Official attempt 4 — soak stall-guard fix was incomplete (2026-09-26)
+
+Campaign `alpha-20260926d` on `2076d60`: build ✓ (7ecc7680…), native PASS
+(1891 tests, 77 platform checks), recovery PASS 7/7 (DB-name fix confirmed).
+Soak: 4000 r/s steady, but the new redial log showed session 0 again ended
+with "refresh stream stalled" at write start. The earlier fix set the
+window start when the session decided to write, before it blocked on the
+global write gate for the ~2 min write-free ramp+settle. Now the window
+starts when the first transact is actually sent. The red test was
+strengthened to hold the gate closed across the idle period (red on the
+previous fix: "declared stalled 3s after its first write"); green, 30× -race.

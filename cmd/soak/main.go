@@ -715,9 +715,11 @@ writeLoop:
 				return fmt.Errorf("stalled: %d transacts without ok", pending)
 			}
 			// The stall window starts at the later of the last refresh and
-			// this session's first write: ramp/settle are write-free, so the
-			// snapshot can be minutes old when writing begins.
-			if counter > 0 {
+			// the moment this session's first transact was actually sent:
+			// ramp/settle are write-free and the session waits on the global
+			// write gate until writing begins, so its snapshot can be minutes
+			// old by then.
+			if !firstWriteAt.IsZero() {
 				since := lastAt
 				if firstWriteAt.After(since) {
 					since = firstWriteAt
@@ -725,8 +727,6 @@ writeLoop:
 				if clock.Now().Sub(since) > 20*time.Second {
 					return fmt.Errorf("refresh stream stalled")
 				}
-			} else {
-				firstWriteAt = clock.Now()
 			}
 			counter++
 			sequence := ledger.NextSequence(id)
@@ -757,6 +757,9 @@ writeLoop:
 			}); err != nil {
 				_ = ledger.RecordError(eid, err.Error())
 				return err
+			}
+			if firstWriteAt.IsZero() {
+				firstWriteAt = clock.Now()
 			}
 			if transacts != nil {
 				transacts.Add(1)

@@ -727,6 +727,9 @@ func TestStallGuardMeasuresFromFirstWriteNotIdleSnapshot(t *testing.T) {
 	for refreshes.Load() == 0 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
+	// As in a real run, the session ticks and then waits on the closed
+	// global write gate through the whole write-free ramp + settle.
+	time.Sleep(30 * time.Millisecond)
 	clock.Advance(2 * time.Minute) // idle ramp + settle: no writes, no refreshes
 	// Keep the global write gate flowing as the real scheduler does, so the
 	// session keeps ticking (the stall check runs before each gate wait).
