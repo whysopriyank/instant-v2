@@ -58,9 +58,12 @@ separates completed implementation from remaining release and parity gaps.
 Performance thesis is **not** raw speed (the workload is Postgres-bound); it is memory density,
 sub-second cold start, single-binary deploy, and architectural wins (delta sync, no cluster mesh).
 
-## Status (2026-08-28)
+## Status (2026-08-28; first release is an explicit single-node alpha per DEC-001)
 
-Implementation is well beyond the planning stage. The current repository is a
+The first release is an explicit single-node alpha (DEC-001): no
+production-readiness, provider-verified OAuth/email, v1-parity, container
+qualification, or restore-drill claim is made. Implementation is well beyond
+the planning stage. The current repository is a
 working, testable single-node service with optional Postgres LISTEN/NOTIFY
 invalidation for peers. The status below is deliberately conservative: a
 phase is only “complete” when its implementation and stated verification are

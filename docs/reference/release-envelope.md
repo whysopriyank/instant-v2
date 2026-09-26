@@ -162,6 +162,23 @@ surface that is missing or no longer `gap`.
 | `ws.rooms.fanout` | Admin presence lifecycle (`rooms-presence-lifecycle`, stable 501); peer fanout itself is covered by `rooms-fanout-positive` |
 | `ws.transact.extended` | Deep merge, full cardinality/cascade matrix, missing-entity lookup variants, concurrent ordering (`transactions-concurrency-gap`) |
 
+## Not claimed in this alpha
+
+Per the owner direction of 2026-09-26 (see
+`docs/plans/finish-up/alpha-exception-decision.md`), the first release is an
+explicit single-node alpha. The packets below are not claimed for this
+release; none may be claimed in any current doc until its packet is
+re-selected and completed on a new candidate.
+
+| Packet | Not claimed in this alpha |
+|---|---|
+| DA-006B provider acceptance | Google/GitHub OAuth verified against real providers (local contract DA-006A is accepted; provider round-trip unverified) |
+| DA-008B magic-code provider | real email delivery of magic codes |
+| CF-004 pinned-v1 environment | any v1 runtime comparison |
+| CF-005 differential | v1 wire/behaviour parity or drop-in replacement |
+| OP-004 container runtime | qualified container image (gate lane `container: not_selected`) |
+| OP-006 backup/restore drill | a drilled restore RPO/RTO (DA-003 fail-closed backup remains accepted) |
+
 ## Packet selection ledger
 
 All rows are scoped to the candidate above. `REQUIRED` means required to finish

@@ -39,7 +39,9 @@ stack) who want to move to the Go daemon.
    `_SECRET`, `INSTANT_OAUTH_GITHUB_CLIENT_ID`/`_SECRET`). Apple OAuth is explicitly
    excluded from this alpha (DEC-001): `INSTANT_OAUTH_APPLE_KEY_P8` exists in
    source but is not wired into the builtin provider list. v1's stored OAuth
-   config rows are honored where present for Google/GitHub.
+   config rows are honored where present for Google/GitHub (local contract
+   DA-006A only; real-provider acceptance DA-006B is not claimed for this
+   alpha — provider round-trip unverified).
 5. **Single-node deployment.** This alpha release profile is single-node only
    (DEC-001): run exactly one `instantd` against the database. Migrations take
    an advisory lock so a restart cannot race a concurrent boot, but running more

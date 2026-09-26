@@ -1747,3 +1747,76 @@ tests (unlisted surface, stale surface, missing section). Raw: `go vet
 (`unknown architecture arm64e.x1-macos`) reproduces at HEAD `f63d400` with
 go1.27.1 + macOS 27 SDK — environmental; full lanes run on the Linux
 qualification image. CF-003 → `COMPLETE / ACCEPTED_WITH_OWNER_EXCEPTIONS`.
+
+## AX-001 alpha exception record (2026-09-26, HEAD 8c9bfc24a580e3f24be315a9c73a45d20d643765 + work below, docs only, no commit per contract)
+
+# Packet AX-001 handoff
+
+Status: COMPLETE (docs only)
+Candidate: HEAD `8c9bfc24a580e3f24be315a9c73a45d20d643765` on `main` + uncommitted docs below (no commit per contract)
+Decision/profile: DEC-001-single-node-alpha + owner direction 2026-09-26 (`docs/plans/finish-up/completion-run-20260926.md`; contract `docs/plans/finish-up/contracts/alpha-exceptions.md`)
+Implementation agent: OpenCode / Muse Spark 1.3 free
+Review agent: none (docs-only packet; verification is the command battery below)
+Repair cycle: 0
+
+## Ledger
+| Row | Result | Evidence | Remaining |
+| R1 decision file | GREEN | `docs/plans/finish-up/alpha-exception-decision.md` (NEW): six-row table with owner/date, already-`NOT_SELECTED` rows (OP-001/002, QR-002, QR-004, FR-003/004) kept with not-claimed wording, TD-001..005 stay `DEFERRED`, re-selection rule | None |
+| R2 manifest | GREEN | `docs/plans/finish-up/program-manifest.md`: six state cells → `NOT_SELECTED / OWNER_ALPHA_EXCEPTION`; one-paragraph note under the table pointing at the decision file | None |
+| R3 envelope | GREEN | `docs/reference/release-envelope.md`: new `## Not claimed in this alpha` section (six packets + claim text), placed after the CF-003 surface-gap table so both `validate-release` parsers keep their tables byte-compatible; `make validate-release` exit 0 | None |
+| R4 doc sweep | GREEN | Grep for `production-ready`, `production ready`, `v1 parity`, `drop-in`, `parity`, `provider`, `restore`, `container` over the eight listed docs; false/overbroad sentences repaired in README.md, UPGRADE.md, docs/plans/04-roadmap.md (see sentence list below); docs/README.md, docs/guides/07-selfhost.md, docs/reference/quality-scorecard.md, docs/reference/quality-verification.md, docs/plans/finish-up/README.md verified already alpha-labelled or historical — untouched | None |
+| R5 ledger handoff | GREEN | This section | None |
+
+## Changes (docs only; no code, scripts, Makefile, corpus, or workflow changes)
+- `docs/plans/finish-up/alpha-exception-decision.md` (NEW)
+- `docs/plans/finish-up/program-manifest.md`: six state cells + note paragraph
+- `docs/reference/release-envelope.md`: `## Not claimed in this alpha` section
+- `README.md`, `UPGRADE.md`, `docs/plans/04-roadmap.md`: alpha labelling / not-claimed wording (sentences below)
+- This ledger section
+
+## Edited sentences (file:line before → after)
+- README.md:61 `## Status (2026-08-28)` → `## Status (2026-08-28; first release is an explicit single-node alpha per DEC-001)`
+- README.md:63 `Implementation is well beyond the planning stage. The current repository is a` → `The first release is an explicit single-node alpha (DEC-001): no production-readiness, provider-verified OAuth/email, v1-parity, container qualification, or restore-drill claim is made. Implementation is well beyond the planning stage. The current repository is a`
+- UPGRADE.md:42 `config rows are honored where present for Google/GitHub.` → `config rows are honored where present for Google/GitHub (local contract DA-006A only; real-provider acceptance DA-006B is not claimed for this alpha — provider round-trip unverified).`
+- docs/plans/04-roadmap.md:11 `## Reconciled status (2026-08-28)` → `## Reconciled status (2026-08-28; first release is an explicit single-node alpha)`
+- docs/plans/04-roadmap.md:13 `The original checklists remain the intended work breakdown. Their current` → `The first release is an explicit single-node alpha (DEC-001): no production-readiness, provider-verified OAuth/email, v1-parity, container qualification, or restore-drill claim is made. The original checklists remain the intended work breakdown. Their current`
+- docs/plans/04-roadmap.md:25 (phase-5 row) `but real-provider acceptance is \`BLOCKED\` (DA-006B);` → `but real-provider acceptance is not claimed for this alpha (\`NOT_SELECTED / OWNER_ALPHA_EXCEPTION\`, DA-006B);`
+- docs/plans/04-roadmap.md:216-217 (phase-4 authn) `real-provider acceptance is \`BLOCKED\` (DA-006B),` → `real-provider acceptance is not claimed for this alpha (\`NOT_SELECTED / OWNER_ALPHA_EXCEPTION\`, DA-006B),`
+- docs/plans/finish-up/program-manifest.md:23 `| 12 | DA-006B provider acceptance | 03 | \`BLOCKED / MISSING_EVIDENCE\` |` → `| 12 | DA-006B provider acceptance | 03 | \`NOT_SELECTED / OWNER_ALPHA_EXCEPTION\` |`
+- docs/plans/finish-up/program-manifest.md:26 `| 13b | DA-008B magic-code provider acceptance | 03 | \`BLOCKED / EXTERNAL_EVIDENCE\` |` → `| 13b | DA-008B magic-code provider acceptance | 03 | \`NOT_SELECTED / OWNER_ALPHA_EXCEPTION\` |`
+- docs/plans/finish-up/program-manifest.md:36 `| 23 | CF-004 pinned-v1 environment | 05 | \`BLOCKED / EXTERNAL_EVIDENCE\` |` → `| 23 | CF-004 pinned-v1 environment | 05 | \`NOT_SELECTED / OWNER_ALPHA_EXCEPTION\` |`
+- docs/plans/finish-up/program-manifest.md:37 `| 24 | CF-005 differential | 05 | \`BLOCKED / EXTERNAL_EVIDENCE\` |` → `| 24 | CF-005 differential | 05 | \`NOT_SELECTED / OWNER_ALPHA_EXCEPTION\` |`
+- docs/plans/finish-up/program-manifest.md:41 `| 28 | OP-004 container runtime | 06 | \`BLOCKED / ENVIRONMENT_EVIDENCE\` |` → `| 28 | OP-004 container runtime | 06 | \`NOT_SELECTED / OWNER_ALPHA_EXCEPTION\` |`
+- docs/plans/finish-up/program-manifest.md:43 `| 30 | OP-006 backup/restore drill | 06 | \`BLOCKED / ENVIRONMENT_EVIDENCE\` |` → `| 30 | OP-006 backup/restore drill | 06 | \`NOT_SELECTED / OWNER_ALPHA_EXCEPTION\` |`
+- docs/plans/finish-up/program-manifest.md:59 (NEW paragraph under the table) `The six alpha-exception rows above (DA-006B, DA-008B, CF-004, CF-005, OP-004, OP-006) are \`NOT_SELECTED / OWNER_ALPHA_EXCEPTION\` per the owner direction of 2026-09-26 ...`
+- docs/reference/release-envelope.md:165 (NEW section) `## Not claimed in this alpha` with the six-packet table (claim text per contract)
+- docs/plans/finish-up/alpha-exception-decision.md (NEW file, full content per R1)
+
+## Verification
+| Command/run | Selected | Exit | Meaning |
+| `make validate-release` | full release gate | 0 | `validated 18 scenarios; coverage=26; spec=0 regression=18 v1-capture=0`; new envelope section keeps parsed tables byte-compatible |
+| `go run ./cmd/corpusctl --mode validate --corpus corpus/` | full corpus | 0 | same 18-scenario report, exit 0 |
+| `bash scripts/test-quality-release-gate.sh` | 41 checks | 1 | 40 passed, 1 failed: `FAIL: real hermetic selection did not run` — environmental (its `go test ./internal/reactive -short -json` leg fails to build: broken macOS SDK `.tbd` files, `unknown architecture arm64e.x1-macos`); same pre-existing environmental failure recorded at HEAD without this packet; gate script and `internal/**` untouched |
+| `git diff --stat` | worktree | n/a | 5 files changed, 46 insertions, 13 deletions (`README.md`, `UPGRADE.md`, `docs/plans/04-roadmap.md`, `docs/plans/finish-up/program-manifest.md`, `docs/reference/release-envelope.md`) + NEW `docs/plans/finish-up/alpha-exception-decision.md` (untracked) + this ledger section |
+
+## Not run
+- Full-repo `go build ./...` / `go test` sweep (blocked by the environmental macOS SDK linker failure above; per contract this is not repaired here; affected `validate-release` lanes run green instead)
+- Owned-DB / integration lanes (`AUTH-RUNTIME-001 NOT_GRANTED`); differential/v1; production gate end-to-end (FR-002 owns it)
+
+## Scope audit
+- Pre-existing changes preserved: untracked `docs/plans/finish-up/completion-run-20260926.md` and `docs/plans/finish-up/contracts/` left untouched; no reset/stash/checkout/clean
+- Lease kept: only the contracted docs plus `docs/plans/finish-up/**`; no code, scripts, Makefile, corpus, or workflow changes
+- Unexpected changes: none
+- No commit, push, tag, or remote-host run (per contract; changes left in the working tree)
+
+## Next prerequisite
+- FR-002 immutable acceptance on one clean SHA (needs the external/environment packets or owner-approved exceptions for them)
+
+### AX-001 — coordinator review (2026-09-26)
+
+Verdict: ACCEPT. Docs-only diff; the six packets were already `DEFERRED` /
+"proposed exclusion" in the DEC-001 selection ledger
+(`release-envelope.md` §Packet selection ledger), so this formalises existing
+policy; OP-003/OP-005/QR-001 remain `REQUIRED`. `validate-release` exit 0.
+`test-quality-release-gate.sh` 40/41 locally — the 1 failure is the macOS
+arm64e linker issue (reproduces at `f63d400`), re-run on Linux in FR-002.

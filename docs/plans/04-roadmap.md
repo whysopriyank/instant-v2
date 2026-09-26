@@ -8,9 +8,11 @@ phase leaves working, corpus-tested code.
 Each phase lists: entry gate, owned packages (which sub-agents may touch those packages in
 parallel), key tasks, and the **exit gate** that blocks the next phase.
 
-## Reconciled status (2026-08-28)
+## Reconciled status (2026-08-28; first release is an explicit single-node alpha)
 
-The original checklists remain the intended work breakdown. Their current
+The first release is an explicit single-node alpha (DEC-001): no
+production-readiness, provider-verified OAuth/email, v1-parity, container
+qualification, or restore-drill claim is made. The original checklists remain the intended work breakdown. Their current
 state is summarized here so an unchecked item is not mistaken for an absent
 implementation, and a historical measurement is not mistaken for a release
 gate.
@@ -22,7 +24,7 @@ gate.
 | 2 — transactor/perms | Partial | Tx-step validation, CEL checks, cascades, required attributes, and admin bypass are covered; rules persistence is not wired through every write plane. |
 | 3 — query | Partial | InstaQL, datalog plans, pagination, local evaluation, and index-oriented tests exist; broad v1/JS differential coverage remains open. |
 | 4 — reactive sync | Partial | WS/SSE, groups, incremental/delta refresh, direct post-commit invalidation, optional peer bus, and isolated pgoutput tests exist; full-session corpus, 5k×30-minute soak, production WAL-tail assembly, and cross-node write ordering are not all complete. |
-| 5 — platform | Partial | Admin/runtime/storage APIs, backups, and S3-compatible backup routes exist; builtin Google/GitHub auth-code exchange (token/userinfo URLs, nonce handling) is configured (DA-006A), but real-provider acceptance is `BLOCKED` (DA-006B); HTTP corpus breadth remains open; admin presence is an explicit stable-501 exclusion (FU-03), not an open wiring gap; Apple is explicitly excluded for this alpha. |
+| 5 — platform | Partial | Admin/runtime/storage APIs, backups, and S3-compatible backup routes exist; builtin Google/GitHub auth-code exchange (token/userinfo URLs, nonce handling) is configured (DA-006A), but real-provider acceptance is not claimed for this alpha (`NOT_SELECTED / OWNER_ALPHA_EXCEPTION`, DA-006B); HTTP corpus breadth remains open; admin presence is an explicit stable-501 exclusion (FU-03), not an open wiring gap; Apple is explicitly excluded for this alpha. |
 | 6 — hardening/release | Partial | Security, rate limits, queue gates, chaos, race checks, and the accepted Wave 5 comparative harness landed; paired live V1/V2 Wave 6 measurement remains open. |
 
 “Complete for implemented scope” means the code and focused tests cover the
@@ -212,7 +214,8 @@ a dual-impl harness (server and JS optimistic path must agree).
    magic-code email, hashed opaque refresh-token lifecycle, and Apple signer
    support. The main assembly configures builtin Google/GitHub auth-code
    exchange including nonce handling (DA-006A); real-provider acceptance is
-   `BLOCKED` (DA-006B), and Apple end-to-end token exchange is explicitly
+   not claimed for this alpha (`NOT_SELECTED / OWNER_ALPHA_EXCEPTION`,
+   DA-006B), and Apple end-to-end token exchange is explicitly
    excluded for this alpha.
 
 ### Exit gate (the service is shippable here)

@@ -20,10 +20,10 @@ its packet against current source and the latest handoff before changing status.
 | 9 | DA-004 admin permission fidelity | 03 | `COMPLETE / ACCEPTED_DB_SECURITY_REVIEWED` | F-002 permission policy | DB integration + security review |
 | 10 | DA-005 admin mutation atomicity | 03 | `COMPLETE / ACCEPTED_DB_ATOMICITY_REVIEWED` | F-002, stable admin candidate | DB integration + data review |
 | 11 | DA-006A OAuth local contract | 03 | `COMPLETE / ACCEPTED_DB_SECURITY_REVIEWED` | F-002 provider policy | focused/integrated + security review |
-| 12 | DA-006B provider acceptance | 03 | `BLOCKED / MISSING_EVIDENCE` | DA-006A, credentials/authority | real environment |
+| 12 | DA-006B provider acceptance | 03 | `NOT_SELECTED / OWNER_ALPHA_EXCEPTION` | DA-006A, credentials/authority | real environment |
 | 13 | DA-007 rate-limit policy | 03 | `COMPLETE / ACCEPTED_SINGLE_NODE` | F-002 security/topology policy | focused/integrated + Sol security gate |
 | 13a | DA-008A magic-code local contract | 03 | `COMPLETE / ACCEPTED_DB_SECURITY_REVIEWED` | F-002 auth policy | focused/integrated + security review |
-| 13b | DA-008B magic-code provider acceptance | 03 | `BLOCKED / EXTERNAL_EVIDENCE` | DA-008A, provider/recipient authority | real environment |
+| 13b | DA-008B magic-code provider acceptance | 03 | `NOT_SELECTED / OWNER_ALPHA_EXCEPTION` | DA-008A, provider/recipient authority | real environment |
 | 14 | EV-001 soak transaction ledger | 04 | `COMPLETE / ACCEPTED_BOUNDED_HARNESS` | RT-002 semantics | focused + short real smoke |
 | 15 | EV-002 soak evidence output | 04 | `COMPLETE / ACCEPTED_BOUNDED_HARNESS` | F-002 artifact policy | focused failure injection |
 | 16 | EV-003 soak process identity | 04 | `COMPLETE / ACCEPTED_NATIVE_SCRIPT` | F-002 target OS | native target |
@@ -33,14 +33,14 @@ its packet against current source and the latest handoff before changing status.
 | 20 | CF-001 COPY acceptance | 05 | `COMPLETE / ACCEPTED_POSTGRES_COPY` | F-002, owned PostgreSQL | DB integration |
 | 21 | CF-002 recorder/fixtures | 05 | `COMPLETE / ACCEPTED_CANDIDATE_BOUND_LOCAL_CAPTURE` | F-002 surfaces | integrated capture |
 | 22 | CF-003 matrix closure | 05 | `COMPLETE / ACCEPTED_WITH_OWNER_EXCEPTIONS_19_COVERED_3_EXCEPTION_4_UNSUPPORTED` | selected product packets, CF-002 | real-path matrix |
-| 23 | CF-004 pinned-v1 environment | 05 | `BLOCKED / EXTERNAL_EVIDENCE` | F-002, service authority | qualified v1 runtime |
-| 24 | CF-005 differential | 05 | `BLOCKED / EXTERNAL_EVIDENCE` | CF-003/004 | compatibility + independent review |
+| 23 | CF-004 pinned-v1 environment | 05 | `NOT_SELECTED / OWNER_ALPHA_EXCEPTION` | F-002, service authority | qualified v1 runtime |
+| 24 | CF-005 differential | 05 | `NOT_SELECTED / OWNER_ALPHA_EXCEPTION` | CF-003/004 | compatibility + independent review |
 | 25 | OP-001 publisher recovery | 06 | `NOT_SELECTED / CONDITIONAL_DEFECT` | multi-node selected | fault integration + distributed review |
 | 26 | OP-002 replica visibility | 06 | `NOT_SELECTED / CONDITIONAL_DEFECT` | replica selected | lag integration + distributed review |
 | 27 | OP-003 native Linux | 06 | `BLOCKED / ENVIRONMENT_EVIDENCE` | target selected | native runtime |
-| 28 | OP-004 container runtime | 06 | `BLOCKED / ENVIRONMENT_EVIDENCE` | container selected, DA-001 | container runtime |
+| 28 | OP-004 container runtime | 06 | `NOT_SELECTED / OWNER_ALPHA_EXCEPTION` | container selected, DA-001 | container runtime |
 | 29 | OP-005 crash/bounce/drain | 06 | `BLOCKED / ENVIRONMENT_EVIDENCE` | phases 02–04, OP-003/004 | recovery campaign |
-| 30 | OP-006 backup/restore drill | 06 | `BLOCKED / ENVIRONMENT_EVIDENCE` | DA-001/003, owned target | restore campaign |
+| 30 | OP-006 backup/restore drill | 06 | `NOT_SELECTED / OWNER_ALPHA_EXCEPTION` | DA-001/003, owned target | restore campaign |
 | 31 | QR-001 production soak | 07 | `BLOCKED / ENVIRONMENT_EVIDENCE` | EV-001..003, OP qualification | qualified soak bundle |
 | 32 | QR-002 comparative performance | 07 | `NOT_SELECTED / MISSING_EVIDENCE` | EV-005/006, CF-005, QR-001 | qualified comparison |
 | 33 | QR-003 composed gate | 07 | `COMPLETE / ACCEPTED_CONTRACT_GATE` | selected packet interfaces stable | gate contract tests |
@@ -55,6 +55,14 @@ its packet against current source and the latest handoff before changing status.
 | 42 | TD-003 migration/deferred schema inventory | 09 | `DEFERRED / POLICY_DECISION+TECH_DEBT` | release profile | decision/integration by selected row |
 | 43 | TD-004 modularity hotspots | 09 | `DEFERRED / MAINTAINABILITY` | behavior stable | equivalence + package tests |
 | 44 | TD-005 storage reconciliation | 09 | `DEFERRED / OPERABILITY` | DA-001/002 | reconciliation integration |
+
+The six alpha-exception rows above (DA-006B, DA-008B, CF-004, CF-005, OP-004,
+OP-006) are `NOT_SELECTED / OWNER_ALPHA_EXCEPTION` per the owner direction of
+2026-09-26: the first release is an explicit single-node alpha and makes none
+of those claims. See `docs/plans/finish-up/alpha-exception-decision.md` for
+the exception table, the already-`NOT_SELECTED` rows that likewise stay
+unclaimed, and the rule barring any such claim until re-selection and
+completion on a new candidate.
 
 Phase 01 completion closes only the source-backed candidate-truth and
 owner-policy decision packets. The current working candidate is dirty and no
