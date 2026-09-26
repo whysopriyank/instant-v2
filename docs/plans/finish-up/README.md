@@ -5,6 +5,8 @@ Status: `SINGLE_NODE_ALPHA_ACCEPTED_F7DC5B1_20260926` (FR-002 gate passed on
 no tag, publish, deploy, v1-parity, provider, container, restore-drill, or
 performance claim; see `completion-run-20260926.md`; evidence copies and
 identity chain: `evidence-alpha-20260926f.md`)
+Next release: DEC-002 selection (owner-delegated, awaiting confirmation) in
+`../next-release/dec-002-selection.md`.
 Owner decisions recorded: DEC-001 single-node-alpha (approved
 `DEC-001-single-node-alpha-20260905` + successor
 `DEC-001-rt001-bounded-rebinding-20260917`); FU-01 managed multi-client
