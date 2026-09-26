@@ -144,7 +144,7 @@ expected=$'validate-release\nlint\nvet\ncheck-generated\nbuild\ntest-unit\nbench
 if ! grep -Eq 'container-verify|soak-gate|differential|bench-verify|publish' "$calls"; then echo "PASS: forbidden targets absent"; pass=$((pass+1)); else fail=$((fail+1)); fi
 
 bad "missing campaign" "RELEASE_CAMPAIGN_ID is required" env PATH="$fakebin:$PATH" RELEASE_GATE_MANIFEST="$evidence/manifest.json" RELEASE_CANDIDATE_SHA="$sha" DATABASE_URL=x bash "$gate"
-bad "missing database" "DATABASE_URL is required" env PATH="$fakebin:$PATH" RELEASE_GATE_MANIFEST="$evidence/manifest.json" RELEASE_CANDIDATE_SHA="$sha" RELEASE_CAMPAIGN_ID=campaign-1 bash "$gate"
+bad "missing database" "DATABASE_URL is required" env -u DATABASE_URL PATH="$fakebin:$PATH" RELEASE_GATE_MANIFEST="$evidence/manifest.json" RELEASE_CANDIDATE_SHA="$sha" RELEASE_CAMPAIGN_ID=campaign-1 bash "$gate"
 bad "missing manifest" "RELEASE_GATE_MANIFEST" env PATH="$fakebin:$PATH" RELEASE_CANDIDATE_SHA="$sha" RELEASE_CAMPAIGN_ID=campaign-1 DATABASE_URL=x bash "$gate"
 bad "candidate mismatch" "candidate SHA mismatch" env PATH="$fakebin:$PATH" RELEASE_GATE_MANIFEST="$evidence/manifest.json" RELEASE_CANDIDATE_SHA=0000000000000000000000000000000000000000 RELEASE_CAMPAIGN_ID=campaign-1 DATABASE_URL=x bash "$gate"
 printf dirty >"$repo/dirty"

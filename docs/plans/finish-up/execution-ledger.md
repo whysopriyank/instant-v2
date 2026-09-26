@@ -1833,3 +1833,15 @@ until the exe is `sleep`. After fix: `-run TestWave6Status -count=20 -race`
 80/80 PASS. Root-user runs additionally fail `TestDiskBackendRefusesUnwritableRoot`,
 `TestPresignRoundTrip` and git-identity tests — the qualification image must
 run as a non-root user (fed into QH-001 R2).
+
+### OP-003 pre-flight — owned-DB lane test repairs (2026-09-26, bigbeast)
+
+Early unofficial `INSTANT_TEST_INTEGRATION=1 go test ./... -race -count=1 -p 4`
+on `1d648d2` (non-root, postgres:17@sha256:f4c6… wal_level=logical) found two
+test defects that would fail the FR-002 gate on any clean candidate:
+- `cmd/corpusctl` `TestManagedMulticlientLegsOwnedDB` hard-asserted
+  `GitDirty==true` ("claims clean on a dirty tree"); written on a dirty dev
+  tree. Now compares the manifest bit with actual `git status --porcelain`.
+- `scripts/test-quality-release-gate.sh` "missing database" case inherited
+  the lane's real `DATABASE_URL`; now `env -u DATABASE_URL`.
+After fixes: integration lane 32 packages ok, exit 0, zero FAIL.

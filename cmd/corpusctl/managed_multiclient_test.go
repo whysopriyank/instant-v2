@@ -1184,9 +1184,14 @@ func mcLegsRunOnce(t *testing.T, root string, iter int) {
 		t.Fatalf("iter %d: manifest verify: %v", iter, err)
 	}
 	// Test scaffolding honesty: the manifest dirty bit must match the actual
-	// tree state; this manifest is never acceptance evidence.
-	if !manifest.Candidate.GitDirty {
-		t.Fatalf("iter %d: legs manifest claims clean on a dirty tree", iter)
+	// tree state (clean on a checked-out candidate, dirty during development);
+	// this manifest is never acceptance evidence.
+	status, err := exec.Command("git", "-C", root, "status", "--porcelain").Output()
+	if err != nil {
+		t.Fatalf("iter %d: git status: %v", iter, err)
+	}
+	if actualDirty := len(bytes.TrimSpace(status)) > 0; manifest.Candidate.GitDirty != actualDirty {
+		t.Fatalf("iter %d: legs manifest dirty=%v but tree dirty=%v", iter, manifest.Candidate.GitDirty, actualDirty)
 	}
 
 	mcAssertDiskReplay(t, outDir, facts)
