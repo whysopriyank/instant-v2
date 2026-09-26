@@ -211,8 +211,9 @@ case "$LANE" in
       bash -c 'cd /src && make build && sha256sum bin/instantd' | tee "$EVIDENCE/candidate-build1.txt" >/dev/null
     docker run --rm --user "$(id -u):$(id -g)" --network "$NET" -v "$SRC:/src" "$QUAL_IMG_TAG" \
       bash -c 'cd /src && make build && sha256sum bin/instantd' | tee "$EVIDENCE/candidate-build2.txt" >/dev/null
-    sha1=$(awk '{print $1}' "$EVIDENCE/candidate-build1.txt")
-    sha2=$(awk '{print $1}' "$EVIDENCE/candidate-build2.txt")
+    sha1=$(awk '$2 == "bin/instantd" {print $1}' "$EVIDENCE/candidate-build1.txt")
+    sha2=$(awk '$2 == "bin/instantd" {print $1}' "$EVIDENCE/candidate-build2.txt")
+    [[ $sha1 =~ ^[0-9a-f]{64}$ ]] || { echo "campaign: could not read candidate sha from build output" >&2; exit 1; }
     [[ $sha1 == "$sha2" ]] || { echo "campaign: non-deterministic build ($sha1 vs $sha2)" >&2; exit 1; }
     mkdir -p "$EVIDENCE/candidate"
     install -m 0755 "$SRC/bin/instantd" "$EVIDENCE/candidate/instantd"
@@ -278,6 +279,7 @@ verify_cleanup() {
 cleanup
 trap - EXIT
 if verify_cleanup; then
+  mkdir -p "$EVIDENCE/$LANE"
   date -u +%Y-%m-%dT%H:%M:%SZ > "$EVIDENCE/$LANE/cleanup.complete"
   echo "campaign: lane $LANE complete, cleanup verified"
 else

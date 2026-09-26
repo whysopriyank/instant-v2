@@ -1,0 +1,142 @@
+[
+  {
+    "packet": "CF-002",
+    "state": "GREEN",
+    "ledger_ref": "program-manifest.md order 21 `COMPLETE / ACCEPTED_CANDIDATE_BOUND_LOCAL_CAPTURE`; acceptance recorded in docs/plans/finish-up/execution-ledger.md / docs/plans/current-candidate-truth-ledger.md; re-verified by FR-002 gate lanes on this candidate"
+  },
+  {
+    "packet": "CF-003",
+    "state": "GREEN",
+    "ledger_ref": "program-manifest.md order 22 `COMPLETE / ACCEPTED_WITH_OWNER_EXCEPTIONS_19_COVERED_3_EXCEPTION_4_UNSUPPORTED`; acceptance recorded in docs/plans/finish-up/execution-ledger.md / docs/plans/current-candidate-truth-ledger.md; re-verified by FR-002 gate lanes on this candidate"
+  },
+  {
+    "packet": "DA-001",
+    "state": "GREEN",
+    "ledger_ref": "program-manifest.md order 6 `COMPLETE / ACCEPTED_DURABLE_LOCAL_STORAGE`; acceptance recorded in docs/plans/finish-up/execution-ledger.md / docs/plans/current-candidate-truth-ledger.md; re-verified by FR-002 gate lanes on this candidate"
+  },
+  {
+    "packet": "DA-002",
+    "state": "GREEN",
+    "ledger_ref": "program-manifest.md order 7 `COMPLETE / ACCEPTED`; acceptance recorded in docs/plans/finish-up/execution-ledger.md / docs/plans/current-candidate-truth-ledger.md; re-verified by FR-002 gate lanes on this candidate"
+  },
+  {
+    "packet": "DA-003",
+    "state": "GREEN",
+    "ledger_ref": "program-manifest.md order 8 `COMPLETE / ACCEPTED_LOCAL_FAIL_CLOSED_BACKUP`; acceptance recorded in docs/plans/finish-up/execution-ledger.md / docs/plans/current-candidate-truth-ledger.md; re-verified by FR-002 gate lanes on this candidate"
+  },
+  {
+    "packet": "DA-004",
+    "state": "GREEN",
+    "ledger_ref": "program-manifest.md order 9 `COMPLETE / ACCEPTED_DB_SECURITY_REVIEWED`; acceptance recorded in docs/plans/finish-up/execution-ledger.md / docs/plans/current-candidate-truth-ledger.md; re-verified by FR-002 gate lanes on this candidate"
+  },
+  {
+    "packet": "DA-004V",
+    "state": "ACCEPTED_EXCEPTION",
+    "ledger_ref": "program-manifest.md order 8a `COMPLETE / EXCLUSION_ENFORCED_GATE_ACCEPTED`; acceptance recorded in docs/plans/finish-up/execution-ledger.md / docs/plans/current-candidate-truth-ledger.md; re-verified by FR-002 gate lanes on this candidate"
+  },
+  {
+    "packet": "DA-005",
+    "state": "GREEN",
+    "ledger_ref": "program-manifest.md order 10 `COMPLETE / ACCEPTED_DB_ATOMICITY_REVIEWED`; acceptance recorded in docs/plans/finish-up/execution-ledger.md / docs/plans/current-candidate-truth-ledger.md; re-verified by FR-002 gate lanes on this candidate"
+  },
+  {
+    "packet": "DA-006A",
+    "state": "GREEN",
+    "ledger_ref": "program-manifest.md order 11 `COMPLETE / ACCEPTED_DB_SECURITY_REVIEWED`; acceptance recorded in docs/plans/finish-up/execution-ledger.md / docs/plans/current-candidate-truth-ledger.md; re-verified by FR-002 gate lanes on this candidate"
+  },
+  {
+    "packet": "DA-007",
+    "state": "GREEN",
+    "ledger_ref": "program-manifest.md order 13 `COMPLETE / ACCEPTED_SINGLE_NODE`; acceptance recorded in docs/plans/finish-up/execution-ledger.md / docs/plans/current-candidate-truth-ledger.md; re-verified by FR-002 gate lanes on this candidate"
+  },
+  {
+    "packet": "DA-008A",
+    "state": "GREEN",
+    "ledger_ref": "program-manifest.md order 13a `COMPLETE / ACCEPTED_DB_SECURITY_REVIEWED`; acceptance recorded in docs/plans/finish-up/execution-ledger.md / docs/plans/current-candidate-truth-ledger.md; re-verified by FR-002 gate lanes on this candidate"
+  },
+  {
+    "packet": "EV-001",
+    "state": "GREEN",
+    "ledger_ref": "program-manifest.md order 14 `COMPLETE / ACCEPTED_BOUNDED_HARNESS`; acceptance recorded in docs/plans/finish-up/execution-ledger.md / docs/plans/current-candidate-truth-ledger.md; re-verified by FR-002 gate lanes on this candidate"
+  },
+  {
+    "packet": "EV-002",
+    "state": "GREEN",
+    "ledger_ref": "program-manifest.md order 15 `COMPLETE / ACCEPTED_BOUNDED_HARNESS`; acceptance recorded in docs/plans/finish-up/execution-ledger.md / docs/plans/current-candidate-truth-ledger.md; re-verified by FR-002 gate lanes on this candidate"
+  },
+  {
+    "packet": "EV-003",
+    "state": "GREEN",
+    "ledger_ref": "program-manifest.md order 16 `COMPLETE / ACCEPTED_NATIVE_SCRIPT`; acceptance recorded in docs/plans/finish-up/execution-ledger.md / docs/plans/current-candidate-truth-ledger.md; re-verified by FR-002 gate lanes on this candidate"
+  },
+  {
+    "packet": "EV-004",
+    "state": "GREEN",
+    "ledger_ref": "program-manifest.md order 17 `COMPLETE / ACCEPTED_BOUNDED_HARNESS`; acceptance recorded in docs/plans/finish-up/execution-ledger.md / docs/plans/current-candidate-truth-ledger.md; re-verified by FR-002 gate lanes on this candidate"
+  },
+  {
+    "packet": "EV-005",
+    "state": "GREEN",
+    "ledger_ref": "program-manifest.md order 18 `COMPLETE / ACCEPTED_BOUNDED_BUNDLE`; acceptance recorded in docs/plans/finish-up/execution-ledger.md / docs/plans/current-candidate-truth-ledger.md; re-verified by FR-002 gate lanes on this candidate"
+  },
+  {
+    "packet": "EV-006",
+    "state": "GREEN",
+    "ledger_ref": "program-manifest.md order 19 `COMPLETE / HISTORICAL_ENTRYPOINT_ENFORCED`; acceptance recorded in docs/plans/finish-up/execution-ledger.md / docs/plans/current-candidate-truth-ledger.md; re-verified by FR-002 gate lanes on this candidate"
+  },
+  {
+    "packet": "F-001",
+    "state": "GREEN",
+    "ledger_ref": "program-manifest.md order 1 `COMPLETE / ACCEPTED_SOURCE_BACKED_LEDGER`; acceptance recorded in docs/plans/finish-up/execution-ledger.md / docs/plans/current-candidate-truth-ledger.md; re-verified by FR-002 gate lanes on this candidate"
+  },
+  {
+    "packet": "F-002",
+    "state": "GREEN",
+    "ledger_ref": "program-manifest.md order 2 `COMPLETE / OWNER_APPROVED_POLICY_DECISION`; acceptance recorded in docs/plans/finish-up/execution-ledger.md / docs/plans/current-candidate-truth-ledger.md; re-verified by FR-002 gate lanes on this candidate"
+  },
+  {
+    "packet": "FR-001",
+    "state": "GREEN",
+    "ledger_ref": "program-manifest.md order 36 `COMPLETE / ACCEPTED_DOCS_RECONCILED_20260923`; acceptance recorded in docs/plans/finish-up/execution-ledger.md / docs/plans/current-candidate-truth-ledger.md; re-verified by FR-002 gate lanes on this candidate"
+  },
+  {
+    "packet": "OP-003",
+    "state": "GREEN",
+    "ledger_ref": "program-manifest.md order 27; accepted by records/native.json (this campaign, native_linux lane)"
+  },
+  {
+    "packet": "OP-005",
+    "state": "GREEN",
+    "ledger_ref": "program-manifest.md order 29; accepted by records/recovery.json (this campaign, recovery lane)"
+  },
+  {
+    "packet": "QR-001",
+    "state": "GREEN",
+    "ledger_ref": "program-manifest.md order 31; accepted by records/soak.json (this campaign, soak lane)"
+  },
+  {
+    "packet": "QR-003",
+    "state": "GREEN",
+    "ledger_ref": "program-manifest.md order 33 `COMPLETE / ACCEPTED_CONTRACT_GATE`; acceptance recorded in docs/plans/finish-up/execution-ledger.md / docs/plans/current-candidate-truth-ledger.md; re-verified by FR-002 gate lanes on this candidate"
+  },
+  {
+    "packet": "QR-005",
+    "state": "GREEN",
+    "ledger_ref": "program-manifest.md order 35 `COMPLETE / ACCEPTED_PINNED_INPUTS_SECURITY_REVIEWED`; acceptance recorded in docs/plans/finish-up/execution-ledger.md / docs/plans/current-candidate-truth-ledger.md; re-verified by FR-002 gate lanes on this candidate"
+  },
+  {
+    "packet": "RT-001",
+    "state": "GREEN",
+    "ledger_ref": "program-manifest.md order 3 `COMPLETE / ACCEPTED_BOUNDED_REBINDING`; acceptance recorded in docs/plans/finish-up/execution-ledger.md / docs/plans/current-candidate-truth-ledger.md; re-verified by FR-002 gate lanes on this candidate"
+  },
+  {
+    "packet": "RT-002",
+    "state": "GREEN",
+    "ledger_ref": "program-manifest.md order 4 `COMPLETE / ACCEPTED_DISCONNECT_REPLAY_DELIVERY`; acceptance recorded in docs/plans/finish-up/execution-ledger.md / docs/plans/current-candidate-truth-ledger.md; re-verified by FR-002 gate lanes on this candidate"
+  },
+  {
+    "packet": "RT-003",
+    "state": "GREEN",
+    "ledger_ref": "program-manifest.md order 5 `COMPLETE / ACCEPTED_HERMETIC_RECOVERY`; acceptance recorded in docs/plans/finish-up/execution-ledger.md / docs/plans/current-candidate-truth-ledger.md; re-verified by FR-002 gate lanes on this candidate"
+  }
+]

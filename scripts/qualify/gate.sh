@@ -46,6 +46,7 @@ QUAL_IMG_TAG="${PREFIX}qualify"
 
 cleanup() {
   docker rm -f "$PG" >/dev/null 2>&1 || true
+  [[ $NET == "$PREFIX"* ]] && docker network rm "$NET" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 

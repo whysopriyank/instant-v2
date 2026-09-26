@@ -7,7 +7,7 @@ ENV GOTOOLCHAIN=local
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    jq make git procps postgresql-client ca-certificates \
+    jq make git procps postgresql-client postgresql ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
 # F2 (QH-001 R1): the container runs as root over a host-uid checkout, so Go
@@ -35,5 +35,8 @@ RUN curl -fsSLo ripgrep.tar.gz https://github.com/BurntSushi/ripgrep/releases/do
 # several suites assert permission denials that root bypasses, and CI runs
 # as a non-root user. Caches live under /tmp so any uid can write them;
 # GOMODCACHE is fixed because untrimmed binaries embed module paths.
+# initdb/pg_ctl on PATH: cmd/chaos tests need a throwaway cluster, and the
+# gate's owned-DB lane rejects any skipped test.
+ENV PATH=/usr/lib/postgresql/15/bin:$PATH
 ENV HOME=/tmp/home GOCACHE=/tmp/gocache GOMODCACHE=/tmp/gomod GOLANGCI_LINT_CACHE=/tmp/golangci
 WORKDIR /src

@@ -41,8 +41,9 @@ func runNative(args []string) int {
 	}
 	started := time.Now().UTC()
 	var (
-		stream io.Reader
-		raw    []byte
+		stream         io.Reader
+		raw            []byte
+		hermeticFailed int
 	)
 	switch {
 	case *doRun:
@@ -54,8 +55,16 @@ func runNative(args []string) int {
 		if err != nil {
 			return failLane(*out, "OP-003", started, map[string]any{"error": err.Error()}, nil)
 		}
+		// Counts come from the owned-DB run only (the gate's test-integration
+		// lane, zero skips allowed); the -short pass legitimately skips
+		// reporting tests, so it contributes failures only.
+		hermOutcomes, _, err := parseGoTestJSON(bytes.NewReader(hermetic))
+		if err != nil {
+			return failLane(*out, "OP-003", started, map[string]any{"error": "hermetic stream: " + err.Error()}, nil)
+		}
+		_, hermeticFailed, _ = countOutcomes(hermOutcomes)
 		raw = append(full, hermetic...)
-		stream = bytes.NewReader(raw)
+		stream = bytes.NewReader(full)
 		if *rawLog != "" {
 			if err := os.WriteFile(*rawLog, raw, 0o600); err != nil {
 				fmt.Fprintln(os.Stderr, "native:", err)
@@ -80,13 +89,14 @@ func runNative(args []string) int {
 		fmt.Fprintln(os.Stderr, "native:", err)
 		return 1
 	}
-	return writeNativeResult(*out, outcomes, started, time.Now().UTC(), raw)
+	return writeNativeResult(*out, outcomes, started, time.Now().UTC(), hermeticFailed)
 }
 
 // writeNativeResult folds parsed outcomes into the OP-003 lane verdict.
 // Exported from runNative for hermetic unit tests.
-func writeNativeResult(out string, outcomes []testOutcome, started, finished time.Time, _ []byte) int {
+func writeNativeResult(out string, outcomes []testOutcome, started, finished time.Time, hermeticFailed int) int {
 	passed, failed, skipped := countOutcomes(outcomes)
+	failed += hermeticFailed
 	plat, platOK := checkPlatformCoverage(outcomes)
 	native := isNativePlatform()
 	result := "PASS"
