@@ -2275,3 +2275,40 @@ Harness/workload corrections (coordinator, small):
 Other rehearsal results on bigbeast (candidate e14f36f): build deterministic
 and identical across bigbeast/cutiewhy; native PASS (1881 tests, 0 skip, 77
 platform checks); recovery PASS 7/7 with real preconditions.
+
+## RT-004 WS fan-out head-of-line blocking + keepalive lock inversion (2026-09-26)
+
+Opened by the QR-001 rehearsal (see "QR-001 rehearsal findings"). Contract:
+`contracts/rt004-ws-fanout-hol.md`. Implementation: OpenCode (Muse Spark 1.3,
+xhigh). Review + repairs: coordinator.
+
+Diagnosis evidence: SIGQUIT goroutine dump of the candidate at the moment
+delivery froze (cutiewhy rh7, 06:59:04Z, writes still advancing): the single
+notifier `drainPass → dispatchGroup → SendRaw` waited on one session's
+`writeMu`; that session's read loop also waited on `writeMu` (reply send);
+the holder was that session's keepalive, parked in `coder/websocket
+(*Conn).ping` waiting for a pong that only a Read can process (500 conns,
+499 readers). Lock inversion → per-session deadlock until ping timeout →
+global refresh stall behind the sequential fan-out.
+
+| Row | Result | Evidence |
+|---|---|---|
+| R1 red first | GREEN | `TestWSFanoutStuckMemberDoesNotStallGroup` on unchanged code: healthy members stalled ~10.16 s (wsWriteTimeout) every round |
+| R2 per-session queue | GREEN | bounded queue (128, SSE parity) + single writer; all frames via queue; generation lease at write (RT-001f) |
+| R3 overflow policy | GREEN | 1013 close, Warn log, `instant_ws_overflow_closes_total` |
+| R4 accepted semantics | GREEN | all existing internal/sync + cmd/instantd tests pass unchanged on Linux owned-DB |
+| R5 tests | GREEN | ordering, revoke-drop, overflow, writer exit; 20× and 30× -race |
+
+Coordinator review repairs (small, direct):
+- keepalive no longer holds `writeMu` across `conn.Ping` (library serializes
+  frame writes; Ping needs a concurrent Read for the pong) — the deadlock's
+  precondition.
+- terminal-frame flush replaced (`len(queue)==0` raced the in-flight write:
+  `TestWSTeardownOnCapBreachClose` failed on Linux) with a writer-released
+  flush barrier + writer-exit signal; 30× -race on Linux green.
+- lint: dead `current`/`overflowed`/`prevStuck` stores removed.
+Linux raw (bigbeast, qualification image, non-root, postgres:17): `make lint`
+0 issues; `make test-unit` 0; `make test-integration` 0; RT-004 tests 20× and
+30× -race ok. Residual (accepted, SSE parity): a guarded add-query-ok
+superseded between check and write is dropped; the client then receives the
+re-gated refresh rather than the ack.

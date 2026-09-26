@@ -65,6 +65,15 @@ var NotifierSheds = prometheus.NewCounter(prometheus.CounterOpts{
 	Help:      "Transacts shed by the notifier backpressure gate.",
 })
 
+// WSOverflowCloses counts WS sessions shed after their per-session outbound
+// queue filled (RT-004): a slow reader is closed with 1013 so it reconnects
+// from a full snapshot instead of stalling its query group.
+var WSOverflowCloses = prometheus.NewCounter(prometheus.CounterOpts{
+	Namespace: "instant",
+	Name:      "ws_overflow_closes_total",
+	Help:      "WS sessions closed after the per-session outbound queue overflowed.",
+})
+
 // TransactDuration observes end-to-end transact handling per plane
 // (runtime HTTP/WS, admin API): parse -> resolve -> commit -> notify.
 var TransactDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
@@ -105,7 +114,7 @@ var BusMalformed = prometheus.NewCounter(prometheus.CounterOpts{
 func init() {
 	Registry.MustRegister(RefreshFrames, FanoutBytes, Refreshes,
 		NotifierSheds, TransactDuration, RateLimitRejections,
-		BusPublishErrors, BusEventsReceived, BusMalformed)
+		BusPublishErrors, BusEventsReceived, BusMalformed, WSOverflowCloses)
 }
 
 // fnCollector emits gauge series computed at scrape time — no polling
