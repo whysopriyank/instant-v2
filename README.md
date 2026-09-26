@@ -69,7 +69,9 @@ committed and refreshed, none dropped). This is an **alpha** acceptance for
 testing only; it is not a v1-production-ready claim, and nothing has been
 tagged, published, or deployed. See
 [`docs/plans/finish-up/program-manifest.md`](docs/plans/finish-up/program-manifest.md)
-and [`docs/reference/release-envelope.md`](docs/reference/release-envelope.md).
+and [`docs/reference/release-envelope.md`](docs/reference/release-envelope.md);
+the evidence copies and their hashes are registered in
+[`docs/plans/finish-up/evidence-alpha-20260926f.md`](docs/plans/finish-up/evidence-alpha-20260926f.md).
 
 The first release is an explicit single-node alpha (DEC-001): no
 production-readiness, provider-verified OAuth/email, v1-parity, container

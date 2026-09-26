@@ -2515,7 +2515,8 @@ then `test-release-contract` failed 42/2: inside the real gate
 - Coordinator evidence review: record identities agree (campaign, candidate,
   binary); per-outcome recovery artifacts inspected; host left with no
   `iv2q-*` containers/networks or bound campaign ports. Evidence retained on
-  the host at `~/iv2q-alpha-20260926f/work/evidence` (49 MB, not committed).
+  the host at `~/iv2q-alpha-20260926f/work/evidence` (49 MB, not committed);
+  copies, hashes and verification: `evidence-alpha-20260926f.md`.
 - Scope: alpha only. Not claimed: providers (DA-006B/008B), v1 parity
   (CF-004/005), container (OP-004), restore drill (OP-006), performance
   (QR-002), publish/sign (QR-004), publication/canary (FR-003/004).
