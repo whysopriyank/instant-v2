@@ -717,7 +717,7 @@ func mcPostRaw(ctx context.Context, baseURL, app, sessionID, token string, name 
 	if err != nil {
 		return 0, "", "", fmt.Errorf("subscriber %s: post failed", name)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return 0, "", "", fmt.Errorf("subscriber %s: post body unreadable", name)

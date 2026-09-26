@@ -168,7 +168,6 @@ func TestCF003AssembledTransactionTransportMatrix(t *testing.T) {
 	if sseCardTx <= sseTx {
 		t.Fatalf("SSE cardinality tx %v did not advance past SSE tx %v", sseCardTx, sseTx)
 	}
-	sseTx = sseCardTx
 	exactTitle("sse-card-last")
 
 	sseGet.closeAndAwaitUnauthorized(t, ctx)

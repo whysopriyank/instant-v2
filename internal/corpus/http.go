@@ -110,7 +110,7 @@ func CaptureHTTP(ctx context.Context, client *http.Client, baseURL string, req H
 	if err != nil {
 		return HTTPExchange{}, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, err := readBounded(resp.Body, opts.maxBody())
 	if err != nil {
 		return HTTPExchange{}, fmt.Errorf("capture response body: %w", err)
@@ -419,7 +419,7 @@ func CaptureSSEWithOptions(ctx context.Context, client *http.Client, baseURL str
 		res.Err = fmt.Errorf("SSE GET: %w", err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	res.Connect = HTTPExchange{
 		Request:    HTTPRequest{Method: http.MethodGet, Target: relativeTarget(getURL, baseURL), Headers: getReq.Header.Clone(), Body: append([]byte(nil), connect.Body...)},
 		Response:   HTTPResponse{Status: resp.StatusCode, Headers: resp.Header.Clone()},
@@ -534,7 +534,7 @@ func ReplaySSE(ctx context.Context, client *http.Client, baseURL string, scenari
 		res.Err = fmt.Errorf("SSE GET: %w", err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	res.Connect = HTTPExchange{
 		Request: HTTPRequest{
 			Method:  http.MethodGet,
@@ -988,10 +988,11 @@ func ValidateScenarioID(id string) error {
 		return fmt.Errorf("invalid scenario id %q", id)
 	}
 	for i, c := range id {
-		if i == 0 && !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+		alphaNum := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+		if i == 0 && !alphaNum {
 			return fmt.Errorf("invalid scenario id %q", id)
 		}
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.') {
+		if !alphaNum && c != '_' && c != '-' && c != '.' {
 			return fmt.Errorf("invalid scenario id %q", id)
 		}
 	}

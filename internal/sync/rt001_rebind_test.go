@@ -753,8 +753,7 @@ func TestSupersededGenerationDrops(t *testing.T) {
 	var calls atomic.Int64
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	var mgr *syncpkg.Manager
-	mgr = syncpkg.NewManager(syncpkg.Deps{
+	mgr := syncpkg.NewManager(syncpkg.Deps{
 		Rules: func(ctx context.Context, appID string) (*perms.RuleDoc, error) {
 			if calls.Add(1) == 1 {
 				d, e := cats.RuleDocFor(ctx, appID)

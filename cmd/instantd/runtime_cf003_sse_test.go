@@ -123,7 +123,7 @@ func TestCF003AssembledSSERefreshAndReconnect(t *testing.T) {
 	}
 
 	resp2, scanner2, sessionID2, token2 := connect()
-	defer resp2.Body.Close()
+	defer func() { _ = resp2.Body.Close() }()
 	if sessionID2 == sessionID || token2 == token {
 		t.Fatalf("reconnect reused credentials: session=%q token=%q", sessionID2, token2)
 	}

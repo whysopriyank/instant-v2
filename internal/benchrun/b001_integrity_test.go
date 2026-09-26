@@ -369,22 +369,6 @@ func TestOfflineReportRejectsLiveCollectorAndNetworkProvenanceFailuresPairAndTri
 	})
 }
 
-func mutateRunJSON(t *testing.T, runPath string, mutate func(*Run)) {
-	t.Helper()
-	b, err := os.ReadFile(filepath.Join(runPath, "run.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var run Run
-	if err := json.Unmarshal(b, &run); err != nil {
-		t.Fatal(err)
-	}
-	mutate(&run)
-	if err := os.WriteFile(filepath.Join(runPath, "run.json"), mustJSON(run), 0600); err != nil {
-		t.Fatal(err)
-	}
-}
-
 type b001SerializationFailure struct{}
 
 func (b001SerializationFailure) MarshalJSON() ([]byte, error) {

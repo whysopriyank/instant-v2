@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -351,15 +350,4 @@ func readPostmasterIdentity(pgData string, expected os.FileInfo) (postmasterProc
 		return postmasterProcessIdentity{}, err
 	}
 	return readPostmasterIdentityDescriptor(target, expected)
-}
-
-func pidOfPostmaster(pgData string, expected os.FileInfo) (string, error) {
-	ident, err := readPostmasterIdentity(pgData, expected)
-	if err != nil {
-		return "", err
-	}
-	if ident.PID <= 0 {
-		return "", nil
-	}
-	return strconv.Itoa(ident.PID), nil
 }

@@ -125,7 +125,7 @@ func TestCopyTriplesUniqueConflictRollsBack(t *testing.T) {
 	db := testDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	appID, cat, ids := seedCatalog(t, db)
+	appID, _, ids := seedCatalog(t, db)
 	baseline, contenderA, contenderB := rand16(), rand16(), rand16()
 	var uniqueMany platform.Attr
 	if err := db.WithTx(ctx, func(tx pgx.Tx) error {

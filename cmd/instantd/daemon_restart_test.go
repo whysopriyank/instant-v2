@@ -164,14 +164,10 @@ func da001WaitHealth(t *testing.T, addr string, wantUp bool) {
 			// Connection refused counts as down only after the process
 			// has exited; callers confirm exit separately. Keep polling
 			// briefly so a slow shutdown is not mistaken for lingering.
-			select {
-			case <-time.After(100 * time.Millisecond):
-				continue
-			}
+			<-time.After(100 * time.Millisecond)
+			continue
 		}
-		select {
-		case <-time.After(100 * time.Millisecond):
-		}
+		<-time.After(100 * time.Millisecond)
 		// For wantUp=false the loop exits via deadline with failure; the
 		// caller asserts port-down separately after confirming exit.
 		if !wantUp {

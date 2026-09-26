@@ -20,7 +20,7 @@ import (
 func TestQueryServerCreatedAtOrdersByIDTripleTimestamp(t *testing.T) {
 	db := qdb(t)
 	ctx := context.Background()
-	appID, cat, ids := qseed(t, db)
+	appID, _, ids := qseed(t, db)
 	// qseed provisions only the fields needed by the general query tests. The
 	// production high-level transactor always creates the implicit id attr, so
 	// add that contract fixture explicitly here before testing its timestamp.

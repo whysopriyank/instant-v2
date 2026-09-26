@@ -87,7 +87,7 @@ func TestDiskBackendPutSurvivesReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open after reopen: %v", err)
 	}
-	defer obj.Body.Close()
+	defer func() { _ = obj.Body.Close() }()
 	got := new(bytes.Buffer)
 	if _, err := got.ReadFrom(obj.Body); err != nil {
 		t.Fatalf("read back: %v", err)
@@ -117,7 +117,7 @@ func TestDiskBackendFirstUploadPersistsNamespace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open after reopen: %v", err)
 	}
-	defer obj.Body.Close()
+	defer func() { _ = obj.Body.Close() }()
 	got := new(bytes.Buffer)
 	if _, err := got.ReadFrom(obj.Body); err != nil {
 		t.Fatalf("read back: %v", err)
@@ -159,7 +159,7 @@ func TestDiskBackendConcurrentFirstUploads(t *testing.T) {
 		}
 		got := new(bytes.Buffer)
 		_, rerr := got.ReadFrom(obj.Body)
-		obj.Body.Close()
+		_ = obj.Body.Close()
 		if rerr != nil || got.String() != fmt.Sprintf("payload-%d", i) {
 			t.Fatalf("object %d mismatch: %q, err %v", i, got.String(), rerr)
 		}

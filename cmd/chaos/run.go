@@ -212,7 +212,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("start instantd candidate: %w", err)
 	}
-	defer stopInstantd(p1)
+	defer func() { _ = stopInstantd(p1) }()
 	if err := waitHealth(baseURL, 30*time.Second, true); err != nil {
 		return err
 	}
@@ -339,7 +339,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("start recovery instantd: %w", err)
 	}
-	defer stopInstantd(p2)
+	defer func() { _ = stopInstantd(p2) }()
 	if err := waitHealth(baseURL, 45*time.Second, true); err != nil {
 		return err
 	}

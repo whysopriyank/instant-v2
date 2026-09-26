@@ -243,7 +243,9 @@ func TestDispatchTreeSingleEncodeParity(t *testing.T) {
 		ResultJSON:    json.RawMessage(`{"data":{"todos":[]},"page-info":{"hasNextPage":false}}`),
 		ProcessedTxID: 7,
 	}
-	mgr.dispatchGroup(g, fr)
+	if err := mgr.dispatchGroup(g, fr); err != nil {
+		t.Fatal(err)
+	}
 	if got == nil {
 		t.Fatal("no frame delivered")
 	}

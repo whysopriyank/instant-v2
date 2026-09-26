@@ -2,7 +2,6 @@ package transact_test
 
 import (
 	"context"
-	"os"
 	"testing"
 
 	"github.com/instant-v2/instant-v2/internal/perms"
@@ -64,10 +63,7 @@ func TestEvaluatePermissionsRollsBackJournalAndTriples(t *testing.T) {
 }
 
 func TestEvaluatePermissionsNilRuleDocAdminParity(t *testing.T) {
-	if os.Getenv("DATABASE_URL") == "" {
-		t.Skip("integration test: set DATABASE_URL")
-	}
-	db := testDB(t)
+	db := testDB(t) // testkit.NewPostgres skips without an owned database
 	ctx := context.Background()
 	appID, cat, ids := seed(t, db)
 	eid := uuidStr(rand16())

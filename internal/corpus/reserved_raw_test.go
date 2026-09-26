@@ -21,7 +21,7 @@ func TestWriteRawEvidenceRoundTripWriteOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reserved.Close()
+	defer func() { _ = reserved.Close() }()
 
 	payload := []byte("{\"subscriber\":\"query-A\",\"seq\":0,\"frame\":{\"op\":\"init-ok\"}}\n")
 	if err := reserved.WriteRawEvidence("fu01-query-a.ndjson", payload); err != nil {
@@ -63,7 +63,7 @@ func TestWriteRawEvidencePostVerificationSwapFailsClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reserve: %v", err)
 	}
-	defer reserved.Close()
+	defer func() { _ = reserved.Close() }()
 
 	canary := []byte("{\"v\":1}\n")
 	if err := reserved.WriteRawEvidence("canary.json", canary); err != nil {
@@ -157,7 +157,7 @@ func TestWriteRawEvidenceInjectedFailuresNoFinalArtifact(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer reserved.Close()
+		defer func() { _ = reserved.Close() }()
 		err = writeRawEvidenceInDir(reserved, "evidence.ndjson", payload, writeHooks{
 			beforeDirSync: func() error { return injectedErr },
 		})
@@ -179,6 +179,6 @@ func writeEvidenceWithHooksRaw(t *testing.T, dir, targetFile string, payload []b
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reserved.Close()
+	defer func() { _ = reserved.Close() }()
 	return writeRawEvidenceInDir(reserved, filepath.Base(targetFile), payload, hooks)
 }

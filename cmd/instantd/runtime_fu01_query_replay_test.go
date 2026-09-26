@@ -321,7 +321,7 @@ func TestFU01QueryCaptureReplay(t *testing.T) {
 				results[i] = postResult{err: err}
 				return
 			}
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			raw, err := io.ReadAll(resp.Body)
 			if err != nil {
 				results[i] = postResult{err: err}

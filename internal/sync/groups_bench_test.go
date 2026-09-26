@@ -60,7 +60,9 @@ func BenchmarkGroupDispatchFanout(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		sent = 0
-		mgr.dispatchGroup(g, fr)
+		if err := mgr.dispatchGroup(g, fr); err != nil {
+			b.Fatal(err)
+		}
 		if sent != members {
 			b.Fatalf("delivered %d/%d", sent, members)
 		}
@@ -163,7 +165,9 @@ func BenchmarkGroupDispatchFanoutCatalog(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		sent = 0
-		mgr.dispatchGroup(g, fr)
+		if err := mgr.dispatchGroup(g, fr); err != nil {
+			b.Fatal(err)
+		}
 		if sent != members {
 			b.Fatalf("delivered %d/%d", sent, members)
 		}

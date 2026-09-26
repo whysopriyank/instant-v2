@@ -119,7 +119,6 @@ func pageEntities(entities []entity, o *Options, etype string, sqlPaged bool, or
 	if o == nil {
 		return entities, false, false, nil
 	}
-	slice = entities
 	if sqlPaged {
 		// The SQL fast path already applied the ID order, offset, and fetched
 		// one sentinel row for the positive limit. Only trim that sentinel;

@@ -11,7 +11,6 @@ import (
 )
 
 func TestDetachMemberDoubleDetachDecrementsOnce(t *testing.T) {
-	mgr := NewManager(Deps{})
 	const appID = "app-acct"
 	s1 := &Session{ID: "s1", AppID: appID, Subs: map[string]bool{}}
 	s2 := &Session{ID: "s2", AppID: appID, Subs: map[string]bool{}}
@@ -54,7 +53,6 @@ func TestDetachMemberDoubleDetachDecrementsOnce(t *testing.T) {
 }
 
 func TestDetachMemberConcurrentFailMemberDetachAllRaceClean(t *testing.T) {
-	mgr := NewManager(Deps{})
 	const appID = "app-race"
 	s1 := &Session{ID: "s1", AppID: appID, Subs: map[string]bool{}}
 	s2 := &Session{ID: "s2", AppID: appID, Subs: map[string]bool{}}

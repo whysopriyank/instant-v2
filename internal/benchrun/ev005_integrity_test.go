@@ -18,49 +18,6 @@ func failedMeasurement(unit string) Measurement {
 	return Measurement{Status: StatusFailed, Unit: unit, Error: "injected measurement failure"}
 }
 
-type injectedDBCollector struct {
-	failBefore bool
-	failAfter  bool
-	err        error
-	version    string
-}
-
-func (c *injectedDBCollector) Before(ctx context.Context) (DBSnapshot, error) {
-	if c.failBefore {
-		err := c.err
-		if err == nil {
-			err = errors.New("injected db before failure")
-		}
-		return failedDBSnapshot(err.Error()), err
-	}
-	v := c.version
-	if v == "" {
-		v = "17.0"
-	}
-	s := syntheticDBSnapshot(time.Now().UTC())
-	s.Version = v
-	return s, nil
-}
-
-func (c *injectedDBCollector) After(ctx context.Context) (DBSnapshot, error) {
-	if c.failAfter {
-		err := c.err
-		if err == nil {
-			err = errors.New("injected db after failure")
-		}
-		return failedDBSnapshot(err.Error()), err
-	}
-	v := c.version
-	if v == "" {
-		v = "17.0"
-	}
-	s := syntheticDBSnapshot(time.Now().UTC())
-	s.Version = v
-	return s, nil
-}
-
-func (c *injectedDBCollector) Close() error { return nil }
-
 type dbFailingExecutor struct {
 	failBefore  bool
 	failAfter   bool
@@ -579,7 +536,7 @@ func TestEV005AtomicChecksumsInterruptionAndPermission(t *testing.T) {
 
 	// Make root read-only to simulate permission failure when creating checksums
 	if err := os.Chmod(root, 0o555); err == nil {
-		defer os.Chmod(root, 0o755)
+		defer func() { _ = os.Chmod(root, 0o755) }()
 		if err := BuildChecksums(root); err == nil {
 			t.Fatal("BuildChecksums succeeded in read-only directory")
 		}

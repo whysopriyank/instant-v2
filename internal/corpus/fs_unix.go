@@ -248,7 +248,7 @@ func checkFreshOutputDirPlatform(dir string) error {
 	}
 
 	parentFD := currFD
-	defer unix.Close(parentFD)
+	defer func() { _ = unix.Close(parentFD) }()
 	targetBase := components[n-1]
 
 	var targetSt unix.Stat_t
@@ -441,7 +441,7 @@ func writeEvidenceWithHooks(path string, value any, hooks writeHooks) error {
 	if err != nil {
 		return err
 	}
-	defer reserved.Close()
+	defer func() { _ = reserved.Close() }()
 
 	return writeEvidenceInDir(reserved, base, value, hooks)
 }

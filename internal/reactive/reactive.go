@@ -764,10 +764,6 @@ func (n *Notifier) drainPass(ctx context.Context, log *slog.Logger) bool {
 	return true
 }
 
-func (n *Notifier) refreshOne(ctx context.Context, log *slog.Logger, id string, txID int64, changes []Change) {
-	n.refreshOneAttempt(ctx, log, id, txID, changes, 0)
-}
-
 func (n *Notifier) refreshOneAttempt(ctx context.Context, log *slog.Logger, id string, txID int64, changes []Change, failures int) {
 	// Covers requery/splice + the synchronous Emit → group fanout, so one
 	// waterfall span shows query cost and per-member dispatch together.

@@ -3,6 +3,10 @@ SHELL := bash
 .SHELLFLAGS := -eu -o pipefail -c
 
 GO      ?= go
+# GNU make 4.x predefines LINT=lint, which defeats ?=; replace only that default.
+ifeq ($(origin LINT),default)
+LINT    := golangci-lint
+endif
 LINT    ?= golangci-lint
 MIGRATE ?= goose
 

@@ -21,13 +21,6 @@ type NetworkNamespaceProvenance struct {
 	InitialNamespaceID string `json:"initial_network_namespace_id,omitempty"`
 }
 
-// certifyWildcardListener is the runtime entry point used before a process
-// resource sample is accepted. The caller's namespace is intentionally read
-// from /proc/self rather than inferred from a host setting.
-func certifyWildcardListener(pid int, provenance NetworkNamespaceProvenance) error {
-	return certifyWildcardListenerAt(pid, provenance, "/proc", "/proc/self")
-}
-
 // certifyWildcardListenerAt proves the narrow exception for a target that
 // binds 0.0.0.0/::: the collector and target must share the signed namespace,
 // that namespace must differ from the recorded initial namespace, and procfs

@@ -465,7 +465,7 @@ func TestMcQuietWindowBoundAndBehavior(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		sub := &mcSub{name: "Q", resp: resp, app: mcTestApp, baseURL: srv.URL}
 		sub.scanner = mcTestScanner(resp.Body)
 		if err := mcAssertQuiet(sub); err != nil {
@@ -494,7 +494,7 @@ func TestMcQuietWindowBoundAndBehavior(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		sub := &mcSub{name: "Q", resp: resp, app: mcTestApp, baseURL: srv.URL}
 		sub.scanner = mcTestScanner(resp.Body)
 		if err := mcAssertQuiet(sub); err == nil {
@@ -511,7 +511,7 @@ func TestMcQuietWindowBoundAndBehavior(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		sub := &mcSub{name: "Q", resp: resp, app: mcTestApp, baseURL: srv.URL}
 		sub.scanner = mcTestScanner(resp.Body)
 		if err := mcAssertQuiet(sub); err == nil {
@@ -527,7 +527,7 @@ func TestMcNDJSONPublishRoundTripHermetic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reserved.Close()
+	defer func() { _ = reserved.Close() }()
 	pin, err := mcPinOutputDir(reserved.Path())
 	if err != nil {
 		t.Fatal(err)
@@ -1114,7 +1114,7 @@ func mcLegsRunOnce(t *testing.T, root string, iter int) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reserved.Close()
+	defer func() { _ = reserved.Close() }()
 	pin, err := mcPinOutputDir(reserved.Path())
 	if err != nil {
 		t.Fatal(err)
@@ -1225,7 +1225,7 @@ func TestMcPublishRejectsReplacementRace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reserved.Close()
+	defer func() { _ = reserved.Close() }()
 	pin, err := mcPinOutputDir(reserved.Path())
 	if err != nil {
 		t.Fatal(err)
@@ -1283,7 +1283,7 @@ func TestMcPublishFailuresLeaveNoFinal(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer reserved.Close()
+		defer func() { _ = reserved.Close() }()
 		pin, err := mcPinOutputDir(reserved.Path())
 		if err != nil {
 			t.Fatal(err)
@@ -1307,7 +1307,7 @@ func TestMcPublishFailuresLeaveNoFinal(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer reserved.Close()
+		defer func() { _ = reserved.Close() }()
 		pin, err := mcPinOutputDir(reserved.Path())
 		if err != nil {
 			t.Fatal(err)
@@ -1331,7 +1331,7 @@ func TestMcPublishFailuresLeaveNoFinal(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer reserved.Close()
+		defer func() { _ = reserved.Close() }()
 		pin, err := mcPinOutputDir(reserved.Path())
 		if err != nil {
 			t.Fatal(err)
@@ -1453,7 +1453,7 @@ func mcValidDiskFixture(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reserved.Close()
+	defer func() { _ = reserved.Close() }()
 	pin, err := mcPinOutputDir(reserved.Path())
 	if err != nil {
 		t.Fatal(err)

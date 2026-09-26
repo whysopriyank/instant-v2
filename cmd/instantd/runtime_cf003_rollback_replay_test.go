@@ -44,12 +44,6 @@ type rollbackCapture struct {
 	} `json:"exchanges"`
 }
 
-// rollbackOtherEntityID is the fixed losing entity of the accepted assembled
-// leg's second failing step. Fixed UUIDs only: the failing batch collides on
-// the unique todos/id value, and query results project stored fields, so every
-// checked-in leg replays byte-exactly across fresh isolated DBs.
-const rollbackOtherEntityID = "00000000-0000-4000-8000-000000000043"
-
 // rollbackTitleAttrSentinel and rollbackIDAttrSentinel mask the run-minted
 // catalog attr UUIDs in the checked-in failing request body. Attrs are minted
 // crypto-random per isolated DB (observed distinct across fresh runs), so exact

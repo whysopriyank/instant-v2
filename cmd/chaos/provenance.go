@@ -48,18 +48,6 @@ func captureCandidate(repoRoot string) (candidateProvenance, error) {
 	}, nil
 }
 
-func (c candidateProvenance) verify(repoRoot string) error {
-	current, err := captureCandidate(repoRoot)
-	if err != nil {
-		return err
-	}
-	if c.Revision != current.Revision || c.TreeFingerprint != current.TreeFingerprint {
-		return fmt.Errorf("candidate changed (expected %s/%s, got %s/%s)",
-			c.Revision, c.TreeFingerprint, current.Revision, current.TreeFingerprint)
-	}
-	return nil
-}
-
 func gitOutput(repoRoot string, args ...string) (string, error) {
 	b, err := gitOutputBytes(repoRoot, args...)
 	return string(b), err

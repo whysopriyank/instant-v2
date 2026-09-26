@@ -115,7 +115,7 @@ func TestReserveOutputDirDirectorySwapRejection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to reserve output dir: %v", err)
 	}
-	defer reserved.Close()
+	defer func() { _ = reserved.Close() }()
 
 	// Replace the directory on disk to give it a different inode identity
 	if err := os.Remove(outDir); err != nil {
@@ -252,7 +252,7 @@ func TestWriteEvidenceConcurrentWriteOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reserved.Close()
+	defer func() { _ = reserved.Close() }()
 
 	const workers = 10
 	var wg sync.WaitGroup
@@ -381,7 +381,7 @@ func TestWriteEvidenceSwapBeforeTempCreateRejection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to reserve output dir: %v", err)
 	}
-	defer reserved.Close()
+	defer func() { _ = reserved.Close() }()
 
 	otherDir := filepath.Join(temp, "other_dir")
 	if err := os.Mkdir(otherDir, 0700); err != nil {
@@ -430,7 +430,7 @@ func TestWriteEvidenceDirSyncFailureLeavesUntrustedArtifact(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to reserve output dir: %v", err)
 	}
-	defer reserved.Close()
+	defer func() { _ = reserved.Close() }()
 
 	injectedErr := errors.New("simulated dir sync error")
 	hooks := writeHooks{
@@ -458,7 +458,7 @@ func TestWriteEvidenceDirSyncFailureReplacementPreserved(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to reserve output dir: %v", err)
 	}
-	defer reserved.Close()
+	defer func() { _ = reserved.Close() }()
 
 	targetPath := filepath.Join(outDir, "evidence.json")
 	hooks := writeHooks{

@@ -166,10 +166,9 @@ func TestDA001StartupFailureBoundaries(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			addr := "127.0.0.1:0"
 			// Use a real free port so "no route reachable" is a dial
 			// refusal, not a :0 wildcard artifact.
-			addr = "127.0.0.1:" + itoa(da001FreePort(t))
+			addr := "127.0.0.1:" + itoa(da001FreePort(t))
 			code, out := da001RunToExit(t, bin, fixture.DSN, tc.root, tc.secret, addr, nil)
 			if code == 0 {
 				t.Fatalf("bad config %s exited 0; want nonzero\n%s", tc.name, out)

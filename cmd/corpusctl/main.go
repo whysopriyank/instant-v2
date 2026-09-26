@@ -508,7 +508,7 @@ func runRecordHTTPOrSSE(o options, out, diagnostic io.Writer) int {
 	if err != nil {
 		return fail(err)
 	}
-	defer reservedDir.Close()
+	defer func() { _ = reservedDir.Close() }()
 
 	if o.suite != "" && !strings.Contains(filepath.Base(o.corpusDir), o.suite) {
 		return fail(fmt.Errorf("--suite for HTTP/SSE requires the scenario filename to match"))

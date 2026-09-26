@@ -159,5 +159,3 @@ func mustJSON(v any) []byte {
 	b, _ := json.Marshal(v)
 	return b
 }
-
-func mustRaw(s string) json.RawMessage { return json.RawMessage(s) }

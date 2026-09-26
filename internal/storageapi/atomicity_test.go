@@ -114,7 +114,7 @@ func TestDiskBackendPutIfAbsentPreservesExistingObject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open existing object: %v", err)
 	}
-	defer obj.Body.Close()
+	defer func() { _ = obj.Body.Close() }()
 	got, err := io.ReadAll(obj.Body)
 	if err != nil {
 		t.Fatal(err)
@@ -188,8 +188,11 @@ func TestPresignedFilenameCannotBeRetargeted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer obj.Body.Close()
-	got, _ := io.ReadAll(obj.Body)
+	defer func() { _ = obj.Body.Close() }()
+	got, err := io.ReadAll(obj.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !bytes.Equal(got, []byte("signed bytes")) {
 		t.Fatalf("stored bytes = %q, want signed bytes", got)
 	}

@@ -569,7 +569,7 @@ func TestCF003SSERefreshLifecycleCaptureReplay(t *testing.T) {
 	// subscriber, strictly sequential. Fresh credentials are required and
 	// the converged state must carry the refresh title with stable attrs.
 	resp2, scanner2 := connect("conn2", 1)
-	defer resp2.Body.Close()
+	defer func() { _ = resp2.Body.Close() }()
 	hello2 := cf003ReadSSE(t, scanner2)
 	transport2, _ := hello2["session-id"].(string)
 	token2, _ := hello2["sse-token"].(string)

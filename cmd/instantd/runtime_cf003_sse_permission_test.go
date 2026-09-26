@@ -32,7 +32,7 @@ func TestCF003AssembledSSEPermissionLifecycle(t *testing.T) {
 	cf003TransactTitle(t, mux, app, adminToken, "sse-permission-allowed")
 
 	client := cf003OpenSSE(t, ctx, server, app)
-	defer client.resp.Body.Close()
+	defer func() { _ = client.resp.Body.Close() }()
 	client.post(t, ctx, map[string]any{"op": "init", "app-id": app})
 	idAttr, titleAttr := cf003AssertSSEInit(t, cf003ReadSSE(t, client.scanner), app)
 	client.post(t, ctx, map[string]any{

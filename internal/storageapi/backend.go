@@ -73,16 +73,16 @@ func probeWritable(root string) error {
 	name := f.Name()
 	if _, err := f.Write([]byte("ok")); err != nil {
 		f.Close()
-		os.Remove(name)
+		_ = os.Remove(name)
 		return err
 	}
 	if err := f.Sync(); err != nil {
 		f.Close()
-		os.Remove(name)
+		_ = os.Remove(name)
 		return err
 	}
 	if err := f.Close(); err != nil {
-		os.Remove(name)
+		_ = os.Remove(name)
 		return err
 	}
 	if err := os.Remove(name); err != nil {

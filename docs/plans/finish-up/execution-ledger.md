@@ -1845,3 +1845,148 @@ test defects that would fail the FR-002 gate on any clean candidate:
 - `scripts/test-quality-release-gate.sh` "missing database" case inherited
   the lane's real `DATABASE_URL`; now `env -u DATABASE_URL`.
 After fixes: integration lane 32 packages ok, exit 0, zero FAIL.
+
+## LINT-001 close-out (2026-09-26, HEAD 76a0e64 + work below, go1.27.1 darwin/arm64, no commit per contract)
+
+Contract: `docs/plans/finish-up/contracts/lint001-golangci-clean.md`;
+baseline: `docs/plans/finish-up/contracts/lint001-baseline.txt` (69 issues:
+errcheck 46, ineffassign 6, staticcheck 6, unused 11). The coordinator's
+uncommitted `Makefile` LINT fix (keep) is preserved untouched. No
+`.golangci.yml` edit, no `cmd/qualify/**`, `scripts/qualify/**`,
+`corpus/**` touch. Zero `//nolint` added.
+
+### Verification (raw)
+- `gofmt -l .` → empty (exit 0)
+- `CGO_ENABLED=0 go build ./...` → exit 0
+- `CGO_ENABLED=0 go vet ./...` → exit 0
+- `CGO_ENABLED=0 INSTANT_TEST_INTEGRATION=0 DATABASE_URL= TEST_DATABASE_URL= go test ./... -race -count=1 -short` → exit 0, 32 packages `ok`, zero FAIL/SKIP lines beyond `[no test files]`
+- Pinned golangci-lint v2.13.1 darwin-arm64 installed to a temp dir;
+  published sha256 from the release checksums file
+  `0c9818baf6fb8ad26c6d2ef51b68d5a1e260ef07727036b1431647cc44637c7c`
+  matches the downloaded tarball byte-for-byte (verified via
+  `shasum -a 256` before extraction).
+- `golangci-lint run ./...` → `0 issues.` (exit 0);
+  `LINT=<tmpbin> make lint` → `0 issues.` (exit 0)
+- `git diff --stat` → 35 files changed (34 + pre-existing `Makefile`),
+  70 insertions, 168 deletions (see scope audit for the file list)
+
+### Per-linter counts fixed
+- errcheck (46): all `defer X.Close()` sites wrapped as
+  `defer func() { _ = X.Close() }()` (test best-effort cleanup per the
+  contract; production sites below listed individually); `os.Remove`
+  cleanups in `probeWritable` made explicit `_ =`; `dispatchGroup`
+  benchmark/test callers now `Fatal` on error (result matters to the
+  assertion); `io.ReadAll` `_` in `atomicity_test.go:192` now checked
+  via `t.Fatal`.
+- ineffassign (6): `daemon_startup_failure_test.go:169` dead `:0` addr
+  folded into the real-port declaration; `runtime_cf003_transaction_transport_test.go:171`
+  dead final `sseTx = sseCardTx` deleted (no later use; `wsTx = cardTx`
+  kept — live at the SSE-watermark compare); `pagination.go:122`
+  `slice = entities` deleted (every return path sets `slice`: sqlPaged
+  via `pageSlice`, error paths return nil, tail paths assign
+  `entities[lo:hi]`); `copy_test.go:128` / `server_created_at_test.go:23`
+  first `cat` → `_` (overwritten by `LoadAttrCatalog` before any use);
+  `detach_accounting_test.go:14,57` dead `mgr := NewManager(Deps{})`
+  deleted (`testGroup` returns the live manager).
+- staticcheck (6): `daemon_restart_test.go:167,172` two single-case
+  `select` → plain `<-time.After(100 * time.Millisecond)` (first keeps
+  its `continue`); `http.go:991,994` QF1001 De Morgan rewrite —
+  `alphaNum` local, second condition as `!alphaNum && c != '_' &&
+  c != '-' && c != '.'`; `server_created_at_test.go:23` SA4006 fixed
+  by the same `_` edit above; `rt001_rebind_test.go:756` S1021
+  `var mgr` + `mgr =` merged to `mgr :=`.
+- unused (11): every deletion grep-verified repo-wide (incl. scripts
+  and build-tagged files) before removal — `pidOfPostmaster`
+  (`cmd/chaos/postgres.go:356`, sole `strconv` user; import dropped),
+  `candidateProvenance.verify` (`cmd/chaos/provenance.go:51`, zero
+  `.verify(` callers), `rollbackOtherEntityID`
+  (`runtime_cf003_rollback_replay_test.go:51`), `mutateRunJSON`
+  (`b001_integrity_test.go:372`), `injectedDBCollector` type + 3
+  methods (`ev005_integrity_test.go:21,28,45,62`; `dbFailingExecutor`
+  is the live seam), `certifyWildcardListener` linux wrapper only
+  (`network_provenance_linux.go:27`; `...At` kept — used by
+  `collectors_live.go:256` and the linux tests; the other-GOOS stub in
+  `network_provenance_other.go` untouched and still used by
+  `network_provenance_other_test.go`), `(*Notifier).refreshOne`
+  (`reactive.go:767`; `refreshOneAttempt` kept), `mustRaw`
+  (`sync/frame.go:163`). No deletion removed a symbol used on another
+  GOOS. All surrounding imports still used (verified via build + vet).
+
+### Production-code errcheck changes (individual justifications)
+- `cmd/chaos/run.go:215,342` `defer stopInstantd(p1/p2)` →
+  `defer func() { _ = stopInstantd(p1/p2) }()`: deferred cleanup on
+  early-return paths; explicit stops at `:284` (checked, wrapped
+  `stop instantd after outage`) and `:466` (checked) are unchanged, so
+  no control-flow outcome changes. Matches the file's existing
+  `defer func() { _ = os.RemoveAll(...) }()` idiom (`:175,185`).
+- `cmd/corpusctl/main.go:511` `defer reservedDir.Close()` →
+  `defer func() { _ = reservedDir.Close() }()`: reservation-FD release
+  on the record-mode return path; every error return already goes
+  through `fail(err)` with its own cause, so Close noise must not
+  replace it.
+- `cmd/corpusctl/managed_multiclient.go:720`
+  `defer resp.Body.Close()` → wrapped: POST helper already returns a
+  decoded body/status error; Close is transport cleanup only. Matches
+  `internal/corpus/http.go:619` `_ = presp.Body.Close()`.
+- `internal/corpus/fs_unix.go:251` `defer unix.Close(parentFD)` →
+  wrapped: matches the file's own `_ = unix.Close(...)` idiom used on
+  every other path (`:59-61,81,108,...`); check-only helper returns its
+  own verdict errors.
+- `internal/corpus/fs_unix.go:444` `defer reserved.Close()` →
+  wrapped: `writeEvidenceWithHooks` must return the
+  `writeEvidenceInDir` result unchanged; FD release cannot supersede it.
+- `internal/corpus/http.go:113,422,537` three
+  `defer resp.Body.Close()` → wrapped: capture helpers return
+  read/decode errors; Close is cleanup. Same idiom as `:619`.
+- `internal/storageapi/backend.go:76,81,85` bare `os.Remove(name)` →
+  `_ = os.Remove(name)`: `probeWritable` already returns the
+  Write/Sync/Close error on those paths; removal is best-effort probe
+  cleanup and never the returned cause. (`f.Close` sites are
+  `(*os.File).Close`, excluded by `.golangci.yml`.)
+
+### //nolint list
+None (zero added; target met).
+
+### Files touched (35: pre-existing Makefile + 34 packet files)
+`cmd/chaos/{run,postgres,provenance}.go`,
+`cmd/corpusctl/{main,managed_multiclient}.go`,
+`cmd/corpusctl/managed_multiclient_test.go`,
+`cmd/instantd/{daemon_restart_test,daemon_startup_failure_test,runtime_cf003_rollback_replay_test,runtime_cf003_sse_concurrency_test,runtime_cf003_sse_lifecycle_replay_test,runtime_cf003_sse_permission_test,runtime_cf003_sse_test,runtime_cf003_transaction_transport_test,runtime_fu01_capture_contract_test,runtime_fu01_query_replay_test}.go`,
+`internal/benchrun/{b001_integrity_test,ev005_integrity_test,network_provenance_linux}.go`,
+`internal/corpus/{fs_unix,http,http_unix_test,reserved_raw_test}.go`,
+`internal/instaql/{pagination,server_created_at_test}.go`,
+`internal/reactive/reactive.go`, `internal/storage/copy_test.go`,
+`internal/storageapi/{atomicity_test,backend,root_durability_test}.go`,
+`internal/sync/{detach_accounting_test,frame,groups_bench_test,rt001_rebind_test,singleflight_internal_test}.go`.
+
+### Scope audit
+- Pre-existing changes preserved: `Makefile` LINT fix untouched;
+  untracked `contracts/` + `completion-run-20260926.md` untouched; no
+  reset/stash/checkout/clean.
+- No `.golangci.yml` edit, no `//nolint`, no `cmd/qualify/**`,
+  `scripts/qualify/**`, `corpus/**`, or non-ledger docs changes.
+- Behaviour preservation: all edits are error-acknowledgement wraps,
+  dead-store deletions with live-use proof, De Morgan-equivalent
+  rewrites, or deletions of grep-proven-unreferenced symbols; full
+  `-race -short` suite green, vet/build/gofmt clean, linter 0 issues.
+- No commit, push, tag, or remote-host run (per contract; changes left
+  in the working tree). Coordinator re-runs lint on Linux.
+
+### LINT-001 — coordinator review + Linux verification (2026-09-26)
+
+Verdict: ACCEPT. Production hunks reviewed individually: errcheck wraps on
+deferred Close/Remove (best-effort cleanup, no control-flow change), exactly
+equivalent De Morgan rewrite in `ValidateScenarioID`, deletion of repo-wide
+unreferenced `pidOfPostmaster`, `candidateProvenance.verify`,
+`certifyWildcardListener`, `Notifier.refreshOne`, `mustRaw`, and the dead
+`slice = entities` store (every `pageEntities` return path sets `slice`
+explicitly). Coordinator additions in the same commit: Makefile `LINT`
+default fix (GNU make 4.x predefines `LINT=lint`, so `make lint` never ran
+golangci-lint on Linux/CI) and removal of the redundant direct
+`os.Getenv("DATABASE_URL")` guard in
+`internal/transact/permission_eval_test.go` that made the
+`quality-integration.sh` fixture audit fail `make test-integration` on every
+host (testkit.NewPostgres already skips without an owned DB).
+Linux raw (bigbeast, golang:1.25-bookworm@sha256:3b4a…, non-root,
+golangci-lint 2.13.1, postgres:17@sha256:f4c6…): `make lint` 0 issues exit 0;
+`vet` 0; `build` 0; `test-unit` 0; `test-integration` 0; `test-contract` 0.
