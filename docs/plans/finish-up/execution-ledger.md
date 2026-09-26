@@ -2312,3 +2312,97 @@ Linux raw (bigbeast, qualification image, non-root, postgres:17): `make lint`
 30× -race ok. Residual (accepted, SSE parity): a guarded add-query-ok
 superseded between check and write is dropped; the client then receives the
 re-gated refresh rather than the ack.
+# RT-004 handoff (2026-09-26, HEAD 71d8895 + work below, go1.27.1 darwin/arm64, no commit per contract)
+
+Status: COMPLETE
+Candidate: HEAD `71d8895` on `main` + uncommitted work below (no commit per contract)
+Decision/profile: DEC-001-single-node-alpha (RT-004 REQUIRED, phase 02 realtime)
+
+## Ledger
+
+| Row | Result | Evidence | Remaining |
+| R1 PROVEN_RED first | GREEN | `TestWSFanoutStuckMemberDoesNotStallGroup` on UNCHANGED product code FAILs for the HOL reason (see raw failure below); same test GREEN post-fix | None |
+| R2 per-session outbound queue for WS | GREEN | `internal/sync/ws.go`: `wsSendQueueCap=128` (reuses the SSE capacity with documented justification), `runWSWriter` single writer for ALL frame writes, `SendRawGen`/`SendGen` enqueue with generation guard, writer drops superseded at write time via `WithCurrentGeneration` (mirrors `writeSSEEvent`); `wsWriteTimeout` kept on the socket write; keepalive pings serialize on the same `writeMu` | None |
+| R3 overflow policy | GREEN | Full queue → `signalOverflow` (Warn with session id, `instant_ws_overflow_closes_total`), close 1013 "try again later" on both the writer path and `sess.Close` (deterministic either order), member detached → client reconnects from full snapshot | None |
+| R4 preserve RT-001/RT-002 | GREEN | No `groups.go`/`reactive` change; encode still synchronous at enqueue (RT-002b); guarded add-query ack = pre-checks PLUS write-time drop (strictly stronger RT-001d); "served" for WS now = enqueued, identical to SSE; all existing tests pass unchanged (full package + owned-DB lanes) | None |
+| R5 tests | GREEN | R1 green; ordering (transact-ok/refresh-ok/error FIFO); WS revocation-drop mirror of H01f; overflow-1013 with siblings continuity + Warn + metric; writer-exit goroutine-count check; 20× `-race` per below | None |
+
+## Changes
+
+- `internal/sync/ws.go` (+229/−26 with metrics): per-session queue + writer + guards + overflow + bounded flush for terminal replies (`flushOutbound`/`sendErrClose` preserves the synchronous last-frame-before-close guarantee, e.g. cap-breach 429). Intentional behavior change: `sess.Close` is now 1013 (was `GoingAway` "refresh delivery failed") so every shed path observes the R3 status; no existing test asserted the old code.
+- `internal/metrics/metrics.go`: `instant_ws_overflow_closes_total` counter (+registration).
+- `internal/sync/ws_fanout_hol_test.go` (NEW): R1 red/green test.
+- `internal/sync/ws_outbound_queue_test.go` (NEW): R5 tests.
+- No `groups.go`, `reactive`, SSE, `cmd/*`, or protocol change.
+
+## R1 red failure (raw, pre-fix product code, final test file)
+
+```
+--- FAIL: TestWSFanoutStuckMemberDoesNotStallGroup (40.56s)
+    ws_fanout_hol_test.go:311: round 0 emit 4 healthy 0 latency 10.011451584s exceeds 1 s (HOL stall)
+    ws_fanout_hol_test.go:311: round 0 emit 4 healthy 1 latency 10.013381542s exceeds 1 s (HOL stall)
+    ws_fanout_hol_test.go:324: head-of-line blocking: 2 healthy refresh deliveries exceeded 1 s (worst 10.013381542s); one stuck reader stalled its group
+```
+
+## Verification (raw)
+
+| Command/run | Selected | Exit | Meaning |
+| `gofmt -l internal/sync cmd/instantd` | — | 0 (empty) | formatted |
+| `CGO_ENABLED=0 go vet ./internal/sync/... ./cmd/instantd/...` | — | 0 | static clean |
+| `CGO_ENABLED=0 go test ./internal/sync/... -race -count=1` | full package | 0 | all green hermetically (DB tests skip) |
+| 20× `-race` new tests (10+10 R1, 20 fast) | 5 tests | 0 | R1 20/20, fast four 20/20 each |
+| short `./...` sweep (`INSTANT_TEST_INTEGRATION=0`, `-short`) | full repo | 0 | no FAIL (only `[no test files]` lines) |
+| owned-DB `INSTANT_TEST_INTEGRATION=1 DATABASE_URL=postgres://priyank@127.0.0.1:55433/postgres go test ./internal/sync/... ./cmd/instantd/... -race -count=1` (disposable local PG17, `instant_test_*` fixtures only, dropped with the cluster) | 2 packages | 0 | `sync ok 33.567s`, `instantd ok 25.224s` |
+| `git diff --stat` | — | n/a | 2 files + 2 new test files, no commit |
+
+## R4 mapping (WS guarantees → tests, all green)
+
+- RT-001a/b/c rebind+deny: `TestRealtimeRebindDeniesExistingSubscription`, `TestSupersededGenerationDrops`, `TestMidFanOutSwapHealsThroughNotifierRetry` (owned-DB lane); `RefreshGate`/`PublishGeneration` untouched.
+- RT-001d join/initial-answer fail-closed: `TestVersionMismatchedJoinRebindsGroup`, `TestH01dFastPathRacingClearIsNotReused`, `TestH01dPostPublishSwapFailsClosed` + new `TestWSQueuedEnvelopeDroppedAfterRevoke` (WS answer now guarded at write time too).
+- RT-001f queued drop: `TestH01fQueuedSSEEnvelopesDroppedAfterRevoke` (SSE) mirrored by the new WS test through the production writer.
+- RT-002a watermark: `TestWatermarkMatchesDeliveredGeneration`; "served" for WS = enqueued, same as SSE.
+- RT-002b encode/render: `TestDispatchEncodeFailureServesNothing`, `TestDispatchRenderFailureServesNothing`, `TestWriteSSEEventEncodeFailureWritesNothing` (encode still sync at WS enqueue).
+- RT-002c detach/reconnect: `TestDispatchSendFailureDetachesOnlyFailedMember`, `TestReconnectConvergesAfterSendFailure`, `TestLiveReconnectConvergesAfterDrop` + new `TestWSOverflowClosesSlowMemberWith1013`.
+- RT-002d reconnect convergence: `TestSSEFailureReconnectFullReplay`, `TestDeltaReconnectFullReplayCoversMissedTx`, `TestLiveReconnectConvergesAfterDrop`.
+- RT-002e no empty frames: `TestDispatchNeverEmitsEmptyFrames` (writer only writes pre-encoded bytes).
+
+## Independent review (self, coordinator)
+
+Falsification pass over the diff found and repaired two issues before close:
+1. Terminal reply paths (cap-breach 429, failed initial answers) raced the deferred close — the last frame could drop. Repaired with bounded `flushOutbound` (`wsWriteTimeout` bound, overflow/context short-circuit); `TestWSTeardownOnCapBreachClose` determinism restored.
+2. `flushOutbound` initially consumed the writer's overflow signal — repaired with a separate `overflowed` flag (writer keeps sole channel consumption).
+3. Overflow-trigger test first used a paced dispatch burst (timing margin broke under CPU contention) then a single-shot trigger (µs race with the draining writer); final design uses sustained fill+trigger rounds — the soak's own shape. One R1 accounting flake (lingering stuck across rounds vs exact-membership assert) repaired with explicit per-round detach; red re-proven on the final test file afterward.
+
+Lock order: delivery-lease → writeMu, no inversion (ping takes writeMu only). Queue never closed (post-return enqueues can't panic). No goleak dependency (not direct) — goroutine-count check with settle-then-baseline.
+
+## Not run
+
+- Linux qualification lanes (coordinator runs owned-DB/image lanes there); local PG17 disposable used instead (see pending lane above).
+- Full `./...` non-short sweep (short sweep covers; race/prod gate belongs to FR-002).
+
+## Scope audit
+
+- Pre-existing changes: user commit `71d8895` (soak/qualify + contract doc + 26-line ledger section) landed mid-session from another session; preserved untouched. No reset/stash of user work (one `git stash push`/`pop` round-trip of my own two files only, for the red re-proof; verified restored via `git status`).
+- Phase-owned files: `internal/sync/ws.go`, `internal/metrics/metrics.go`, two new test files, this ledger section. `groups.go` untouched (no change needed — the queued dispatch path already existed for SSE).
+- Unexpected changes: none.
+- No commit, push, tag, or remote run (per contract).
+
+## Next prerequisite
+
+- Coordinator: Linux owned-DB + soak re-run against a candidate containing this packet (QR-001 rehearsal scenario: 500 sessions/one group) to confirm the 3452→2666→0 decay signature is gone.
+
+Coordinator note on the handoff above: its R2 line "keepalive pings serialize
+on the same `writeMu`" and the `flushOutbound` description are superseded by
+the coordinator repairs recorded in the preceding RT-004 section (Ping no
+longer takes `writeMu`; flush is a writer-released barrier). Final code:
+commit `0d36e38`.
+
+### Pre-campaign envelope update (2026-09-26)
+
+Recorded the owner's 2026-09-26 direction as scoped grants in
+`docs/reference/release-envelope.md` (AUTH-RUNTIME-001, AUTH-FAULT-001 for
+OP-005, AUTH-PERF-001 for QR-001 soak only; owned hosts and `iv2q-*`
+resources only; comparative performance, provider, publish and deploy remain
+NOT_GRANTED). Soak row now states the exact qualified workload (≥900 s active
+writes, delta-refresh negotiation, one whole-table group, 8 tx/s) and that
+full-envelope clients at this fan-out are not qualified. `validate-release` 0.

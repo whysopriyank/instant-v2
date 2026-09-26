@@ -102,7 +102,7 @@ Guardrails for the alpha (not production SLOs):
 | Area | Proposed value | Consequence |
 |---|---|---|
 | Verification | Hermetic build/tests plus only the package integrations explicitly selected by the coordinator | Passing checks establish only their recorded scope |
-| Soak | One 500-session × 15 min run on a named owned host, full time-series + exact teardown (QR-001); 150-session CI lane is smoke only; 5k×30m explicitly not required | O-004-style capacity claims cannot be made |
+| Soak | One 500-session × ≥900 s active-write run (ramp and settle excluded) on a named owned host, full time-series + exact teardown (QR-001). Sessions negotiate `delta-refresh` (SDK ≥ 0.23 wire) over one whole-table query group at 8 tx/s; full-envelope (pre-0.23) clients at this fan-out are not qualified. 150-session CI lane is smoke only; 5k×30m explicitly not required | O-004-style capacity claims cannot be made |
 | Live databases/endpoints | No authority is granted by this artifact | Any packet needing an owned database, local service, or credentials stays blocked until separately authorized |
 | Chaos/live faults | No chaos invocation or live fault authority | Destructive lanes stay deferred; unsafe chaos output cannot be accepted |
 | Publishing/deployment | No tag, publish, signing, SBOM, registry, canary, or rollback authority | REL-002/REL-004 and FR-003/FR-004 remain unselected |
@@ -112,11 +112,11 @@ Guardrails for the alpha (not production SLOs):
 | Authority ID | Activity | State | Required approver/evidence before use |
 |---|---|---|---|
 | `AUTH-PROVIDER-001` | Real OAuth/OIDC provider or magic-code delivery acceptance | `NOT_GRANTED` | Named owner, target/credentials scope, redacted artifact location, security review |
-| `AUTH-FAULT-001` | Live process, PostgreSQL, destructive chaos, or fault injection | `NOT_GRANTED` | Named owner, exact owned resources, rollback/cleanup plan, safety review |
-| `AUTH-PERF-001` | Soak or comparative performance campaign | `NOT_GRANTED` | Named owner, quiet hardware, frozen workload/budgets, artifact destination |
+| `AUTH-FAULT-001` | Live process, PostgreSQL, destructive chaos, or fault injection | `GRANTED_SCOPED` — owner direction 2026-09-26 (`docs/plans/finish-up/completion-run-20260926.md`): owned hosts bigbeast/cutiepie/cutiewhy only, `iv2q-<campaign>-*` containers/networks, owned per-lane databases, verified cleanup; OP-005 recovery lane only | Named owner, exact owned resources, rollback/cleanup plan, safety review |
+| `AUTH-PERF-001` | Soak or comparative performance campaign | `GRANTED_SCOPED` — owner direction 2026-09-26 (`docs/plans/finish-up/completion-run-20260926.md`): owned hosts bigbeast/cutiepie/cutiewhy only, `iv2q-<campaign>-*` containers/networks, owned per-lane databases, verified cleanup; QR-001 soak only, comparative performance still not granted | Named owner, quiet hardware, frozen workload/budgets, artifact destination |
 | `AUTH-PUBLISH-001` | Tag, sign, SBOM, registry, or release publication | `NOT_GRANTED` | Named owner, protected ref, credential/OIDC model, dry-run evidence |
 | `AUTH-DEPLOY-001` | Canary, traffic, production data, or rollback operation | `NOT_GRANTED` | Named operator, target, data/traffic scope, runbook, rollback authority |
-| `AUTH-RUNTIME-001` | DB-backed/loopback runtime proof runs (red/green/corpus slice) on an owned host | `NOT_GRANTED` | Named owner, exact host/database scope, cleanup plan |
+| `AUTH-RUNTIME-001` | DB-backed/loopback runtime proof runs (red/green/corpus slice) on an owned host | `GRANTED_SCOPED` — owner direction 2026-09-26 (`docs/plans/finish-up/completion-run-20260926.md`): owned hosts bigbeast/cutiepie/cutiewhy only, `iv2q-<campaign>-*` containers/networks, owned per-lane databases, verified cleanup | Named owner, exact host/database scope, cleanup plan |
 
 ## Accepted-difference registry
 

@@ -127,8 +127,11 @@ bash scripts/qualify/gate.sh --campaign "$CAMPAIGN" --candidate "$CANDIDATE" --w
   demonstrates submit-faster-than-ack (max outstanding un-acked ≥ 8) with
   live delivery to both subscribers — flood size, max outstanding, close
   codes, and timings are all recorded in the per-outcome artifact.
-- Soak: `-sessions 500 -duration 900s -ramp 60s -settle 60s
-  -global-tx-rate 8 -max-p99-lag 10s`; RSS sampled via `ps`, 1 GiB ceiling
+- Soak: `-sessions 500 -duration 1020s -ramp 60s -settle 60s
+  -global-tx-rate 8 -max-p99-lag 10s -sdk-version 0.23.0` (cmd/soak's
+  duration spans ramp and settle, so 1020 s gives 900 s of active writes;
+  `active_seconds` = duration − ramp − settle; `-sdk-version` negotiates
+  delta-refresh, recorded as `workload.sdk_version`); RSS sampled via `ps`, 1 GiB ceiling
   enforced by the existing soak gate semantics; RSS/open-fds/PG-connections
   sampled every 10 s to `soak-timeseries.jsonl`.
 - Soak mapping rule: counters come strictly from the soak's own
