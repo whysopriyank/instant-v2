@@ -660,3 +660,43 @@ func TestSession_DeterministicLifecycle(t *testing.T) {
 		t.Fatalf("expected 0 unresolved entries, got %d", ledger.UnresolvedCount())
 	}
 }
+
+func TestInitFrameCarriesSDKVersionOnlyWhenSet(t *testing.T) {
+	for _, tc := range []struct {
+		version string
+		want    bool
+	}{{"", false}, {"0.23.0", true}} {
+		initSDKVersion = tc.version
+		conn := newFakeSessionConn()
+		ctx, cancel := context.WithCancel(context.Background())
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- driveSessionWithConn(ctx, conn, NewTransactionLedger(nil), newFakeClock(time.Now()), 0, "app",
+				nil, nil, nil, nil, nil, nil, time.Second)
+		}()
+		deadline := time.Now().Add(2 * time.Second)
+		var first []byte
+		for time.Now().Before(deadline) {
+			conn.mu.Lock()
+			if len(conn.outbound) > 0 {
+				first = conn.outbound[0]
+			}
+			conn.mu.Unlock()
+			if first != nil {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		cancel()
+		<-errCh
+		var f map[string]any
+		if err := json.Unmarshal(first, &f); err != nil || f["op"] != "init" {
+			t.Fatalf("version %q: first frame is not init: %s", tc.version, first)
+		}
+		versions, has := f["versions"].(map[string]any)
+		if has != tc.want || (tc.want && versions["@instantdb/core"] != tc.version) {
+			t.Fatalf("version %q: init versions = %v", tc.version, f["versions"])
+		}
+	}
+	initSDKVersion = ""
+}

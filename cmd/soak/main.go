@@ -49,7 +49,15 @@ type soakConfig struct {
 	EventsPath   string
 	OutDir       string
 	Quiescence   time.Duration
+	// SDKVersion, when set, is sent as the init versions map's
+	// @instantdb/core so sessions negotiate that SDK's feature gates (e.g.
+	// delta-refresh at >= 0.23.0). Empty keeps the historical init frame.
+	SDKVersion string
 }
+
+// initSDKVersion is the negotiated SDK version runSoak publishes to the
+// session dialer before any session starts (see soakConfig.SDKVersion).
+var initSDKVersion string
 
 type soakDeps struct {
 	Clock       Clock
@@ -117,6 +125,7 @@ func parseFlags(args []string) (soakConfig, error) {
 	maxP99 := fs.Duration("max-p99-lag", 0, "fail when p99 write→refresh delivery lag exceeds this (0=off)")
 	eventsPath := fs.String("events", envOr("SOAK_EVENTS", ""), "structured JSONL event output path (use - for stdout)")
 	outDir := fs.String("out", envOr("SOAK_OUT", ""), "fresh output directory for soak evidence bundle")
+	sdkVersion := fs.String("sdk-version", "", "SDK version sent in init (e.g. 0.23.0 negotiates delta-refresh); empty = historical init")
 	quiescence := fs.Duration("quiescence", 10*time.Second, "bounded quiescence window after soak duration")
 
 	if err := fs.Parse(args); err != nil {
@@ -148,6 +157,7 @@ func parseFlags(args []string) (soakConfig, error) {
 		EventsPath:   *eventsPath,
 		OutDir:       *outDir,
 		Quiescence:   *quiescence,
+		SDKVersion:   *sdkVersion,
 	}, nil
 }
 
@@ -158,6 +168,7 @@ func runSoak(ctx context.Context, cfg soakConfig, deps soakDeps, logger *slog.Lo
 	if deps.Clock == nil {
 		deps.Clock = realClock{}
 	}
+	initSDKVersion = cfg.SDKVersion
 	if deps.DialSession == nil {
 		deps.DialSession = runSession
 	}
@@ -326,6 +337,7 @@ loop:
 		Settle:       cfg.Settle.String(),
 		Quiescence:   cfg.Quiescence.String(),
 		MaxP99Lag:    cfg.MaxP99Lag.String(),
+		SDKVersion:   cfg.SDKVersion,
 	}
 
 	summaryManifest := SummaryManifest{
@@ -649,7 +661,11 @@ func driveSessionWithConn(ctx context.Context, conn sessionConn,
 		}
 	}()
 
-	if err := send(map[string]any{"op": "init", "app-id": appID}); err != nil {
+	initFrame := map[string]any{"op": "init", "app-id": appID}
+	if initSDKVersion != "" {
+		initFrame["versions"] = map[string]string{"@instantdb/core": initSDKVersion}
+	}
+	if err := send(initFrame); err != nil {
 		return err
 	}
 	select {

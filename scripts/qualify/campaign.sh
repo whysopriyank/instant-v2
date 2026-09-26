@@ -102,7 +102,20 @@ SRC="$WORKDIR/src"
 EVIDENCE="$WORKDIR/evidence"
 TOOLS="$WORKDIR/tools"
 
+# reap_workdir_processes kills processes whose executable lives under this
+# campaign's workdir (host-run qualify/instantd/soak). An interrupted lane
+# would otherwise orphan them, holding ports and the owned database.
+reap_workdir_processes() {
+  local root d exe
+  root=$(cd "$WORKDIR" && pwd -P) || return 0
+  for d in /proc/[0-9]*; do
+    exe=$(readlink "$d/exe" 2>/dev/null) || continue
+    case "$exe" in "$root"/*) kill -9 "${d#/proc/}" 2>/dev/null || true;; esac
+  done
+}
+
 cleanup() {
+  reap_workdir_processes
   # Remove only prefixed resources; every name here derives from $PREFIX.
   require_prefix "$PG" || return 0
   docker rm -f "$PG" >/dev/null 2>&1 || true

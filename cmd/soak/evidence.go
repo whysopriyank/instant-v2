@@ -45,6 +45,7 @@ type WorkloadManifest struct {
 	Settle       string  `json:"settle"`
 	Quiescence   string  `json:"quiescence"`
 	MaxP99Lag    string  `json:"max_p99_lag,omitempty"`
+	SDKVersion   string  `json:"sdk_version,omitempty"`
 }
 
 // SummaryManifest records the observed outcomes and diagnostics of the soak run.

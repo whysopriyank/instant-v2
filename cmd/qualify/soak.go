@@ -21,6 +21,11 @@ const (
 	soakSettle       = 60 * time.Second
 	soakGlobalTxRate = 8.0
 	soakMaxP99Lag    = "10s"
+	// soakSDKVersion negotiates delta-refresh (>= 0.23.0) so the whole-table
+	// subscription is served as structural patches, the current v2 wire path;
+	// full envelopes of an unboundedly growing result would make per-tx
+	// fan-out bytes grow without bound for the whole run.
+	soakSDKVersion = "0.23.0"
 )
 
 // The structs below mirror cmd/soak's real output with EXACT json tags:
@@ -59,6 +64,7 @@ type soakWorkload struct {
 	Settle       string  `json:"settle"`
 	Quiescence   string  `json:"quiescence"`
 	MaxP99Lag    string  `json:"max_p99_lag,omitempty"`
+	SDKVersion   string  `json:"sdk_version,omitempty"`
 }
 
 // soakSummary mirrors cmd/soak SummaryManifest.
@@ -181,7 +187,9 @@ func decodeStrict(data []byte, v any) error {
 // cmd/soak's real field and state names:
 //
 //   - status must be "complete", completed true, summary.success true;
-//   - sessions = workload.sessions; active_seconds = trunc(duration_seconds);
+//   - sessions = workload.sessions; active_seconds =
+//     trunc(duration_seconds - workload.ramp_up - workload.settle): cmd/soak's
+//     duration spans ramp and settle, and writes only run after both;
 //   - with per-tx ledger entries present: committed = distinct non-empty
 //     server_tx_id (an id exists only after RecordAck); acknowledged =
 //     entries in state acknowledged/resolved (ack-implying, listed above);
@@ -215,7 +223,16 @@ func mapSoakManifest(m soakManifest, ledger []soakLedgerEntry, events []soakRunE
 	if m.DurationSeconds <= 0 {
 		return ev, nil, fmt.Errorf("soak manifest duration_seconds=%v (want > 0)", m.DurationSeconds)
 	}
-	ev.ActiveSeconds = int64(m.DurationSeconds) // truncation toward zero, documented
+	ramp, rerr := time.ParseDuration(m.Workload.RampUp)
+	settle, serr := time.ParseDuration(m.Workload.Settle)
+	if rerr != nil || serr != nil || ramp < 0 || settle < 0 {
+		return ev, nil, fmt.Errorf("soak manifest ramp_up=%q settle=%q are not valid durations", m.Workload.RampUp, m.Workload.Settle)
+	}
+	active := m.DurationSeconds - ramp.Seconds() - settle.Seconds()
+	if active <= 0 {
+		return ev, nil, fmt.Errorf("soak manifest has no active window (duration_seconds=%v, ramp_up=%s, settle=%s)", m.DurationSeconds, ramp, settle)
+	}
+	ev.ActiveSeconds = int64(active) // truncation toward zero, documented
 	if len(ledger) > 0 {
 		committed := map[string]bool{}
 		var acked, refreshed int64
@@ -611,10 +628,11 @@ func runSoakLive(cfg runSoakConfig) int {
 		"-url", "ws://"+cfg.addr+"/runtime/session",
 		"-app", appID, "-attr", attrID,
 		"-sessions", fmt.Sprint(soakSessions),
-		"-duration", soakActive.String(),
+		"-duration", (soakRamp + soakSettle + soakActive).String(),
 		"-ramp", soakRamp.String(), "-settle", soakSettle.String(),
 		"-global-tx-rate", fmt.Sprint(soakGlobalTxRate),
 		"-max-p99-lag", soakMaxP99Lag,
+		"-sdk-version", soakSDKVersion,
 		"-events", eventsPath,
 	)
 	logF, err := os.Create(soakLog)

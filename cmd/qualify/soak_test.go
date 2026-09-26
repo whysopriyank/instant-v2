@@ -27,7 +27,7 @@ func realManifestFixture(t *testing.T, dir string, sessions int, durationSecs fl
 		"app_id":           "00000000-0000-4000-8000-000000000001",
 		"workload": map[string]any{
 			"sessions":       sessions,
-			"duration":       "15m0s",
+			"duration":       "17m0s",
 			"global_tx_rate": 8.0,
 			"tx_interval":    "2s",
 			"ramp_up":        "1m0s",
@@ -98,7 +98,7 @@ func readManifest(t *testing.T, p string) soakManifest {
 
 func TestMapSoakManifestSummaryCertified(t *testing.T) {
 	dir := t.TempDir()
-	mp := realManifestFixture(t, dir, 500, 930.4, 1200, 1200, 500, 0, 0, true)
+	mp := realManifestFixture(t, dir, 500, 1050.4, 1200, 1200, 500, 0, 0, true)
 	ep := realEventsFixture(t, dir, 1200, 1200, 500)
 	m := readManifest(t, mp)
 	events, ledger, err := parseSoakArtifactFile(ep)
@@ -131,7 +131,7 @@ func TestMapSoakManifestSummaryCertified(t *testing.T) {
 
 func TestMapSoakManifestLedgerDerived(t *testing.T) {
 	dir := t.TempDir()
-	mp := realManifestFixture(t, dir, 500, 905.0, 4, 4, 500, 0, 0, true)
+	mp := realManifestFixture(t, dir, 500, 1025.0, 4, 4, 500, 0, 0, true)
 	// Per-tx ledger entries in cmd/soak LedgerEntry wire format (tags from
 	// cmd/soak/ledger.go, pinned below): 4 resolved (acked + own refresh
 	// observed), one with refresh_before_ack set.
@@ -176,7 +176,7 @@ func TestMapSoakManifestAckImplyingStates(t *testing.T) {
 	dir := t.TempDir()
 	// 1 resolved + 1 acknowledged (acked, refresh not yet observed):
 	// acknowledged counts as acked but stays unresolved (non-resolved).
-	mp := realManifestFixture(t, dir, 500, 905.0, 2, 2, 500, 0, 1, true)
+	mp := realManifestFixture(t, dir, 500, 1025.0, 2, 2, 500, 0, 1, true)
 	lines := []string{
 		`{"client_event_id":"t-0-1","server_tx_id":"101","session_id":0,"submitted_at":"2026-09-20T00:00:01Z","ack_at":"2026-09-20T00:00:02Z","refresh_at":"2026-09-20T00:00:03Z","state":"resolved"}`,
 		`{"client_event_id":"t-0-2","server_tx_id":"102","session_id":0,"submitted_at":"2026-09-20T00:00:04Z","ack_at":"2026-09-20T00:00:05Z","state":"acknowledged"}`,
@@ -209,7 +209,7 @@ func TestMapSoakManifestAckImplyingStates(t *testing.T) {
 func TestMapSoakManifestLedgerMismatchFails(t *testing.T) {
 	dir := t.TempDir()
 	// Summary claims dropped=0 but the ledger holds a terminal entry.
-	mp := realManifestFixture(t, dir, 500, 905.0, 2, 2, 500, 0, 0, true)
+	mp := realManifestFixture(t, dir, 500, 1025.0, 2, 2, 500, 0, 0, true)
 	lines := []string{
 		`{"client_event_id":"t-0-1","server_tx_id":"101","session_id":0,"submitted_at":"2026-09-20T00:00:01Z","ack_at":"2026-09-20T00:00:02Z","refresh_at":"2026-09-20T00:00:03Z","state":"resolved"}`,
 		`{"client_event_id":"t-0-2","session_id":0,"submitted_at":"2026-09-20T00:00:04Z","state":"terminal","terminal_reason":"quiescence_timeout_missing_ack"}`,
@@ -231,7 +231,7 @@ func TestMapSoakManifestLedgerMismatchFails(t *testing.T) {
 
 func TestMapSoakManifestUnknownStateFails(t *testing.T) {
 	dir := t.TempDir()
-	mp := realManifestFixture(t, dir, 500, 905.0, 1, 1, 500, 0, 0, true)
+	mp := realManifestFixture(t, dir, 500, 1025.0, 1, 1, 500, 0, 0, true)
 	lines := []string{
 		`{"client_event_id":"t-0-1","server_tx_id":"101","session_id":0,"submitted_at":"2026-09-20T00:00:01Z","state":"refreshed"}`,
 		`{"at":"2026-09-20T00:15:30Z","event":"run_finished","status":"passed","sessions":500,"refreshes":1,"transacts":1,"lag_samples":1}`,
@@ -261,7 +261,7 @@ func TestMapSoakManifestUnknownEventFails(t *testing.T) {
 
 func TestMapSoakManifestRequiresCompleteSuccess(t *testing.T) {
 	dir := t.TempDir()
-	mp := realManifestFixture(t, dir, 500, 905.0, 0, 0, 500, 1, 0, false)
+	mp := realManifestFixture(t, dir, 500, 1025.0, 0, 0, 500, 1, 0, false)
 	ep := realEventsFixture(t, dir, 0, 0, 500)
 	m := readManifest(t, mp)
 	events, ledger, err := parseSoakArtifactFile(ep)
@@ -289,7 +289,7 @@ func TestMapSoakManifestRequiresCompleteSuccess(t *testing.T) {
 
 func TestMapSoakManifestRunFinishedMismatchFails(t *testing.T) {
 	dir := t.TempDir()
-	mp := realManifestFixture(t, dir, 500, 905.0, 1200, 1200, 500, 0, 0, true)
+	mp := realManifestFixture(t, dir, 500, 1025.0, 1200, 1200, 500, 0, 0, true)
 	ep := realEventsFixture(t, dir, 999, 1200, 500) // transacts disagree
 	m := readManifest(t, mp)
 	events, ledger, err := parseSoakArtifactFile(ep)
@@ -363,7 +363,7 @@ func TestSoakOutputTagsPinned(t *testing.T) {
 		`"finished_at`, `"duration_seconds`, `"target_url`, `"app_id`,
 		`"workload`, `"summary`, `"artifacts`, `"pprof_endpoint`,
 		`"completion_marker`, `"sessions`, `"duration`, `"global_tx_rate`,
-		`"tx_interval`, `"ramp_up`, `"settle`, `"quiescence`, `"max_p99_lag`,
+		`"tx_interval`, `"ramp_up`, `"settle`, `"quiescence`, `"max_p99_lag`, `"sdk_version`,
 		`"connects`, `"transacts`, `"refreshes`, `"dropped`, `"unresolved`,
 		`"lag_samples`, `"lag_p50`, `"lag_p99`, `"lag_max`, `"success`,
 		`"failure_error`, `"name`, `"path`, `"size_bytes`, `"sha256`, `"required`,
@@ -415,5 +415,28 @@ func TestSoakOutputTagsPinned(t *testing.T) {
 		if !strings.Contains(string(mainSrc), payload) {
 			t.Fatalf("main.go run_finished payload changed %q: update checkRunFinishedEvent", payload)
 		}
+	}
+}
+
+// cmd/soak's duration spans ramp and settle; a run whose total exceeds 900 s
+// but whose write window does not must fail the active-seconds budget.
+func TestMapSoakManifestActiveExcludesRampAndSettle(t *testing.T) {
+	dir := t.TempDir()
+	mp := realManifestFixture(t, dir, 500, 1000.0, 1200, 1200, 500, 0, 0, true)
+	ep := realEventsFixture(t, dir, 1200, 1200, 500)
+	m := readManifest(t, mp)
+	events, ledger, err := parseSoakArtifactFile(ep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev, derived, err := mapSoakManifest(m, ledger, events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.ActiveSeconds != 880 {
+		t.Fatalf("active_seconds = %d, want 880 (1000 - 60 ramp - 60 settle)", ev.ActiveSeconds)
+	}
+	if code := writeSoakResult(filepath.Join(dir, "lane.json"), time.Now().UTC(), ev, derived); code == 0 {
+		t.Fatal("880 active seconds accepted against the 900 s budget")
 	}
 }

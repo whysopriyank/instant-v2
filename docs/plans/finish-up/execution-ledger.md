@@ -2249,3 +2249,29 @@ invoking non-root uid with fixed /tmp caches (root bypasses permission
 assertions; see OP-003 pre-flight), pinned ripgrep 15.2.0 (fixture audit).
 Verdict after R2: ACCEPT for code; execution acceptance happens on the real
 Linux campaign (OP-003/OP-005/QR-001 handoffs).
+
+### QR-001 rehearsal findings (2026-09-26, cutiewhy, candidate c3780c5)
+
+Soak lane (500 sessions, 8 tx/s, whole-table `todos` subscription, full
+envelopes): refresh throughput decayed 3452 → 2666 r/s over 12 min, then went
+to exactly 0 for all sessions at ~06:01:50 while writes continued; sessions
+tripped the client's 20 s stall guard and reconnected; soak FAILED on an
+unresolved tx at quiescence. Server logged nothing; RSS ~85 MB, fds/PG conns
+flat. Code root cause: sequential WS fan-out (`dispatchGroup` → blocking
+`SendRaw` per member, 10 s write timeout) — one slow reader stalls its whole
+query group. Opened product packet RT-004 (contract
+`contracts/rt004-ws-fanout-hol.md`, red test first).
+Harness/workload corrections (coordinator, small):
+- `active_seconds` was trunc(total duration) although cmd/soak's duration
+  spans ramp+settle — overclaimed ~120 s. Now total − ramp − settle; lane runs
+  `-duration` = ramp + settle + 900 s. New test rejects 880 active s.
+- Soak client gains opt-in `-sdk-version` (init `versions` map; default
+  unchanged/historical); QR-001 lane negotiates 0.23.0 → delta-refresh, the
+  current v2 wire path, instead of O(sessions × rows) full envelopes of an
+  unboundedly growing result. Recorded in the manifest as
+  `workload.sdk_version`.
+- `campaign.sh` cleanup now reaps processes executing from its own workdir
+  (an interrupted lane orphaned qualify/instantd/soak during diagnosis).
+Other rehearsal results on bigbeast (candidate e14f36f): build deterministic
+and identical across bigbeast/cutiewhy; native PASS (1881 tests, 0 skip, 77
+platform checks); recovery PASS 7/7 with real preconditions.
