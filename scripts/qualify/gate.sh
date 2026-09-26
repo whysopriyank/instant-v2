@@ -73,7 +73,7 @@ docker exec "$PG" createdb -U instant "$DB_NAME" >/dev/null
 # `build` writes bin/instantd, then compares its sha256 to the qualified
 # binary). bin/ is gitignored, so the gate's clean-tree assertion is
 # unaffected.
-docker run --rm --user "$(id -u):$(id -g)" --network "$NET" \
+docker run --rm --user "$(id -u):$(id -g)" -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro --network "$NET" \
   -v "$WORKDIR/src:/src" -v "$WORKDIR/evidence:/evidence:ro" \
   -e DATABASE_URL="$GATE_DB_URL" \
   -e RELEASE_GATE_MANIFEST=/evidence/manifest.json \

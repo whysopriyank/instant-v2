@@ -31,10 +31,6 @@ RUN curl -fsSLo ripgrep.tar.gz https://github.com/BurntSushi/ripgrep/releases/do
   && install -m 0755 ripgrep-15.2.0-x86_64-unknown-linux-musl/rg /usr/local/bin/rg \
   && rm -rf ripgrep.tar.gz ripgrep-15.2.0-x86_64-unknown-linux-musl
 
-# Lanes run as the invoking host user (campaign.sh/gate.sh pass --user):
-# several suites assert permission denials that root bypasses, and CI runs
-# as a non-root user. Caches live under /tmp so any uid can write them;
-# GOMODCACHE is fixed because untrimmed binaries embed module paths.
 # PostgreSQL 17 server + client from the signed PGDG repository (bookworm
 # ships 15, whose initdb lacks the -c option the chaos harness uses; the
 # owned DB is postgres:17). The repository key is verified by fingerprint.
@@ -48,5 +44,11 @@ RUN install -d /usr/share/postgresql-common/pgdg \
 # initdb/pg_ctl on PATH: cmd/chaos tests need a throwaway cluster, and the
 # gate's owned-DB lane rejects any skipped test.
 ENV PATH=/usr/lib/postgresql/17/bin:$PATH
+# Lanes run as the invoking host user (campaign.sh/gate.sh pass --user):
+# several suites assert permission denials that root bypasses, and CI runs
+# as a non-root user; they mount the host /etc/passwd and /etc/group
+# read-only so tools such as initdb can resolve that uid. Caches live under
+# /tmp so any uid can write them; GOMODCACHE is fixed because untrimmed
+# binaries embed module paths.
 ENV HOME=/tmp/home GOCACHE=/tmp/gocache GOMODCACHE=/tmp/gomod GOLANGCI_LINT_CACHE=/tmp/golangci
 WORKDIR /src

@@ -191,7 +191,7 @@ fi
 # build lane; recovery/soak execute exactly evidence/candidate/instantd.
 docker build -q -f "$SCRIPT_DIR/Dockerfile" -t "$QUAL_IMG_TAG" "$REPO_ROOT" >/dev/null
 IMAGE_DIGEST=$(docker inspect --format='{{.Id}}' "$QUAL_IMG_TAG")
-docker run --rm --user "$(id -u):$(id -g)" --network "$NET" -v "$SRC:/src:ro" -v "$TOOLS:/out" "$QUAL_IMG_TAG" \
+docker run --rm --user "$(id -u):$(id -g)" -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro --network "$NET" -v "$SRC:/src:ro" -v "$TOOLS:/out" "$QUAL_IMG_TAG" \
   bash -c 'cd /src && go build -o /out/qualify ./cmd/qualify && go build -o /out/soak ./cmd/soak && go build -o /out/soaksetup ./cmd/soaksetup && chmod +x /out/*'
 
 case "$LANE" in
@@ -207,9 +207,9 @@ case "$LANE" in
     # THE candidate binary is this make output (src/bin/instantd), copied to
     # evidence/candidate/instantd; recovery/soak execute exactly that file.
     # (bin/ is gitignored, so the candidate tree stays clean.)
-    docker run --rm --user "$(id -u):$(id -g)" --network "$NET" -v "$SRC:/src" "$QUAL_IMG_TAG" \
+    docker run --rm --user "$(id -u):$(id -g)" -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro --network "$NET" -v "$SRC:/src" "$QUAL_IMG_TAG" \
       bash -c 'cd /src && make build && sha256sum bin/instantd' | tee "$EVIDENCE/candidate-build1.txt" >/dev/null
-    docker run --rm --user "$(id -u):$(id -g)" --network "$NET" -v "$SRC:/src" "$QUAL_IMG_TAG" \
+    docker run --rm --user "$(id -u):$(id -g)" -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro --network "$NET" -v "$SRC:/src" "$QUAL_IMG_TAG" \
       bash -c 'cd /src && make build && sha256sum bin/instantd' | tee "$EVIDENCE/candidate-build2.txt" >/dev/null
     sha1=$(awk '$2 == "bin/instantd" {print $1}' "$EVIDENCE/candidate-build1.txt")
     sha2=$(awk '$2 == "bin/instantd" {print $1}' "$EVIDENCE/candidate-build2.txt")
@@ -231,7 +231,7 @@ case "$LANE" in
     mkdir -p "$EVIDENCE/$LANE"
     case "$LANE" in
       native)
-        docker run --rm --user "$(id -u):$(id -g)" --network "$NET" \
+        docker run --rm --user "$(id -u):$(id -g)" -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro --network "$NET" \
           -v "$SRC:/src:ro" -v "$EVIDENCE:/evidence" \
           -e DATABASE_URL="$IMAGE_DB_URL" -e INSTANT_TEST_INTEGRATION=1 \
           "$QUAL_IMG_TAG" bash -c 'go build -o /tmp/qualify ./cmd/qualify && INSTANT_TEST_INTEGRATION=1 /tmp/qualify native --run --out "/evidence/native/lane.json" --raw-log "/evidence/native/gotest.json"'
