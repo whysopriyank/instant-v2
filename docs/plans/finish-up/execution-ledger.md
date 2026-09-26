@@ -1685,3 +1685,65 @@ CF-003 now 19 covered / 3 gap / 4 unsupported. Remaining gaps are all owner-deci
 Not run: full-repo sweep beyond affected packages; FR-002 immutable acceptance; anything external (DA-006B, DA-008B, CF-004/005, OP-003..006, QR-001).
 
 Next prerequisite: owner decision on the CF-003 residual-gap exception; then FR-002 on one clean immutable SHA (needs the external/environment packets or owner-approved exceptions for them).
+
+## CF-003 closure — owner-accepted residual gaps (2026-09-26, HEAD f63d400559f78214952b89e04722f6fa4ea3d48b + work below, go1.27.1 darwin/arm64)
+
+# Packet CF-003-closure handoff
+
+Status: COMPLETE / ACCEPTED_WITH_OWNER_EXCEPTIONS_19_COVERED_3_EXCEPTION_4_UNSUPPORTED
+Candidate: HEAD `f63d400559f78214952b89e04722f6fa4ea3d48b` on `main` + uncommitted work below (no commit per contract)
+Decision/profile: DEC-001-single-node-alpha + owner decision 2026-09-26 (delegated to coordinator; `docs/plans/finish-up/contracts/cf003-closure.md`)
+
+## Ledger
+| Row | Result | Evidence | Remaining |
+| R1 decision file | GREEN | `docs/plans/finish-up/cf003-residual-gap-exception-decision.md` (table, per-row non-claim, enforcement point; no row flip, no `expectedState` change) | None |
+| R2 envelope + fail-closed enforcement | GREEN | `docs/reference/release-envelope.md` `## CF-003 residual gap exceptions` table (3 rows); `cmd/corpusctl/cf003_exceptions.go::ValidateCF003Exceptions` wired into `validate-release` (`cmd/corpusctl/main.go`); unlisted gap / stale-covered / unknown-row all rejected | None |
+| R3 hermetic tests (a–e) | GREEN | `cmd/corpusctl/cf003_exceptions_test.go`: current pass; extra unlisted gap fails (`not listed`); listed-covered fails (`is not gap`); unknown row fails (`does not exist`); removed entry fails (`not listed`); each asserts error text | None |
+| R4 manifest + current-doc sweep | GREEN | `program-manifest.md` row 22 → `COMPLETE / ACCEPTED_WITH_OWNER_EXCEPTIONS_19_COVERED_3_EXCEPTION_4_UNSUPPORTED`; README status line is `IN_PROGRESS_DEC001_SINGLE_NODE_ALPHA` (states no CF-003 partial, untouched); grep-found `PARTIAL` mentions live only in historical reports/decision records (ledger, truth-ledger, followup-packets, manifest-standard), left untouched | None |
+| R5 ledger handoff | GREEN | This section | None |
+
+## Changes
+- `docs/plans/finish-up/cf003-residual-gap-exception-decision.md` (NEW): owner-accepted exception decision, same style as prior decision files
+- `docs/reference/release-envelope.md`: added `## CF-003 residual gap exceptions` markdown table with the three rows (reuse of existing envelope text-table format; DA-004V markers preserved)
+- `cmd/corpusctl/cf003_exceptions.go` (NEW): `ValidateCF003Exceptions` + section/table parser (read file, locate header case-insensitively, parse first-column markdown table; fail closed on missing table, unknown row, stale non-gap entry, unlisted gap, duplicate entry)
+- `cmd/corpusctl/main.go`: `validate-release` now calls `ValidateCF003Exceptions` after `ValidateDA004VExclusion`
+- `cmd/corpusctl/cf003_exceptions_test.go` (NEW): 5 hermetic tests for R3 (a–e) with error-text asserts
+- `docs/plans/finish-up/program-manifest.md`: row 22 status flip only
+- No `corpus/*.json|ndjson`, `internal/**`, `scripts/**`, `Makefile` change; no row flip to `covered`; no `expectedState` change
+
+## Verification
+| Command/run | Selected | Exit | Meaning |
+| `go build ./...` | full repo | 1 | FAIL is environmental, not packet-caused: `cmd/instantd` link fails on broken macOS SDK `.tbd` files (`libresolv.9.tbd` / `libSystem.B.tbd` / `CoreFoundation.tbd` / `Security.tbd`: `unknown architecture arm64e.x1-macos`); `go build ./cmd/corpusctl/... ./internal/corpus/...` exit 0 and `go vet ./cmd/corpusctl/...` exit 0 |
+| `go test ./cmd/corpusctl/... -race -count=1` | full package | 0 | `ok github.com/instant-v2/instant-v2/cmd/corpusctl 10.185s`; incl. 5 new CF-003 tests + existing `TestValidateReleaseCommand` |
+| `go test ./cmd/corpusctl/ -run 'TestCF003Exceptions\|TestValidateRelease' -v -count=1` | 6 tests | 0 | `TestCF003ExceptionsCurrentCorpusAndEnvelopePass`, `TestCF003ExceptionsExtraUnlistedGapFails`, `TestCF003ExceptionsListedCoveredRowFails`, `TestCF003ExceptionsUnknownRowFails`, `TestCF003ExceptionsRemovedEntryFails`, `TestValidateReleaseCommand` all PASS |
+| `go run ./cmd/corpusctl --mode validate --corpus corpus/` | full corpus | 0 | `validated 18 scenarios; coverage=26; spec=0 regression=18 v1-capture=0` |
+| `make validate-release` | full release gate | 0 | validate-release report (18 scenarios, 26 matrix rows) accepted with the 3-row exception table |
+| `bash scripts/test-quality-release-gate.sh` | 41 checks | 1 | 40 passed, 1 failed: `FAIL: real hermetic selection did not run` — environmental (its `go test ./internal/reactive -short -json` leg fails to build with the same SDK linker error above); gate script and `internal/**` untouched by this packet |
+| `git status --porcelain` | worktree | n/a | `M cmd/corpusctl/main.go`, `M docs/plans/finish-up/program-manifest.md`, `M docs/reference/release-envelope.md`, `?? cmd/corpusctl/cf003_exceptions.go`, `?? cmd/corpusctl/cf003_exceptions_test.go`, `?? docs/plans/finish-up/cf003-residual-gap-exception-decision.md` (+ pre-existing user-owned untracked `completion-run-20260926.md`, `contracts/` preserved) |
+
+## Not run
+- Full-repo sweep beyond `cmd/corpusctl` (blocked by the environmental SDK linker failure above; affected-package lanes run instead)
+- Owned-DB / integration lanes (`INSTANT_TEST_INTEGRATION=1`, `AUTH-RUNTIME-001 NOT_GRANTED`); differential/v1 (FU-04 blocked); production gate end-to-end (FR-002 owns it)
+
+## Scope audit
+- Pre-existing changes preserved: untracked `docs/plans/finish-up/completion-run-20260926.md` and `docs/plans/finish-up/contracts/` left untouched; no reset/stash/checkout/clean
+- Phase-owned files: only `cmd/corpusctl/**`, `docs/reference/release-envelope.md`, `docs/plans/finish-up/**` (program-manifest, exception decision, this ledger section); no `corpus/`, `internal/`, `scripts/`, `Makefile` edits
+- Unexpected changes: none
+- No commit, push, tag, or remote-host run (per contract; changes left in the working tree)
+
+## Next prerequisite
+- FR-002 immutable acceptance on one clean SHA (needs the external/environment packets or owner-approved exceptions for them); CF-004/005 remain `BLOCKED / EXTERNAL_EVIDENCE`
+
+### CF-003 closure — coordinator review (2026-09-26)
+
+Verdict: REPAIR_REQUIRED → repaired by coordinator (small). Finding: the
+enforcement governed coverage rows only; 6 `gap` surfaces had no exception
+record, so "CF-003 COMPLETE" would have silently covered them. Repair: second
+envelope table `## CF-003 surface gap exceptions` (6 surfaces, explicit
+non-claims), `validateGapExceptions` shared by both tables, 3 new negative
+tests (unlisted surface, stale surface, missing section). Raw: `go vet
+./cmd/corpusctl` ok; `go test ./cmd/corpusctl -race -count=1` ok (10.1s);
+`corpusctl --mode validate-release` exit 0. Local `go build ./...` link failure
+(`unknown architecture arm64e.x1-macos`) reproduces at HEAD `f63d400` with
+go1.27.1 + macOS 27 SDK — environmental; full lanes run on the Linux
+qualification image. CF-003 → `COMPLETE / ACCEPTED_WITH_OWNER_EXCEPTIONS`.

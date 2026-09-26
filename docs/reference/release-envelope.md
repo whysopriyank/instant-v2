@@ -125,6 +125,43 @@ stable ID, exact v1/v2 behavior, impacted surface, evidence artifact, expiry or
 review date, enforcement location, compatibility-claim effect, and owner
 approval reference. A missing entry is a discrepancy, not an implicit exception.
 
+## CF-003 residual gap exceptions
+
+Decision: `COMPLETE / ACCEPTED_WITH_OWNER_EXCEPTIONS` for the single-node
+alpha (owner decision 2026-09-26, delegated to coordinator; see
+`docs/plans/finish-up/cf003-residual-gap-exception-decision.md`). The three
+`gap` rows below are accepted exceptions, not covered. No row flips to
+`covered`. No `expectedState` text changes. The 4 `unsupported` rows stay
+unsupported and remain enforced. `corpusctl --mode validate-release` rejects
+any `gap` row not listed here, and rejects a listed entry that is not `gap`
+(stale exception) or does not exist.
+
+| Coverage row | Basis already decided |
+|---|---|
+| `refresh-delta-boundary` | WS recording excluded by enforcement (FU-02 Option A) |
+| `rooms-presence-lifecycle` | FU-03 Option 1: admin presence is a stable 501 exclusion |
+| `transactions-concurrency-gap` | 2A-8 owner DEFER (2026-09-21): no deterministic capture primitive |
+
+## CF-003 surface gap exceptions
+
+Surface rows summarize corpus-transport coverage of a whole family. A surface
+stays `gap` while any part of its family has no checked-in corpus replay, even
+when individual coverage rows under it are `covered`. For the single-node alpha
+each gap surface below is an accepted exception: behaviour is proven by package
+and assembled-route tests (see the CF-003 ledger mapping) but the alpha makes
+**no corpus-replay claim** for the parts named. `corpusctl --mode
+validate-release` rejects any `gap` surface not listed here and any listed
+surface that is missing or no longer `gap`.
+
+| Surface | Not claimed through corpus replay in this alpha |
+|---|---|
+| `http.auth-admin-runtime-storage-backup` | Full HTTP auth/admin/runtime/storage/backup positive+denied matrix; only the flipped single-flow rows are corpus-covered |
+| `sse` | SSE lifecycle beyond the covered single-flow and FU-01 multi-client rows |
+| `ws.auth.tokens` | WS refresh-token initialization flow |
+| `ws.reactive.delta` | WS delta/full convergence (`refresh-delta-boundary` exception); no v1 parity |
+| `ws.rooms.fanout` | Admin presence lifecycle (`rooms-presence-lifecycle`, stable 501); peer fanout itself is covered by `rooms-fanout-positive` |
+| `ws.transact.extended` | Deep merge, full cardinality/cascade matrix, missing-entity lookup variants, concurrent ordering (`transactions-concurrency-gap`) |
+
 ## Packet selection ledger
 
 All rows are scoped to the candidate above. `REQUIRED` means required to finish

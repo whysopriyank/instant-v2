@@ -121,6 +121,9 @@ func run(args []string, out, diagnostic io.Writer) int {
 			if err := corpus.ValidateDA004VExclusion(o.corpusDir, o.releaseEnvelope); err != nil {
 				return fail(err)
 			}
+			if err := ValidateCF003Exceptions(o.corpusDir, o.releaseEnvelope); err != nil {
+				return fail(err)
+			}
 		}
 		if _, err := fmt.Fprint(out, report); err != nil {
 			return fail(err)

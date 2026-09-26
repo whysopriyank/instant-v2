@@ -32,7 +32,7 @@ its packet against current source and the latest handoff before changing status.
 | 19 | EV-006 benchsmoke wiring | 04 | `COMPLETE / HISTORICAL_ENTRYPOINT_ENFORCED` | F-002 harness-entrypoint decision | build + smoke |
 | 20 | CF-001 COPY acceptance | 05 | `COMPLETE / ACCEPTED_POSTGRES_COPY` | F-002, owned PostgreSQL | DB integration |
 | 21 | CF-002 recorder/fixtures | 05 | `COMPLETE / ACCEPTED_CANDIDATE_BOUND_LOCAL_CAPTURE` | F-002 surfaces | integrated capture |
-| 22 | CF-003 matrix closure | 05 | `PARTIAL / 19_COVERED_3_GAP_4_UNSUPPORTED_REMAINING_GAPS_OWNER_DECIDED` | selected product packets, CF-002 | real-path matrix |
+| 22 | CF-003 matrix closure | 05 | `COMPLETE / ACCEPTED_WITH_OWNER_EXCEPTIONS_19_COVERED_3_EXCEPTION_4_UNSUPPORTED` | selected product packets, CF-002 | real-path matrix |
 | 23 | CF-004 pinned-v1 environment | 05 | `BLOCKED / EXTERNAL_EVIDENCE` | F-002, service authority | qualified v1 runtime |
 | 24 | CF-005 differential | 05 | `BLOCKED / EXTERNAL_EVIDENCE` | CF-003/004 | compatibility + independent review |
 | 25 | OP-001 publisher recovery | 06 | `NOT_SELECTED / CONDITIONAL_DEFECT` | multi-node selected | fault integration + distributed review |
