@@ -281,6 +281,7 @@ func runSoak(ctx context.Context, cfg soakConfig, deps soakDeps, logger *slog.Lo
 				if sess == nil {
 					return
 				}
+				logger.Warn("soak session ended with error; redialing", "session", id, "attempt", attempt+1, "err", sess)
 				select {
 				case <-time.After(time.Duration(attempt+1) * time.Second):
 				case <-deadline.Done():
@@ -690,6 +691,7 @@ func driveSessionWithConn(ctx context.Context, conn sessionConn,
 	tick := time.NewTicker(txIntervalVal)
 	defer tick.Stop()
 	counter := int64(0)
+	var firstWriteAt time.Time
 	snapDeadline := clock.Now().Add(20 * time.Second)
 
 writeLoop:
@@ -712,8 +714,19 @@ writeLoop:
 			if pending := ledger.UnresolvedCountForSession(id); pending > 50 {
 				return fmt.Errorf("stalled: %d transacts without ok", pending)
 			}
-			if clock.Now().Sub(lastAt) > 20*time.Second && counter > 0 {
-				return fmt.Errorf("refresh stream stalled")
+			// The stall window starts at the later of the last refresh and
+			// this session's first write: ramp/settle are write-free, so the
+			// snapshot can be minutes old when writing begins.
+			if counter > 0 {
+				since := lastAt
+				if firstWriteAt.After(since) {
+					since = firstWriteAt
+				}
+				if clock.Now().Sub(since) > 20*time.Second {
+					return fmt.Errorf("refresh stream stalled")
+				}
+			} else {
+				firstWriteAt = clock.Now()
 			}
 			counter++
 			sequence := ledger.NextSequence(id)

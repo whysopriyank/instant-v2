@@ -2406,3 +2406,42 @@ resources only; comparative performance, provider, publish and deploy remain
 NOT_GRANTED). Soak row now states the exact qualified workload (≥900 s active
 writes, delta-refresh negotiation, one whole-table group, 8 tx/s) and that
 full-envelope clients at this fan-out are not qualified. `validate-release` 0.
+
+### RT-004 addendum — draft-handoff supersession + macOS confirmation (2026-09-26)
+
+The "# RT-004 handoff (2026-09-26, HEAD 71d8895 + work below …)" section
+immediately above was the implementation worker's draft, written against its
+uncommitted tree. It is SUPERSEDED by the coordinator's "RT-004 WS fan-out
+head-of-line blocking + keepalive lock inversion" section preceding it, which
+is authoritative for the committed tree (`0d36e38`, manifest row 5a). In
+particular the draft's claims "keepalive pings serialize on the same
+`writeMu`", "`flushOutbound`/`sendErrClose`", and "`ws.go` +229/−26" describe
+the pre-repair implementation, not the tree: the committed code runs Ping
+without the write mutex (lock-inversion repair), uses a writer-released flush
+barrier + writer-exit signal (the `len(queue)==0` poll raced on Linux), and
+removes the dead stores. Do not act on the draft's design details.
+Local macOS confirmation of the COMMITTED tree (go1.27.1 darwin/arm64,
+`CGO_ENABLED=0`): `gofmt -l` empty; `go vet ./internal/sync/... ./cmd/instantd/...`
+exit 0; `go test ./internal/sync/... -race -count=1` ok; owned-DB
+`INSTANT_TEST_INTEGRATION=1` (disposable local PG17 127.0.0.1:55433)
+`go test ./internal/sync/... ./cmd/instantd/... -race -count=1` ok
+(sync 33.068s, instantd 26.111s); short `./...` sweep no FAIL. No commit.
+
+### QR-001 official attempt 1 — FAIL, soak client stall-baseline defect (2026-09-26)
+
+Campaign `alpha-20260926` on candidate `b5e4dcf` (cutiewhy): build ✓
+(binary c2ca4205…), native PASS (1888 tests, 0 skip, 77 platform checks),
+recovery PASS 7/7. Soak: RT-004 held — a flat 4000 r/s (500 × 8 tx/s) for the
+whole run through 7200 transactions, no stall — but it FAILED at quiescence
+with 1 unresolved tx on session 0. Cause (cmd/soak, not the server): the
+stall guard measured from the last refresh, and for session 0 (dialled
+first) that was the initial snapshot ~2 min earlier because ramp and settle
+are write-free; on the tick after its first write it declared "refresh
+stream stalled", dropped the socket and lost that transact's ack, leaving
+it unresolved all run (exactly one redial, at write start). Fix: the window
+now starts at max(last refresh, first write); redials are logged at Warn.
+Red test `TestStallGuardMeasuresFromFirstWriteNotIdleSnapshot` fails on the
+old code ("declared stalled 3s after its first write") and passes on the
+fix, including a genuine 23 s gap still being detected; 20× -race ok.
+Evidence from attempt 1 is not reused: a new candidate requires a full new
+campaign.

@@ -700,3 +700,62 @@ func TestInitFrameCarriesSDKVersionOnlyWhenSet(t *testing.T) {
 	}
 	initSDKVersion = ""
 }
+
+// A session idle through ramp/settle has a snapshot older than the stall
+// window; its first write must get the full window to see a refresh rather
+// than being declared stalled on the next tick. A genuine 20 s gap after it
+// started writing must still trip the guard.
+func TestStallGuardMeasuresFromFirstWriteNotIdleSnapshot(t *testing.T) {
+	clock := newFakeClock(time.Now())
+	conn := newFakeSessionConn()
+	ledger := NewTransactionLedger(clock)
+	var refreshes, transacts, connects atomic.Int64
+	writeGate := make(chan struct{}, 1)
+	attr := "attr"
+	txInterval := 5 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	conn.PushFrame(map[string]any{"op": "init-ok", "app-id": "app"})
+	conn.PushFrame(map[string]any{"op": "add-query-ok", "client-event-id": "q-0", "result": []any{}, "processed-tx-id": 1})
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- driveSessionWithConn(ctx, conn, ledger, clock, 0, "app", &attr, &txInterval,
+			&refreshes, &transacts, &connects, writeGate, time.Second)
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for refreshes.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	clock.Advance(2 * time.Minute) // idle ramp + settle: no writes, no refreshes
+	// Keep the global write gate flowing as the real scheduler does, so the
+	// session keeps ticking (the stall check runs before each gate wait).
+	go func() {
+		for {
+			select {
+			case writeGate <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}()
+	for transacts.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	clock.Advance(3 * time.Second) // well inside the window since the first write
+	select {
+	case err := <-errCh:
+		t.Fatalf("session declared stalled %v after its first write: %v", 3*time.Second, err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	clock.Advance(20 * time.Second) // now a real gap: no refresh for 23 s of writing
+	select {
+	case err := <-errCh:
+		if err == nil || !strings.Contains(err.Error(), "refresh stream stalled") {
+			t.Fatalf("genuine stall reported as %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("genuine 23 s refresh gap was not detected")
+	}
+}
