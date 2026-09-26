@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -259,5 +260,24 @@ func TestTxPresenceAtomicity(t *testing.T) {
 	}
 	if got := txPresence(oracle, []txTriple{mk("e9", "a", "v9")}); got != 0 {
 		t.Fatalf("absent presence = %d, want 0", got)
+	}
+}
+
+func TestOutcomeDatabaseNameFitsPostgresLimit(t *testing.T) {
+	base := "instant_bench_qh001_alpha_20260926c_"
+	seen := map[string]bool{}
+	for _, tag := range []string{"crash-before-commit", "crash-after-commit", "crash-during-publication",
+		"postgres-restart", "drain-idle", "drain-moderate", "drain-saturated"} {
+		name := outcomeDatabaseName(base, tag)
+		if len(name) > pgMaxIdentifierBytes || !strings.HasPrefix(name, "instant_bench_") {
+			t.Fatalf("%s: derived %q (%d bytes)", tag, name, len(name))
+		}
+		if seen[name] {
+			t.Fatalf("%s: derived name %q collides", tag, name)
+		}
+		seen[name] = true
+	}
+	if got := outcomeDatabaseName("instant_bench_x", "drain-idle"); got != "instant_bench_x_qh_drain-idle" {
+		t.Fatalf("short names must be unchanged, got %q", got)
 	}
 }

@@ -49,7 +49,7 @@ install -m 0600 "$WORKDIR/qualify/instantd.env" "$EV/candidate/instantd.env"
 CFG_SHA=$(sha256sum "$EV/candidate/instantd.env" | awk '{print $1}')
 IMAGE_DIGEST=$(cat "$EV/candidate/image.digest")
 KERNEL=$(uname -r)
-FIXTURE="instant_bench_qh001_$(echo "$CAMPAIGN" | tr -c 'a-z0-9' '_')"
+FIXTURE="instant_bench_qh001_$(printf '%s' "$CAMPAIGN" | tr -c 'a-z0-9' '_')"
 
 mkdir -p "$EV/records"
 for lane in native recovery soak; do

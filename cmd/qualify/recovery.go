@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -397,7 +399,7 @@ func (d *recoveryDriver) outcomeDatabase(ctx context.Context, tag string) (strin
 	if err != nil || base.Path == "" {
 		return "", fmt.Errorf("owned DATABASE_URL is not a URL with a database path")
 	}
-	name := strings.TrimPrefix(base.Path, "/") + "_qh_" + tag
+	name := outcomeDatabaseName(strings.TrimPrefix(base.Path, "/"), tag)
 	if !strings.HasPrefix(name, "instant_bench_") {
 		return "", fmt.Errorf("derived database %q is not disposable instant_bench_", name)
 	}
@@ -414,6 +416,24 @@ func (d *recoveryDriver) outcomeDatabase(ctx context.Context, tag string) (strin
 	}
 	base.Path = "/" + name
 	return base.String(), nil
+}
+
+// pgMaxIdentifierBytes is PostgreSQL's identifier limit (NAMEDATALEN-1).
+// Longer names are truncated silently, so the connected database's identity
+// would no longer match the requested one.
+const pgMaxIdentifierBytes = 63
+
+// outcomeDatabaseName derives a per-outcome database name that always fits
+// PostgreSQL's identifier limit: over-long names keep a readable prefix and
+// end in a short hash of the full name, so distinct outcomes stay distinct.
+func outcomeDatabaseName(base, tag string) string {
+	name := base + "_qh_" + tag
+	if len(name) <= pgMaxIdentifierBytes {
+		return name
+	}
+	sum := sha256.Sum256([]byte(name))
+	suffix := "_" + hex.EncodeToString(sum[:])[:8]
+	return name[:pgMaxIdentifierBytes-len(suffix)] + suffix
 }
 
 // seedFixture runs soaksetup against one outcome database to create a fresh

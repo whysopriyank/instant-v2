@@ -178,7 +178,7 @@ HEAD_SHA=$(git -C "$SRC" rev-parse HEAD)
 if ! docker network inspect "$NET" >/dev/null 2>&1; then
   docker network create "$NET" >/dev/null
 fi
-DB_SANITIZED=$(echo "$CAMPAIGN" | tr -c 'a-z0-9' '_')
+DB_SANITIZED=$(printf '%s' "$CAMPAIGN" | tr -c 'a-z0-9' '_')
 DB_NAME="instant_bench_qh001_${DB_SANITIZED}"
 # Host-context DSN (127.0.0.1) and in-image DSN (container name) for one DB.
 HOST_DB_URL="postgres://instant:instant@127.0.0.1:${PG_HOST_PORT}/${DB_NAME}?sslmode=disable"

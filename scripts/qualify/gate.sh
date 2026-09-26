@@ -50,7 +50,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-DB_NAME="instant_bench_qh001_gate_$(echo "$CAMPAIGN" | tr -c 'a-z0-9' '_')"
+DB_NAME="instant_bench_qh001_gate_$(printf '%s' "$CAMPAIGN" | tr -c 'a-z0-9' '_')"
 GATE_DB_URL="postgres://instant:instant@${PG}:5432/${DB_NAME}?sslmode=disable"
 
 docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null

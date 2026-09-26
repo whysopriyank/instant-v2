@@ -2458,3 +2458,17 @@ lane log. Harness repair: helper failures now carry the command's stderr
 (`commandError`, test `TestCommandErrorIncludesStderr`) in both recovery
 and soak seeding. No blind retry was added (it could mask a real resource
 leak). New candidate → full new campaign.
+
+### Official attempt 3 — FAIL, root cause of attempts 2–3 found (2026-09-26)
+
+Campaign `alpha-20260926c` on `e0859e0`: build ✓ (ba9fe29b…), native PASS
+(1890 tests, 77 platform checks), recovery 6/7 — the new stderr capture
+showed the cause: `connected database identity "…_qh_crash-during-publicatio"
+does not match requested "…_qh_crash-during-publication"`. PostgreSQL
+silently truncates identifiers to 63 bytes. The scripts sanitized the
+campaign id with `echo … | tr -c 'a-z0-9' '_'`, turning echo's newline into
+a trailing `_`; with one-letter-suffixed campaign ids the longest outcome
+database name reached 64 bytes (attempt 1's id stayed at 63 and passed).
+Fixes: `printf '%s'` sanitization in campaign/gate/assemble scripts;
+`outcomeDatabaseName` bounds derived names to 63 bytes with a hash suffix
+(test `TestOutcomeDatabaseNameFitsPostgresLimit`). Product unaffected.
