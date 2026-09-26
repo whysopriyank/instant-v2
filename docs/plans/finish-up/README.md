@@ -1,6 +1,9 @@
 # Instant v2 finish-up program
 
-Status: `IN_PROGRESS_DEC001_SINGLE_NODE_ALPHA`
+Status: `SINGLE_NODE_ALPHA_ACCEPTED_F7DC5B1_20260926` (FR-002 gate passed on
+`f7dc5b10327a3b6a31d540c426e62d710d4078af`, campaign `alpha-20260926f`; alpha only —
+no tag, publish, deploy, v1-parity, provider, container, restore-drill, or
+performance claim; see `completion-run-20260926.md`)
 Owner decisions recorded: DEC-001 single-node-alpha (approved
 `DEC-001-single-node-alpha-20260905` + successor
 `DEC-001-rt001-bounded-rebinding-20260917`); FU-01 managed multi-client

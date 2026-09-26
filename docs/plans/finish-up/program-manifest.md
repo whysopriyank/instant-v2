@@ -38,17 +38,20 @@ its packet against current source and the latest handoff before changing status.
 | 24 | CF-005 differential | 05 | `NOT_SELECTED / OWNER_ALPHA_EXCEPTION` | CF-003/004 | compatibility + independent review |
 | 25 | OP-001 publisher recovery | 06 | `NOT_SELECTED / CONDITIONAL_DEFECT` | multi-node selected | fault integration + distributed review |
 | 26 | OP-002 replica visibility | 06 | `NOT_SELECTED / CONDITIONAL_DEFECT` | replica selected | lag integration + distributed review |
-| 27 | OP-003 native Linux | 06 | `BLOCKED / ENVIRONMENT_EVIDENCE` | target selected | native runtime |
+| 27 | OP-003 native Linux | 06 | `COMPLETE / ACCEPTED_CAMPAIGN_ALPHA_20260926F` | target selected | native runtime |
 | 28 | OP-004 container runtime | 06 | `NOT_SELECTED / OWNER_ALPHA_EXCEPTION` | container selected, DA-001 | container runtime |
-| 29 | OP-005 crash/bounce/drain | 06 | `BLOCKED / ENVIRONMENT_EVIDENCE` | phases 02–04, OP-003/004 | recovery campaign |
+| 29 | OP-005 crash/bounce/drain | 06 | `COMPLETE / ACCEPTED_CAMPAIGN_ALPHA_20260926F` | phases 02–04, OP-003/004 | recovery campaign |
 | 30 | OP-006 backup/restore drill | 06 | `NOT_SELECTED / OWNER_ALPHA_EXCEPTION` | DA-001/003, owned target | restore campaign |
-| 31 | QR-001 production soak | 07 | `BLOCKED / ENVIRONMENT_EVIDENCE` | EV-001..003, OP qualification | qualified soak bundle |
+| 31 | QR-001 production soak | 07 | `COMPLETE / ACCEPTED_SCOPED_ALPHA_SOAK_20260926F` | EV-001..003, OP qualification | qualified soak bundle |
 | 32 | QR-002 comparative performance | 07 | `NOT_SELECTED / MISSING_EVIDENCE` | EV-005/006, CF-005, QR-001 | qualified comparison |
 | 33 | QR-003 composed gate | 07 | `COMPLETE / ACCEPTED_CONTRACT_GATE` | selected packet interfaces stable | gate contract tests |
+| 33a | QH-001 qualification harness (`cmd/qualify`, `scripts/qualify`) | 07 | `COMPLETE / ACCEPTED_LINUX_CAMPAIGN_20260926F` | QR-003, EV-001..003 | red tests + six Linux campaigns |
+| 33b | LINT-001 golangci clean baseline | 07 | `COMPLETE / ACCEPTED_ZERO_ISSUES_IN_GATE` | QR-003 lint lane | gate lint lane (0 issues) |
+| 33c | AX-001 alpha owner exceptions | 01 | `COMPLETE / OWNER_DIRECTED_20260926` | F-002, owner direction | `alpha-exception-decision.md` + envelope validation |
 | 34 | QR-004 publish/sign/SBOM | 07 | `NOT_SELECTED / ASSEMBLY_GAP` | publish selected, QR-003 | dry-run workflow evidence |
 | 35 | QR-005 supply-chain inputs | 07 | `COMPLETE / ACCEPTED_PINNED_INPUTS_SECURITY_REVIEWED` | release workflow selected | static + release review |
 | 36 | FR-001 documentation truth | 08 | `COMPLETE / ACCEPTED_DOCS_RECONCILED_20260923` | all selected behavior resolved | link/source/evidence review |
-| 37 | FR-002 immutable acceptance | 08 | `BLOCKED / RELEASE_EVIDENCE` | FR-001, QR-003, all selected packets | clean independent gate |
+| 37 | FR-002 immutable acceptance | 08 | `COMPLETE / SINGLE_NODE_ALPHA_ACCEPTED_F7DC5B1` | FR-001, QR-003, all selected packets | clean independent gate |
 | 38 | FR-003 publication | 08 | `NOT_SELECTED / EXTERNAL_MUTATION` | FR-002, publish authority | external verification |
 | 39 | FR-004 canary/rollback | 08 | `NOT_SELECTED / EXTERNAL_MUTATION` | FR-002/003, deploy authority | deployment evidence |
 | 40 | TD-001 realtime efficiency/observability | 09 | `DEFERRED / TECH_DEBT` | RT-001/002 stable | focused performance/reliability |

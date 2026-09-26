@@ -45,3 +45,12 @@ The hosts run unrelated workloads. Every campaign uses uniquely prefixed
 containers/networks/volumes (`iv2q-<campaign>-*`), binds only loopback or an
 internal Docker network, and removes everything it created. Pre-existing
 containers are never touched.
+
+## Outcome (2026-09-26)
+
+`single-node alpha accepted` on `f7dc5b10327a3b6a31d540c426e62d710d4078af`:
+the FR-002 gate passed against campaign `alpha-20260926f` (sixth official
+attempt; attempts 1–5 each surfaced and fixed one harness, test, or product
+defect — see the execution ledger). Product defect found and fixed on the way:
+RT-004 (WS fan-out head-of-line blocking and a keepalive/read lock inversion
+that stalled all subscribers). No tag, push, publish, or deploy performed.

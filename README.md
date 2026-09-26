@@ -58,7 +58,18 @@ separates completed implementation from remaining release and parity gaps.
 Performance thesis is **not** raw speed (the workload is Postgres-bound); it is memory density,
 sub-second cold start, single-binary deploy, and architectural wins (delta sync, no cluster mesh).
 
-## Status (2026-08-28; first release is an explicit single-node alpha per DEC-001)
+## Status (2026-09-26; single-node alpha accepted on `f7dc5b1`, not production-ready)
+
+**Alpha acceptance:** the DEC-001 single-node-alpha release gate passed on
+candidate `f7dc5b10327a3b6a31d540c426e62d710d4078af` with evidence from
+qualification campaign `alpha-20260926f` on an owned Linux host: native
+Linux lanes (1891 tests), 7/7 crash/restart/drain recovery outcomes, and a
+scoped 900 s, 500-session soak (7200/7200 transactions acknowledged,
+committed and refreshed, none dropped). This is an **alpha** acceptance for
+testing only; it is not a v1-production-ready claim, and nothing has been
+tagged, published, or deployed. See
+[`docs/plans/finish-up/program-manifest.md`](docs/plans/finish-up/program-manifest.md)
+and [`docs/reference/release-envelope.md`](docs/reference/release-envelope.md).
 
 The first release is an explicit single-node alpha (DEC-001): no
 production-readiness, provider-verified OAuth/email, v1-parity, container

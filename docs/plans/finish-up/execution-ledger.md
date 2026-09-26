@@ -2484,3 +2484,39 @@ global write gate for the ~2 min write-free ramp+settle. Now the window
 starts when the first transact is actually sent. The red test was
 strengthened to hold the gate closed across the idle period (red on the
 previous fix: "declared stalled 3s after its first write"); green, 30× -race.
+
+### Official attempt 5 — lanes PASS, gate caught a contract-test env leak (2026-09-26)
+
+Campaign `alpha-20260926e` on `bb0805d`: build ✓ (3539d56e…), native PASS
+(1891 tests, 77 platform checks), recovery PASS 7/7, soak PASS (500
+sessions, 900 s active, 7200 acked = committed = refreshed, 0 dropped,
+0 unresolved, 0 redials — stall-guard fix confirmed). The FR-002 gate
+passed validate-release, lint (0 issues), vet, check-generated and build,
+then `test-release-contract` failed 42/2: inside the real gate
+`RELEASE_CAMPAIGN_ID`/`RELEASE_GATE_MANIFEST` are exported, so the
+"missing campaign"/"missing manifest" negative cases inherited them. Fix
+`f7dc5b1`: the contract test unsets the ambient gate env before its cases
+(red→green in the qualification image with the gate env injected: 43/1 →
+44/0). Test-only change; new candidate → full new campaign.
+
+### FR-002 handoff — single-node alpha ACCEPTED (2026-09-26)
+
+- Candidate: `f7dc5b10327a3b6a31d540c426e62d710d4078af`; binary sha256 `a10a6ef56f94…`
+  (qualification image, Go 1.25.14, rebuilt identically by the gate).
+- Campaign `alpha-20260926f` on host cutiewhy (Linux 6.8.0-137, amd64), started
+  2026-09-26T09:14:38Z. Lanes: build ✓; native PASS (1891 tests, 77 platform
+  checks); recovery PASS 7/7 (all preconditions met, 0 partial / 0 acked-missing
+  transactions, saturated drain 6249 outstanding → exit 1 s, postgres-restart
+  PID unchanged); soak PASS (500 sessions, 900 s active, 7200/7200/7200, 0 dropped).
+- Records: OP-003, OP-005, QR-001 PASS; manifest 28 handoffs, sha256
+  `5be877e3ea934684d67523cb19f306c7bf1766261442327946754b035cb88213`.
+- Gate: `scripts/qualify/gate.sh` → "release-gate: selected single-node-alpha
+  checks passed for f7dc5b10327a3b6a31d540c426e62d710d4078af".
+- Coordinator evidence review: record identities agree (campaign, candidate,
+  binary); per-outcome recovery artifacts inspected; host left with no
+  `iv2q-*` containers/networks or bound campaign ports. Evidence retained on
+  the host at `~/iv2q-alpha-20260926f/work/evidence` (49 MB, not committed).
+- Scope: alpha only. Not claimed: providers (DA-006B/008B), v1 parity
+  (CF-004/005), container (OP-004), restore drill (OP-006), performance
+  (QR-002), publish/sign (QR-004), publication/canary (FR-003/004).
+  No tag, push, publish, or deploy was performed.
