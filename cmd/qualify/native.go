@@ -143,13 +143,16 @@ func writeNativeResult(out string, outcomes []testOutcome, started, finished tim
 // runNativeSelection executes the same selection as `make test-integration`
 // (owned DB, no -short) plus the hermetic short lane, returning both raw
 // -json streams.
+// A failing test is a verdict, not a harness error: its -json stream is
+// kept and parsed (failures then FAIL the lane with the raw log retained).
+// Only a run that produced no -json output at all is a harness error.
 func runNativeSelection() (ownedDB, hermetic []byte, err error) {
 	ownedDB, err = goTestJSON("-run", ".", "-count=1")
-	if err != nil {
+	if err != nil && len(bytes.TrimSpace(ownedDB)) == 0 {
 		return nil, nil, fmt.Errorf("owned-DB selection: %w", err)
 	}
 	hermetic, err = goTestJSON("-run", ".", "-count=1", "-short")
-	if err != nil {
+	if err != nil && len(bytes.TrimSpace(hermetic)) == 0 {
 		return ownedDB, nil, fmt.Errorf("hermetic selection: %w", err)
 	}
 	return ownedDB, hermetic, nil

@@ -7,7 +7,7 @@ ENV GOTOOLCHAIN=local
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    jq make git procps postgresql-client postgresql ca-certificates \
+    jq make git procps ca-certificates gnupg \
   && rm -rf /var/lib/apt/lists/*
 
 # F2 (QH-001 R1): the container runs as root over a host-uid checkout, so Go
@@ -35,8 +35,18 @@ RUN curl -fsSLo ripgrep.tar.gz https://github.com/BurntSushi/ripgrep/releases/do
 # several suites assert permission denials that root bypasses, and CI runs
 # as a non-root user. Caches live under /tmp so any uid can write them;
 # GOMODCACHE is fixed because untrimmed binaries embed module paths.
+# PostgreSQL 17 server + client from the signed PGDG repository (bookworm
+# ships 15, whose initdb lacks the -c option the chaos harness uses; the
+# owned DB is postgres:17). The repository key is verified by fingerprint.
+RUN install -d /usr/share/postgresql-common/pgdg \
+  && curl -fsSLo /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+  && gpg --show-keys --with-colons /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc | grep -q '^fpr:::::::::B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8:' \
+  && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
+  && apt-get update && apt-get install -y --no-install-recommends postgresql-17 postgresql-client-17 \
+  && rm -rf /var/lib/apt/lists/*
+
 # initdb/pg_ctl on PATH: cmd/chaos tests need a throwaway cluster, and the
 # gate's owned-DB lane rejects any skipped test.
-ENV PATH=/usr/lib/postgresql/15/bin:$PATH
+ENV PATH=/usr/lib/postgresql/17/bin:$PATH
 ENV HOME=/tmp/home GOCACHE=/tmp/gocache GOMODCACHE=/tmp/gomod GOLANGCI_LINT_CACHE=/tmp/golangci
 WORKDIR /src
