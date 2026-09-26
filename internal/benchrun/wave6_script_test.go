@@ -265,7 +265,9 @@ func startStatusProcess(t *testing.T, duration string) (*exec.Cmd, string, strin
 		exe, exeErr := os.Readlink(fmt.Sprintf("/proc/%d/exe", cmd.Process.Pid))
 		stat, statErr := os.ReadFile(fmt.Sprintf("/proc/%d/stat", cmd.Process.Pid))
 		fields := strings.Fields(string(stat))
-		if exeErr == nil && statErr == nil && len(fields) > 21 {
+		// setsid execs sleep after Start returns; until then /proc/<pid>/exe
+		// names setsid, and recording that identity races the status check.
+		if exeErr == nil && statErr == nil && len(fields) > 21 && filepath.Base(exe) == "sleep" {
 			return cmd, exe, fields[21]
 		}
 		if time.Now().After(deadline) {

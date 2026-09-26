@@ -1820,3 +1820,16 @@ Verdict: ACCEPT. Docs-only diff; the six packets were already `DEFERRED` /
 policy; OP-003/OP-005/QR-001 remain `REQUIRED`. `validate-release` exit 0.
 `test-quality-release-gate.sh` 40/41 locally — the 1 failure is the macOS
 arm64e linker issue (reproduces at `f63d400`), re-run on Linux in FR-002.
+
+### OP-003 pre-flight — Linux test race repair (2026-09-26, bigbeast)
+
+Early unofficial Linux run of `cfbbaaa` (golang:1.25-bookworm@sha256:3b4a…,
+non-root, jq/rg/procps installed): `go test ./... -race -short` all green
+except `internal/benchrun` `TestWave6StatusKeepsRunningPhaseDuringChild{Launch,ExitPublication}Window`
+(5/5 deterministic FAIL). Root cause: test helper `startStatusProcess`
+records `/proc/<pid>/exe` immediately after `Start()`, racing `setsid`'s exec
+of `sleep` (probe: 2/5 reads name `/usr/bin/setsid`). Test-only fix: wait
+until the exe is `sleep`. After fix: `-run TestWave6Status -count=20 -race`
+80/80 PASS. Root-user runs additionally fail `TestDiskBackendRefusesUnwritableRoot`,
+`TestPresignRoundTrip` and git-identity tests — the qualification image must
+run as a non-root user (fed into QH-001 R2).
