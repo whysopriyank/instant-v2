@@ -1685,3 +1685,263 @@ CF-003 now 19 covered / 3 gap / 4 unsupported. Remaining gaps are all owner-deci
 Not run: full-repo sweep beyond affected packages; FR-002 immutable acceptance; anything external (DA-006B, DA-008B, CF-004/005, OP-003..006, QR-001).
 
 Next prerequisite: owner decision on the CF-003 residual-gap exception; then FR-002 on one clean immutable SHA (needs the external/environment packets or owner-approved exceptions for them).
+
+## QH-001 qualification harness (2026-09-26, go1.27.1 darwin/arm64, HEAD f63d400 branch qh-001, no commit)
+
+Contract: `docs/plans/finish-up/contracts/qh001-qualification-harness.md`.
+Assembly-gap packet: builds the producers for the three gate external
+records (`native_linux` → OP-003, `recovery` → OP-005, `soak` → QR-001) plus
+the campaign manifest. No qualification campaign run here; no product-code
+change (`internal/**`, `cmd/instantd/**`, `cmd/soak/**`, `cmd/chaos/**`
+untouched — verified by `git status` scope audit below).
+
+New files (leased paths only):
+- `cmd/qualify/` — `main|native|recovery|soak|record|manifest|common|gotestjson|platform|uname,soak_live` + 6 hermetic test files. Stdlib + existing deps only (`coder/websocket`, `pgx/stdlib`); no `internal/**` imports, so no product coupling. `internal/qualifyclient` NOT created (not needed: recovery reuses the soaksetup flow + a minimal WS client; documented in code).
+- `scripts/qualify/` — `Dockerfile` (golang:1.25-bookworm@sha256:3b4a…36437, GOTOOLCHAIN=local, jq/make/git/procps/postgresql-client, golangci-lint v2.13.1 via the exact ci.yml curl+sha256sum -c), `campaign.sh` (build|native|recovery|soak lanes, `iv2q-<campaign>-*` prefix gate, loopback-only ports, double-build determinism check, binary-sha refusal, verified cleanup marker), `gate.sh` (in-image `make test-release` with read-only evidence mount + full log), `test-campaign.sh` (19 hermetic checks).
+- `docs/guides/15-qualification-campaign.md` — coordinator commands, frozen budgets, per-outcome proves/does-not-prove, determinism assumptions.
+
+Key design points: native FAILs on any skip, any platform group without a
+passing test, or non-native execution; recovery verdicts are exact-state
+(acked-present, un-acked all-or-nothing via full triple sets, oracle
+convergence) with RTO ≤ 3600 s / drain ≤ 30 s integer-second budgets;
+soak maps only the soak's own evidence (ledger derivation documented in the
+lane file, projected out of exact gate details); record/manifest mirror the
+gate jq predicates in Go and `record|manifest` refuse (incomplete cleanup,
+skips, FAIL lanes, wrong packet sets, non-GREEN states, binary mismatch);
+manifest self-validates; predicate-pin test fails if the gate script text
+changes. Recovery/soak lanes execute the image-built qualify binary on the
+host so `--pg-restart-cmd` runs in host context per the contract; native
+runs inside the image.
+
+Verification: see handoff Verification table (raw outputs in session log).
+Assumptions the coordinator must check on the real Linux host: Ubuntu 6.8 /
+x86_64 / Docker 29 with no Go; ports 55432/18080/18081 free on 127.0.0.1;
+`git bundle` of one clean commit; determinism inputs (image digest, /src
+path, clean tree, no ldflags stamping) preserved; DSN names an
+`instant_bench_*` database per soaksetup validation.
+
+## QH-001 R1 repair (2026-09-26, go1.27.1 darwin/arm64, HEAD f63d400 branch qh-001, no commit)
+
+Contract: `docs/plans/finish-up/contracts/qh001-repair-r1.md` (context:
+`qh001-qualification-harness.md`). Same leases (only `cmd/qualify/**`,
+`scripts/qualify/**`, `docs/guides/15-qualification-campaign.md`, this
+ledger section). No product-code change, no commit.
+
+### F1 (blocker) — build lane writes through a read-write /src mount
+`campaign.sh` build lane now mounts `-v "$SRC:/src"` (no `:ro`) for its two
+`make build` invocations; tools/native mounts stay `:ro` (pinned by new
+`test-campaign.sh` checks: exactly 2 rw mounts, ≥2 ro). THE candidate is
+`src/bin/instantd` (`install`ed to `evidence/candidate/instantd`);
+recovery/soak execute exactly `--instantd "$CANDIDATE_BIN"`, and later lanes
+refuse on sha mismatch against the recorded `make`-output sha. `gate.sh`
+also mounts `/src` read-write: the gate runs the `build` target (writes
+`bin/instantd`, then compares sha256); `bin/` is gitignored so the gate's
+clean-tree assertion is unaffected.
+
+### F2 (blocker) — git safe.directory in the image
+Dockerfile gains `RUN git config --system --add safe.directory '*'`
+(root-over-host-uid checkout broke Go VCS stamping; the FR-002 gate runs
+plain `make build` in this image). No `-buildvcs=false` (pinned by test).
+
+### F3 (critical) — recovery verdicts derived from observation
+`cmd/qualify/recovery.go` (verdict core) + new `cmd/qualify/recovery_live.go`
+(live drivers) rewrite the outcome drivers:
+- Non-blocking submit path: pipelined writers (≥2 sessions/outcome) send
+  transact frames without waiting; every tx tracked by client-event-id in a
+  mutex ledger (submitted → acked+server-tx-id | error+reason |
+  unknown-at-crash), with max-outstanding accounting.
+- Every crash/restart outcome runs ≥2 subscriber sessions (4 for
+  crash-during-publication) with an `add-query` over the fixture attr,
+  recording every add-query-ok/refresh-ok result (watermarks, extracted
+  value sets, error frames, real close status).
+- Convergence = each subscriber's final observed value set compared
+  EXACTLY to the DB oracle's attr value set (`compareValueSets`, unit
+  pinned; oracle-vs-oracle is gone). Drain convergence = every admitted
+  subscriber observed ≥1 refresh-ok with no error frames and no phantom
+  (non-oracle) values — lag is expected, phantoms are not.
+- crash-before-commit: two-phase (committed single + multi-triple base,
+  then burst); SIGKILL the moment the ledger shows ≥1 un-acked tx.
+  Multi-triple shape = 3 triples on distinct entities. Partial txs counted
+  from the DB (0 < present < len); >0 FAILs.
+- crash-after-commit: busy-spin observation loop; SIGKILL the moment an ack
+  exists whose server tx id no subscriber watermark covers yet.
+- crash-during-publication: sustained burst incl. multi-triple mix; SIGKILL
+  on observed fan-out skew (max refresh-ok > min across 4 subs).
+- postgres-restart: writers+subs active across `pg-restart-cmd`; instantd
+  never restarted (PID equality asserted, liveness re-checked); RTO =
+  DB-ready → max(first new acked write, all-subscribers-converged).
+- Drain: real `syscall.SIGTERM`; saturated requires ledger
+  max-outstanding ≥ 8 at SIGTERM after a ≥5 s flood (demonstrating submit >
+  ack rate) plus a first-refresh gate for all drains; every pre-exit tx
+  resolves from the client ledger (acked→present in DB; error/close with
+  observed reason/code; never-acked→absent-or-atomic, else unresolved).
+  Real exit status (`ProcessState`) and real observed close codes recorded;
+  no `[]string{"normal"}` anywhere.
+- No hard-coded verdict literal remains: `grep -n '= true$'` over both
+  recovery files is empty (sets are `map[string]struct{}`, flags come from
+  comparisons); outcomes entries stay exactly `{id,result}` (+lane-local
+  reason on FAIL) so the gate predicate holds; close codes live only in the
+  per-outcome artifacts.
+- Per-outcome artifacts `evidence/recovery/recovery-<id>.json` carry the
+  full ledger (triples now exported, so they serialize), subscriber final
+  sets + snapshots, oracle set, submitted-value universe, partial/unacked
+  lists, precondition evidence, timings, exit status, close codes; all
+  seven are registered in the lane `artifacts`.
+- Fresh owned database per outcome (`<base>_qh_<id>`, still
+  `instant_bench_*`-disposable): `cmd/soaksetup` mints a fixed service
+  identity per database, so same-DB re-seeding collides.
+- `verdict_test.go` extended: precondition-not-reached, subscriber
+  diverged, partial multi-triple, acked-but-missing-from-ledger, drain
+  31 s, drain unresolved in-flight, postgres PID change, plus direct
+  ledger/convergence/atomicity/universe unit tests.
+- Live bugs found by the local runs and fixed: temp init pump closing the
+  shared socket (now synchronous init-ok wait); same-DB re-seed collision
+  (per-outcome DBs); 20 ms ack poll coarser than the ack→refresh gap
+  (busy-spin); vacuous all-unacked kill (committed base first); instant
+  saturated kill before first refresh (≥5 s flood + first-refresh gate);
+  unexported triple fields emptying the artifact ledger (exported).
+
+### F4 (major) — soak mapping bound to cmd/soak's real output
+`cmd/qualify/soak.go` now strict-decodes the real `CompletenessManifest`
+(exact tags; `status=="complete"`, `completed`, `summary.success`
+required) and classifies every line of the listed events artifact as a
+known run-level event (`event`/`at` envelope from
+`internal/benchharness/observe.go`, exact per-name payload sets from
+`cmd/soak/main.go` Emit sites) or a `LedgerEntry`-shaped per-tx entry
+(exact tags, states ∈ submitted/acknowledged/refreshed/resolved/terminal).
+Unknown anything → FAIL. `committed` = distinct acknowledged server tx
+ids; `acknowledged` = ack-implying states (acknowledged/resolved, plus
+refreshed accepted-but-never-emitted, documented); `refreshed` = entries
+with `refresh_at` set; `dropped`/`unresolved` = summary cross-checked
+against terminal/non-resolved counts (mismatch → FAIL); the final
+`run_finished` counters must equal the summary. Without per-tx entries the
+mapping uses summary-certified counts (`success` certifies quiescence:
+all submitted acked+resolved, zero drops), documented in
+`derived_from_ledger`. `runSoakLive` resolves the manifest through the
+real `DeriveManifestPath` mirror (old code appended `.manifest.json` to
+the full `.jsonl` name and would never find it). `soak_test.go` fixtures
+are real-format JSON plus `TestSoakOutputTagsPinned`, which reads
+`cmd/soak/{evidence,ledger,main}.go` + `observe.go` and fails on any tag,
+state, event-name, envelope, or payload drift.
+
+### F5 (minor) — secrets and stray binary
+`instantd.env` no longer contains `INSTANT_V2_INSECURE_DEV_SECRETS=1`;
+`campaign.sh` generates per-invocation secrets (`STORAGE_SECRET`,
+`STORAGE_ROOT` under the workdir, four `INSTANT_OAUTH_*` required with
+`DATABASE_URL`) and exports them env-only (never written to the env file
+or evidence; pinned by tests); `qualify` refuses non-dev startup without
+them and refuses insecure mode outright. No `./qualify` binary at the repo
+root (already absent; `instantd` is gitignored, `soak` is tracked upstream
+— both pre-existing, untouched).
+
+### Verification (raw)
+
+```
+$ CGO_ENABLED=0 gofmt -l cmd/qualify
+(empty)
+$ CGO_ENABLED=0 go vet ./cmd/qualify/...
+VET-OK (exit 0)
+$ CGO_ENABLED=0 go test ./cmd/qualify/... -race -count=1
+ok  github.com/instant-v2/instant-v2/cmd/qualify  (exit 0)
+$ bash scripts/qualify/test-campaign.sh
+25 passed, 0 failed   # incl. new R1 checks: rw build mount, make-built
+                      # candidate, safe.directory, createdb syntax, env-only
+                      # secrets
+$ CGO_ENABLED=0 bash scripts/test-quality-release-gate.sh
+44 passed, 0 failed
+$ grep -n '= true$' cmd/qualify/recovery.go cmd/qualify/recovery_live.go
+(empty, exit 1)
+$ git status --porcelain
+ M docs/plans/finish-up/execution-ledger.md
+?? cmd/qualify/
+?? docs/guides/15-qualification-campaign.md
+?? docs/plans/finish-up/contracts/
+?? scripts/qualify/
+$ CGO_ENABLED=0 INSTANT_TEST_INTEGRATION=0 DATABASE_URL= TEST_DATABASE_URL= \
+  go test ./... -race -count=1 -short 2>&1 | tail -3
+EXIT=0, 33 packages ok, 0 FAIL
+```
+
+Notes:
+- macOS links require `CGO_ENABLED=0` (without it even the untouched
+  `internal/reactive` package fails to build; with it the gate battery is
+  44/44 — the single failure seen without the flag is environmental, not a
+  harness regression).
+- `golangci-lint` is not installed locally; the image installs v2.13.1 via
+  the pinned ci.yml recipe instead.
+- No `./qualify` stray binary at the repo root (nothing to delete).
+- Beyond R1's letter, one real blocker was fixed and is disclosed:
+  `campaign.sh`/`gate.sh` ran `createdb -U instant postgres "$DB_NAME"`,
+  which tries to create a database literally named `postgres` and fails on
+  every fresh host (verified against local PG 17:
+  `ERROR: database "postgres" already exists`). Now
+  `createdb -U instant "$DB_NAME"`, pinned by a new hermetic check.
+
+### Local recovery run (disposable PostgreSQL, final binary)
+
+Disposable cluster: `initdb` + `pg_ctl` (PG 17.11, `wal_level=logical`,
+port 55434, loopback+trust), base DB `instant_bench_qh001_r1`, one fresh
+`<base>_qh_<outcome>` database per outcome (7 total, dropped after).
+Binaries built `CGO_ENABLED=0` from this tree; non-dev secrets via env
+only; `--pg-restart-cmd "pg_ctl -D /tmp/qh001pg restart"` (real restart,
+instantd PID asserted unchanged). `EXIT=0`, record `PASS`:
+
+```json
+{"packet":"OP-005","selected_count":7,"skipped_count":0,"result":"PASS",
+ "details":{"max_rto_seconds":1,"max_drain_seconds":1,
+  "outcomes":[
+   {"id":"crash-after-commit","result":"PASS"},
+   {"id":"crash-before-commit","result":"PASS"},
+   {"id":"crash-during-publication","result":"PASS"},
+   {"id":"drain-idle","result":"PASS"},
+   {"id":"drain-moderate","result":"PASS"},
+   {"id":"drain-saturated","result":"PASS"},
+   {"id":"postgres-restart","result":"PASS"}]},
+ "artifacts":[7 recovery/recovery-<id>.json refs]}
+```
+
+Per-outcome evidence (from the artifacts):
+- crash-before-commit: 20 txs (4 acked committed base incl. multi-triple,
+  16 un-acked killed in flight); oracle = 8 base values; 0 partial;
+  resubscribed 2/2 converge. Precondition: 16 un-acked at SIGKILL.
+- crash-after-commit: 1 trigger tx, killed on attempt 1 the same beat its
+  ack was observed with both subscriber watermarks below server tx 1;
+  converged after restart.
+- crash-during-publication: 82 txs (13 acked, 69 errored); oracle 15
+  (13 acked + 2 unacked-present, 0 partial); 4/4 converge. Precondition:
+  refresh-ok counts [9 9 8 8] at SIGKILL.
+- postgres-restart: 8 pre + resume writes acked, 6 never-acked absent;
+  RTO 1 s (DB-ready → first ack + 2/2 converged), PID unchanged.
+- drain-idle: 1 probe acked + present, exit 0 in 1 s, port released.
+- drain-moderate: 160 submitted (158 acked + 2 socket-close), all 160
+  values in oracle, 0 partial/unresolved, exit 0 in 1 s.
+- drain-saturated: 1826 submitted in a bounded flood (5 acked + 1821
+  socket-close:1001), 9 oracle values, 0 partial/unresolved, exit 0 in
+  1 s, real close code 1001 on all 6 sessions, max-outstanding 1823.
+- No `null` artifact keys; ledgers carry full triples (exported fields);
+  all close codes observed (`1001`, `no-status:…EOF` on SIGKILL),
+  never assigned.
+
+What the local run does NOT prove (coordinator owns on real hosts):
+docker image build, in-image `make build` determinism + sha equality with
+the gate rebuild, native/soak lanes, `record`/`manifest`/`gate.sh`
+end-to-end, and Linux/macOS behavioral differences. Three local-run
+repairs are already in the tree (init-pump socket close, same-DB re-seed
+collision, ack→refresh observation skew); the pg-during-9 near-miss from
+an earlier run was traced to universe-sweep timing and is now swept after
+writer stop with the universe recorded in every artifact.
+
+### QH-001 — coordinator review (2026-09-26)
+
+Round 1 verdict: REPAIR_REQUIRED (contract `contracts/qh001-repair-r1.md`):
+build lane wrote into a read-only mount; git dubious-ownership; recovery
+verdicts were hard-coded (`Converged/UnackedAtomic/InFlightResolved=true`,
+SIGINT instead of SIGTERM, no subscribers, self-compared "convergence");
+soak mapping guessed schema. R1 by OpenCode: all verdict fields now computed
+(grep `= true$` empty), convergence = subscriber observed set vs DB oracle,
+bounded preconditions, local live recovery vs PG17 7/7 PASS with recorded
+preconditions. Coordinator R2 (small, direct): image runs lanes as the
+invoking non-root uid with fixed /tmp caches (root bypasses permission
+assertions; see OP-003 pre-flight), pinned ripgrep 15.2.0 (fixture audit).
+Verdict after R2: ACCEPT for code; execution acceptance happens on the real
+Linux campaign (OP-003/OP-005/QR-001 handoffs).
