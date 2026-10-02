@@ -153,3 +153,18 @@ The fresh source CI also exposed incorrect PostgreSQL `createdb` argument and
 soak process/configuration wiring; those release-blocking workflow inputs are
 corrected without changing daemon behavior or relaxing configuration checks.
 All prior campaign evidence remains under its original source identity.
+
+
+### Retained room replay ordering
+
+The successor's actual CI run `37051669331` exposed a test-only contradiction:
+`TestFU01RoomCaptureReplay` accepted actor acknowledgement/presence in either
+order during live capture, as required by the existing room contract, but its
+final retained-log replay demanded one fixed order. Compare complete frames
+within only the three already approved pair windows; keep raw subscriber/seq
+retention, every other frame position, exact payload checks and duplicate
+rejection intact. A deterministic presence-first regression reproduces the CI
+failure before the correction. Daemon behavior is unchanged. The `c5889840`
+campaigns remain separate superseded evidence; its stopped 645-second active
+soak is FAIL, never an accepted 900-second campaign. The final alpha.2 candidate
+requires new source/binary/image identities and five fresh runtime campaigns.

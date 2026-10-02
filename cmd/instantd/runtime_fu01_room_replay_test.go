@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -260,14 +261,11 @@ func TestFU01RoomCaptureReplay(t *testing.T) {
 	fu01AssertRetentionSeq(t, logB, "B", 7)
 
 	// Replay from retention alone: every retained frame re-asserts against
-	// its exact checked-in counterpart by (subscriber, seq); no live
-	// stream is touched for this pass.
-	for i, entry := range logA {
-		fu01RoomCompare(t, fmt.Sprintf("replay A[%d]", i), streamA[i], live, entry.frame)
-	}
-	for i, entry := range logB {
-		fu01RoomCompare(t, fmt.Sprintf("replay B[%d]", i), streamB[i], live, entry.frame)
-	}
+	// its exact checked-in counterpart, accepting either order only within
+	// the contract's three ack/presence pairs. Raw seq values stay intact;
+	// no live stream is touched for this pass.
+	fu01RoomReplay(t, "A", logA, streamA, live, 1, 4)
+	fu01RoomReplay(t, "B", logB, streamB, live, 1)
 
 	// Bounded quiescence on both converged streams.
 	fu01AssertQuiet(t, a, "A", 250*time.Millisecond)
@@ -275,6 +273,34 @@ func TestFU01RoomCaptureReplay(t *testing.T) {
 
 	a.closeAndAwaitUnauthorized(t, ctx)
 	b.closeAndAwaitUnauthorized(t, ctx)
+}
+
+func fu01RoomReplay(t *testing.T, name string, log []fu01Frame, stream []map[string]any, live map[string]string, pairStarts ...int) {
+	t.Helper()
+	for i := 0; i < len(log); i++ {
+		first, second := i, i+1
+		if slices.Contains(pairStarts, i) {
+			if log[i].frame["op"] == stream[second]["op"] {
+				first, second = second, first
+			}
+			fu01RoomCompare(t, fmt.Sprintf("replay %s[%d]", name, i), stream[first], live, log[i].frame)
+			fu01RoomCompare(t, fmt.Sprintf("replay %s[%d]", name, i+1), stream[second], live, log[i+1].frame)
+			i++
+			continue
+		}
+		fu01RoomCompare(t, fmt.Sprintf("replay %s[%d]", name, i), stream[i], live, log[i].frame)
+	}
+}
+
+func TestFU01RoomRetentionReplayEitherOrder(t *testing.T) {
+	ack := map[string]any{"op": "join-room-ok", "client-event-id": "join-a", "room-id": "fu01-room"}
+	presence := map[string]any{"op": "refresh-presence", "room-id": "fu01-room", "data": map[string]any{"peer-a": map[string]any{"mood": "ok"}}}
+	for _, frames := range [][]map[string]any{{ack, presence}, {presence, ack}} {
+		log := []fu01Frame{{subscriber: "A", seq: 0, frame: frames[0]}, {subscriber: "A", seq: 1, frame: frames[1]}}
+		fu01AssertRoomOps(t, log, "A", [][]string{{"join-room-ok", "refresh-presence"}})
+		fu01AssertRetentionSeq(t, log, "A", 2)
+		fu01RoomReplay(t, "A", log, []map[string]any{ack, presence}, nil, 0)
+	}
 }
 
 // roomCapture is the checked-in raw multi-client capture
