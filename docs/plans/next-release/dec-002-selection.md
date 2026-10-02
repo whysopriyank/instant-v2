@@ -1,5 +1,11 @@
 # DEC-002 — next release selection (step 1)
 
+Historical proposal. The 2026-10-02 implementation follows the owner's public
+alpha instruction and retained-auth-differences answer under
+[DEC-002-single-node-public-alpha-20261002](../../reference/public-alpha-release-envelope.md).
+Its canonical qualification policy prepares an alpha without a comparative
+performance claim; this proposal's performance selection is not the active gate.
+
 Decision ID (proposed): `DEC-002-single-node-public-alpha-20260926`
 Status: `SELECTED_UNDER_OWNER_DELEGATION` — the owner asked the coordinator on
 2026-09-26 to study v1 and select the next release claim, including the

@@ -287,7 +287,9 @@ func (d *DiskBackend) PutIfAbsent(key string, r io.Reader) (err error) {
 	defer func() {
 		if removeOnError {
 			if cleanupErr := os.Remove(p); cleanupErr != nil && !errors.Is(cleanupErr, fs.ErrNotExist) {
-				err = errors.Join(err, errUploadCleanup, cleanupErr)
+				err = errors.Join(err, ErrUploadCleanup, cleanupErr)
+			} else if syncErr := d.syncObjectDir(filepath.Dir(p)); syncErr != nil {
+				err = errors.Join(err, ErrUploadCleanup, syncErr)
 			}
 		}
 	}()
@@ -369,7 +371,15 @@ func (d *DiskBackend) Delete(keys []string) error {
 			errs = append(errs, err)
 			continue
 		}
-		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := os.Remove(p); err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				errs = append(errs, err)
+				continue
+			}
+		}
+		// A retry after unlink+fsync failure still owes the durability barrier.
+		// An absent parent means this backend has no directory to synchronize.
+		if err := d.syncObjectDir(filepath.Dir(p)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			errs = append(errs, err)
 		}
 	}

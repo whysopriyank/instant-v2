@@ -24,6 +24,11 @@ func TestImportReadErrorAfterChecksumRollsBack(t *testing.T) {
 	seedTodoApp(t, ctx, source, appID, 1)
 	dump, _ := exportApp(t, ctx, source, appID, backup.ExportOptions{})
 	destination := newDatabase(t)
+	var initialSequence int64
+	var initialCalled bool
+	if err := destination.QueryRow(ctx, `SELECT last_value, is_called FROM transactions_id_seq`).Scan(&initialSequence, &initialCalled); err != nil {
+		t.Fatal(err)
+	}
 	_, err := backup.Import(ctx, destination, io.MultiReader(bytes.NewReader(dump), failedDumpReader{}), appID)
 	if err == nil || !strings.Contains(err.Error(), "injected dump read failure") {
 		t.Errorf("import error = %v, want underlying read failure after checksum", err)
@@ -34,6 +39,14 @@ func TestImportReadErrorAfterChecksumRollsBack(t *testing.T) {
 	}
 	if exists {
 		t.Error("failed import committed the app instead of rolling back")
+	}
+	var sequence int64
+	var called bool
+	if err := destination.QueryRow(ctx, `SELECT last_value, is_called FROM transactions_id_seq`).Scan(&sequence, &called); err != nil {
+		t.Fatal(err)
+	}
+	if sequence != initialSequence || called != initialCalled {
+		t.Errorf("failed import changed sequence from %d/%v to %d/%v", initialSequence, initialCalled, sequence, called)
 	}
 }
 

@@ -13,6 +13,8 @@ import (
 // scripts/quality-release-gate.sh validates in verify_record (common
 // contract). Keys here must stay identical to that jq predicate.
 type gateRecord struct {
+	ImageDigest         string         `json:"image_digest,omitempty"`
+	FixtureSHA256       string         `json:"fixture_sha256,omitempty"`
 	Artifacts           []ArtifactRef  `json:"artifacts"`
 	BinarySHA256        string         `json:"binary_sha256"`
 	CampaignID          string         `json:"campaign_id"`
@@ -36,7 +38,7 @@ type gateRecord struct {
 // kept as a function so the mapping is explicit and tested).
 func lanePacket(packet string) (string, error) {
 	switch packet {
-	case "OP-003", "OP-005", "QR-001":
+	case "OP-003", "OP-005", "QR-001", "OP-004", "OP-006", "CF-005", "QR-002":
 		return packet, nil
 	}
 	return "", fmt.Errorf("record: lane packet %q is not a gate external record (want OP-003, OP-005, or QR-001)", packet)
@@ -57,6 +59,9 @@ func (m *multiArtifact) Set(spec string) error {
 
 func runRecord(args []string) int {
 	fs := flag.NewFlagSet("record", flag.ContinueOnError)
+	profile := fs.String("profile", ExpectedProfile, "qualification profile")
+	image := fs.String("image-digest", "", "distribution OCI digest (public alpha required)")
+	fixtureSHA := fs.String("fixture-sha", "", "fixture SHA256 (public alpha required)")
 	lanePath := fs.String("lane-result", "", "lane result JSON from native|recovery|soak (required)")
 	campaign := fs.String("campaign", "", "campaign id (required)")
 	candidate := fs.String("candidate", "", "40-char candidate SHA (required)")
@@ -74,6 +79,18 @@ func runRecord(args []string) int {
 	fs.Var(&artifacts, "artifact", "repeatable path:size:sha256 artifact spec (at least one required)")
 	out := fs.String("out", "", "gate record JSON output path (required)")
 	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if _, _, _, err := profileSelection(*profile); err != nil {
+		fmt.Fprintln(os.Stderr, "record:", err)
+		return 2
+	}
+	if *profile == PublicProfile && (!imageDigest(*image) || !isHex64(*fixtureSHA)) {
+		fmt.Fprintln(os.Stderr, "record: public alpha requires --image-digest and --fixture-sha")
+		return 2
+	}
+	if *profile == ExpectedProfile && (*image != "" || *fixtureSHA != "") {
+		fmt.Fprintln(os.Stderr, "record: image/fixture hashes require the public profile")
 		return 2
 	}
 	if *lanePath == "" || *campaign == "" || *candidate == "" || *binarySHA == "" ||
@@ -120,6 +137,10 @@ func runRecord(args []string) int {
 		fmt.Fprintln(os.Stderr, "record:", err)
 		return 1
 	}
+	if packet != "OP-003" && packet != "OP-005" && packet != "QR-001" && *profile != PublicProfile {
+		fmt.Fprintln(os.Stderr, "record: new lanes require the public profile")
+		return 1
+	}
 	if lr.Result != "PASS" {
 		fmt.Fprintln(os.Stderr, "record: refusing: lane result is not PASS")
 		return 1
@@ -159,6 +180,21 @@ func runRecord(args []string) int {
 		Packet: packet, Result: "PASS", SchemaVersion: 1,
 		SelectedCount: lr.SelectedCount, SkippedCount: 0, StartedAt: lr.StartedAt,
 	}
+	if *profile == PublicProfile {
+		rec.SchemaVersion = 2
+		rec.ImageDigest = *image
+		rec.FixtureSHA256 = *fixtureSHA
+		if lr.Identity != nil {
+			identity := liveIdentity{rec.CandidateSHA, rec.BinarySHA256, rec.ConfigurationSHA256, rec.EndpointSHA256, rec.ImageDigest, rec.FixtureID, rec.FixtureSHA256}
+			if *lr.Identity != identity {
+				fmt.Fprintln(os.Stderr, "record: runtime source identity mismatch")
+				return 1
+			}
+		} else if packet != "OP-003" && packet != "OP-005" && packet != "QR-001" {
+			fmt.Fprintln(os.Stderr, "record: runtime source identity required")
+			return 1
+		}
+	}
 	if err := validateGateRecord(rec); err != nil {
 		fmt.Fprintln(os.Stderr, "record: assembled record fails gate contract:", err)
 		return 1
@@ -176,10 +212,16 @@ func runRecord(args []string) int {
 // duplicates the predicate text-adjacent logic; gate_predicate_test.go fails
 // if scripts/quality-release-gate.sh changes its record predicate.
 func validateGateRecord(r gateRecord) error {
-	if r.SchemaVersion != 1 {
-		return fmt.Errorf("schema_version != 1")
+	if r.SchemaVersion != 1 && r.SchemaVersion != 2 {
+		return fmt.Errorf("schema_version must be 1 or 2")
 	}
-	if r.Packet != "OP-003" && r.Packet != "OP-005" && r.Packet != "QR-001" {
+	if r.SchemaVersion == 2 && (!imageDigest(r.ImageDigest) || !isHex64(r.FixtureSHA256)) {
+		return fmt.Errorf("public image/fixture identity missing")
+	}
+	if r.SchemaVersion == 1 && (r.ImageDigest != "" || r.FixtureSHA256 != "") {
+		return fmt.Errorf("schema-1 record has public identities")
+	}
+	if _, err := lanePacket(r.Packet); err != nil {
 		return fmt.Errorf("packet %q not external", r.Packet)
 	}
 	if r.Result != "PASS" || r.Cleanup != "complete" || r.SkippedCount != 0 || r.SelectedCount <= 0 {
@@ -219,6 +261,16 @@ func validateGateRecord(r gateRecord) error {
 	case "OP-005":
 		if err := validateRecoveryDetails(r.Details); err != nil {
 			return err
+		}
+	case "OP-004", "OP-006", "CF-005", "QR-002":
+		if r.SchemaVersion != 2 {
+			return fmt.Errorf("new external packets require schema 2")
+		}
+		if len(r.Details) != 3 || r.Details["measurement_class"] != "live" {
+			return fmt.Errorf("live source facts required")
+		}
+		if path, ok := r.Details["facts_artifact"].(string); !ok || checkRelativePath(path) != nil {
+			return fmt.Errorf("runtime facts path invalid")
 		}
 	case "QR-001":
 		if err := validateSoakDetails(r.Details); err != nil {
@@ -322,6 +374,8 @@ func projectDetails(packet string, lane map[string]any) (map[string]any, error) 
 		keys = []string{"native", "platform_checks"}
 	case "OP-005":
 		keys = []string{"max_drain_seconds", "max_rto_seconds", "outcomes"}
+	case "OP-004", "OP-006", "CF-005", "QR-002":
+		keys = []string{"measurement_class", "facts_artifact", "observations"}
 	case "QR-001":
 		keys = []string{"acknowledged_transactions", "active_seconds", "committed_transactions", "dropped_transactions", "refreshed_transactions", "sessions", "unresolved_transactions"}
 	default:

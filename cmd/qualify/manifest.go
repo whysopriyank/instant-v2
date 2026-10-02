@@ -14,20 +14,22 @@ import (
 // scripts/quality-release-gate.sh validates (schema, selection, identity,
 // handoff inventory). Keys here must stay identical to that jq predicate.
 type gateManifest struct {
-	CampaignID            string            `json:"campaign_id"`
-	CampaignMaxAgeSeconds int64             `json:"campaign_max_age_seconds"`
-	CampaignStartedAt     string            `json:"campaign_started_at"`
-	Candidate             manifestCandidate `json:"candidate"`
-	DecisionID            string            `json:"decision_id"`
-	ExternalRecords       map[string]string `json:"external_records"`
-	Handoffs              []manifestHandoff `json:"handoffs"`
-	Lanes                 map[string]string `json:"lanes"`
-	Profile               string            `json:"profile"`
-	ProviderEvidence      string            `json:"provider_evidence"`
-	SchemaVersion         int               `json:"schema_version"`
+	Fixtures              map[string]fixtureIdentity `json:"fixtures,omitempty"`
+	CampaignID            string                     `json:"campaign_id"`
+	CampaignMaxAgeSeconds int64                      `json:"campaign_max_age_seconds"`
+	CampaignStartedAt     string                     `json:"campaign_started_at"`
+	Candidate             manifestCandidate          `json:"candidate"`
+	DecisionID            string                     `json:"decision_id"`
+	ExternalRecords       map[string]string          `json:"external_records"`
+	Handoffs              []manifestHandoff          `json:"handoffs"`
+	Lanes                 map[string]string          `json:"lanes"`
+	Profile               string                     `json:"profile"`
+	ProviderEvidence      string                     `json:"provider_evidence"`
+	SchemaVersion         int                        `json:"schema_version"`
 }
 
 type manifestCandidate struct {
+	ImageDigest    string      `json:"image_digest,omitempty"`
 	SHA            string      `json:"sha"`
 	EndpointSHA256 string      `json:"endpoint_sha256"`
 	Binary         ArtifactRef `json:"binary"`
@@ -56,6 +58,14 @@ type handoffInput struct {
 
 func runManifest(args []string) int {
 	fs := flag.NewFlagSet("manifest", flag.ContinueOnError)
+	profile := fs.String("profile", ExpectedProfile, "qualification profile")
+	policyPath := fs.String("policy", "", "candidate-owned public qualification policy JSON")
+	image := fs.String("image-digest", "", "distribution OCI digest (public alpha required)")
+	fixturesPath := fs.String("fixtures", "", "public fixture identity map JSON")
+	containerRecord := fs.String("container-record", "", "public container record path")
+	restoreRecord := fs.String("restore-record", "", "public restore record path")
+	differentialRecord := fs.String("v1-differential-record", "", "public v1 differential record path")
+	performanceRecord := fs.String("performance-record", "", "public performance record path")
 	evidenceRoot := fs.String("evidence-root", "", "evidence directory all relative paths resolve under (required)")
 	campaign := fs.String("campaign", "", "campaign id (required)")
 	candidate := fs.String("candidate", "", "40-char candidate SHA (required)")
@@ -71,6 +81,55 @@ func runManifest(args []string) int {
 	handoffDir := fs.String("handoff-dir", "handoffs", "handoff file dir relative to evidence root")
 	out := fs.String("out", "", "manifest output path relative to evidence root (required)")
 	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	decision, expectedPackets, expectedLanes, err := profileSelection(*profile)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "manifest:", err)
+		return 2
+	}
+	records := map[string]string{"native_linux": *nativeRecord, "recovery": *recoveryRecord, "soak": *soakRecord}
+	var fixtures map[string]fixtureIdentity
+	if *profile == PublicProfile {
+		if !imageDigest(*image) || *fixturesPath == "" {
+			fmt.Fprintln(os.Stderr, "manifest: public alpha requires --image-digest and --fixtures")
+			return 2
+		}
+		records["container"] = *containerRecord
+		records["restore"] = *restoreRecord
+		records["v1_differential"] = *differentialRecord
+		policy, err := readPublicPolicy(*policyPath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "manifest: public policy:", err)
+			return 2
+		}
+		expectedPackets, expectedLanes, _, err = selectPublicPerformance(policy.Performance)
+		if err != nil {
+			return 2
+		}
+		if policy.Performance == "artifact" {
+			records["performance"] = *performanceRecord
+		} else if *performanceRecord != "" {
+			fmt.Fprintln(os.Stderr, "manifest: performance record is not selected")
+			return 2
+		}
+		b, err := os.ReadFile(*fixturesPath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "manifest:", err)
+			return 2
+		}
+		if err := decodeStrict(b, &fixtures); err != nil {
+			fmt.Fprintln(os.Stderr, "manifest:", err)
+			return 2
+		}
+		for name := range records {
+			if records[name] == "" {
+				fmt.Fprintln(os.Stderr, "manifest: missing public record", name)
+				return 2
+			}
+		}
+	} else if *image != "" || *fixturesPath != "" || *containerRecord != "" || *restoreRecord != "" || *differentialRecord != "" || *performanceRecord != "" || *policyPath != "" {
+		fmt.Fprintln(os.Stderr, "manifest: public arguments require the public profile")
 		return 2
 	}
 	if *evidenceRoot == "" || *campaign == "" || *candidate == "" || *binarySpec == "" ||
@@ -129,7 +188,7 @@ func runManifest(args []string) int {
 		return 1
 	}
 	// Refuse unless the packet set is exactly the gate's expected set.
-	if err := checkPacketSet(inputs); err != nil {
+	if err := checkPacketSetFor(inputs, expectedPackets); err != nil {
 		fmt.Fprintln(os.Stderr, "manifest: refusing:", err)
 		return 1
 	}
@@ -153,7 +212,7 @@ func runManifest(args []string) int {
 		if err := writeJSONFile(full, map[string]any{
 			"packet": in.Packet, "state": in.State, "candidate_sha": strings.ToLower(*candidate),
 			"campaign_id": *campaign, "ledger_ref": in.LedgerRef, "finished_at": in.FinishedAt,
-			"record": recordPathForPacket(in.Packet, *nativeRecord, *recoveryRecord, *soakRecord),
+			"record": recordPathForPublicPacket(in.Packet, records),
 		}); err != nil {
 			fmt.Fprintln(os.Stderr, "manifest:", err)
 			return 1
@@ -176,12 +235,14 @@ func runManifest(args []string) int {
 			SHA: strings.ToLower(*candidate), EndpointSHA256: strings.ToLower(endpoint),
 			Binary: binary, Configuration: config,
 		},
-		DecisionID: ExpectedDecision,
-		ExternalRecords: map[string]string{
-			"native_linux": *nativeRecord, "recovery": *recoveryRecord, "soak": *soakRecord,
-		},
-		Handoffs: handoffs, Lanes: ExpectedLanes, Profile: ExpectedProfile,
+		DecisionID: decision, ExternalRecords: records,
+		Handoffs: handoffs, Lanes: expectedLanes, Profile: *profile,
 		ProviderEvidence: "not_selected", SchemaVersion: 1,
+	}
+	if *profile == PublicProfile {
+		manifest.SchemaVersion = 2
+		manifest.Candidate.ImageDigest = *image
+		manifest.Fixtures = fixtures
 	}
 	// Self-validation with the same checks as the gate (Go mirror of the jq
 	// predicates); the coordinator additionally runs the real gate.
@@ -209,48 +270,31 @@ func formatHandoffFile(campaign, candidate string, in handoffInput) string {
 		in.Packet, in.State, candidate, campaign, in.LedgerRef, in.FinishedAt)
 }
 
-// recordPathForPacket binds the handoff file to its external record for the
-// three evidence packets; other packets carry no record binding.
-func recordPathForPacket(packet, native, recovery, soak string) string {
-	switch packet {
-	case "OP-003":
-		return native
-	case "OP-005":
-		return recovery
-	case "QR-001":
-		return soak
-	}
-	return ""
-}
-
-// checkPacketSet refuses when the input packet set differs from the gate's
-// expected_packets (missing, extra, or duplicated).
-func checkPacketSet(inputs []handoffInput) error {
-	if len(inputs) != len(ExpectedPackets) {
-		return fmt.Errorf("handoff packet count %d != expected %d", len(inputs), len(ExpectedPackets))
-	}
-	want := map[string]bool{}
-	for _, p := range ExpectedPackets {
-		want[p] = true
-	}
-	seen := map[string]bool{}
-	for _, in := range inputs {
-		if !want[in.Packet] {
-			return fmt.Errorf("unexpected packet %q (not in gate expected_packets)", in.Packet)
-		}
-		if seen[in.Packet] {
-			return fmt.Errorf("duplicate packet %q", in.Packet)
-		}
-		seen[in.Packet] = true
-	}
-	return nil
-}
-
 // validateManifest mirrors the gate's manifest jq predicate plus the
 // per-packet handoff acceptance rules (state, candidate, campaign,
 // timestamps) and artifact hash verification.
 func validateManifest(evidenceRoot string, m gateManifest, candidate, campaign string) error {
-	if m.SchemaVersion != 1 || m.DecisionID != ExpectedDecision || m.Profile != ExpectedProfile {
+	decision, packets, lanes, err := profileSelection(m.Profile)
+	if err != nil {
+		return err
+	}
+	schema := 1
+	recordNames := []string{"native_linux", "recovery", "soak"}
+	if m.Profile == PublicProfile {
+		schema = 2
+		var records map[string]string
+		packets, lanes, records, err = selectPublicPerformance(m.Lanes["performance"])
+		if err != nil {
+			return err
+		}
+		recordNames = sortedRecordNames(records)
+		if !imageDigest(m.Candidate.ImageDigest) || len(m.Fixtures) != len(records) {
+			return fmt.Errorf("public image/fixture inventory invalid")
+		}
+	} else if m.Candidate.ImageDigest != "" || len(m.Fixtures) != 0 {
+		return fmt.Errorf("schema-1 manifest has public identities")
+	}
+	if m.SchemaVersion != schema || m.DecisionID != decision {
 		return fmt.Errorf("schema/decision/profile mismatch")
 	}
 	if m.CampaignID != campaign || m.ProviderEvidence != "not_selected" {
@@ -265,21 +309,13 @@ func validateManifest(evidenceRoot string, m gateManifest, candidate, campaign s
 	if m.Candidate.SHA != candidate || !isHex64(m.Candidate.EndpointSHA256) {
 		return fmt.Errorf("candidate sha/endpoint mismatch")
 	}
-	for name, lanes := range map[string]map[string]string{"lanes": m.Lanes} {
-		_ = name
-		for k, want := range ExpectedLanes {
-			if lanes[k] != want {
-				return fmt.Errorf("lane %q = %q, want %q", k, lanes[k], want)
-			}
-		}
-		if len(lanes) != len(ExpectedLanes) {
-			return fmt.Errorf("lane set mismatch")
-		}
+	if !sameKeys(m.Lanes, lanes) {
+		return fmt.Errorf("lane set mismatch")
 	}
-	if len(m.ExternalRecords) != 3 {
-		return fmt.Errorf("external_records must have 3 lanes")
+	if len(m.ExternalRecords) != len(recordNames) {
+		return fmt.Errorf("external record inventory mismatch")
 	}
-	for _, name := range []string{"native_linux", "recovery", "soak"} {
+	for _, name := range recordNames {
 		rel, ok := m.ExternalRecords[name]
 		if !ok {
 			return fmt.Errorf("external_records missing %q", name)
@@ -290,8 +326,13 @@ func validateManifest(evidenceRoot string, m gateManifest, candidate, campaign s
 		if _, err := os.Lstat(filepath.Join(evidenceRoot, filepath.FromSlash(rel))); err != nil {
 			return fmt.Errorf("external record %q missing: %w", name, err)
 		}
+		if m.Profile == PublicProfile {
+			if _, err := publicIdentityMatches(evidenceRoot, m, name); err != nil {
+				return err
+			}
+		}
 	}
-	if len(m.Handoffs) != len(ExpectedPackets) {
+	if len(m.Handoffs) != len(packets) {
 		return fmt.Errorf("handoff count mismatch")
 	}
 	seen := map[string]bool{}
@@ -317,10 +358,19 @@ func validateManifest(evidenceRoot string, m gateManifest, candidate, campaign s
 			return fmt.Errorf("handoff %s hash/size mismatch", h.Packet)
 		}
 	}
-	for _, p := range ExpectedPackets {
+	for _, p := range packets {
 		if !seen[p] {
 			return fmt.Errorf("missing handoff %q", p)
 		}
 	}
 	return nil
+}
+
+func recordPathForPublicPacket(packet string, records map[string]string) string {
+	for name, p := range publicRecordPackets {
+		if p == packet {
+			return records[name]
+		}
+	}
+	return ""
 }

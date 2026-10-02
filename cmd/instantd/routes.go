@@ -223,6 +223,7 @@ func (a *appRuntime) mountRoutes(ctx context.Context, db *sql.DB, mux *http.Serv
 	// and stay 503 until an S3-compatible store is wired.
 	mux.Handle("/backup/", &backup.Handler{
 		Pool:            a.pool,
+		Files:           store,
 		AdminTokenCheck: a.cats.CheckAdminToken,
 		Logger:          a.logger,
 	})

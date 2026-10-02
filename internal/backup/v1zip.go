@@ -16,9 +16,8 @@
 //	entities/<etype>.jsonl — one JSON object per line:
 //	  {"entity": {"id": "<uuid>", "<label>": <value>, ...},
 //	   "createdAt": <epoch millis>}
-//	files/<location-id>    — raw file blobs; SKIPPED by this importer
-//	                         ($files metadata triples are still imported when
-//	                         the schema declares the $files attrs).
+//	files/<location-id>    — raw file blobs, restored to app-id/file-entity-id
+//	                         using the injected durable file store.
 //
 // Restore semantics mirror restore.clj: config.json must be the first entry;
 // every entity field must resolve to a schema attr (else the import aborts,
@@ -31,10 +30,13 @@ import (
 	"archive/zip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
+	"github.com/instant-v2/instant-v2/internal/storageapi"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -50,8 +52,17 @@ const (
 // The app row is created if absent; attrs are created from the schema defs
 // with fresh uuids exactly like v1's schema-model plan/apply path. Entity
 // values become triples via the same Postgres flag/md5 derivation as Import.
-func RestoreV1Zip(ctx context.Context, pool *pgxpool.Pool, zr io.ReaderAt, size int64, appID [16]byte) (Counts, error) {
-	var counts Counts
+func RestoreV1Zip(ctx context.Context, pool *pgxpool.Pool, zr io.ReaderAt, size int64, appID [16]byte, stores ...storageapi.ObjectStore) (counts Counts, err error) {
+	if len(stores) > 1 {
+		return counts, errors.New("backup: restore accepts at most one file store")
+	}
+	var files storageapi.ObjectStore
+	if len(stores) == 1 {
+		files = stores[0]
+	}
+	if size < 0 || size > maxEntryBytes {
+		return counts, errors.New("backup: v1 archive exceeds maximum size")
+	}
 	reader, err := zip.NewReader(zr, size)
 	if err != nil {
 		return counts, fmt.Errorf("backup: open v1 zip: %w", err)
@@ -63,12 +74,30 @@ func RestoreV1Zip(ctx context.Context, pool *pgxpool.Pool, zr io.ReaderAt, size 
 		}
 		return counts, fmt.Errorf("backup: expected first v1 zip entry to be %s, got %s", v1ConfigEntry, got)
 	}
+	blobs, err := validateV1Archive(reader, files)
+	if err != nil {
+		return counts, err
+	}
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return counts, fmt.Errorf("backup: begin: %w", err)
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	created := []string{}
+	committed := false
+	defer func() {
+		rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		_ = tx.Rollback(rollbackCtx)
+		if !committed && !errors.Is(err, ErrCommitOutcomeUnknown) && len(created) > 0 {
+			if cleanupErr := files.Delete(created); cleanupErr != nil {
+				err = errors.Join(err, ErrRestoreCleanup, cleanupErr)
+			}
+		}
+	}()
+	if err := requireEmptyTarget(ctx, tx, appID); err != nil {
+		return counts, err
+	}
 
 	cfgBody, err := readEntry(reader.File[0])
 	if err != nil {
@@ -118,8 +147,6 @@ func RestoreV1Zip(ctx context.Context, pool *pgxpool.Pool, zr io.ReaderAt, size 
 		name := entry.Name
 		switch {
 		case strings.HasPrefix(name, v1FilesDir):
-			// File blobs stay in the archive; $files metadata triples below
-			// reference them but bytes upload is out of scope for DB restore.
 			continue
 		case strings.HasPrefix(name, v1EntitiesDir) && strings.HasSuffix(name, v1EntitiesSufx):
 			etype := name[len(v1EntitiesDir) : len(name)-len(v1EntitiesSufx)]
@@ -142,9 +169,38 @@ func RestoreV1Zip(ctx context.Context, pool *pgxpool.Pool, zr io.ReaderAt, size 
 	if err := flush(); err != nil {
 		return counts, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return counts, fmt.Errorf("backup: commit v1 restore: %w", err)
+	objects, err := restoredFileObjects(ctx, tx, appID, blobs)
+	if err != nil {
+		return counts, err
 	}
+	if len(objects) > 0 && files == nil {
+		return counts, ErrFileStoreUnavailable
+	}
+	for _, object := range objects {
+		if err := ctx.Err(); err != nil {
+			return counts, err
+		}
+		body, openErr := object.entry.Open()
+		if openErr != nil {
+			return counts, openErr
+		}
+		putErr := files.PutIfAbsent(object.key, body)
+		closeErr := body.Close()
+		if putErr != nil {
+			if errors.Is(putErr, storageapi.ErrUploadCleanup) {
+				putErr = errors.Join(putErr, ErrRestoreCleanup)
+			}
+			return counts, fmt.Errorf("backup: restore file %s: %w", object.key, putErr)
+		}
+		created = append(created, object.key)
+		if closeErr != nil {
+			return counts, closeErr
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return counts, restoreCommitError(err)
+	}
+	committed = true
 	return counts, nil
 }
 

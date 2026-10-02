@@ -55,7 +55,10 @@ func (h *Handler) lockUploadKeys(keys []string) func() {
 	}
 }
 
-var errUploadCleanup = errors.New("storageapi: upload cleanup failed")
+// ErrUploadCleanup means a failed object creation or metadata update could not
+// durably remove its new object. Callers must require reconciliation, not retry
+// under the assumption that the target is unchanged.
+var ErrUploadCleanup = errors.New("storageapi: upload cleanup failed")
 
 // cleanupAfterMetadataFailure removes only an object created by this upload.
 // A retry that found an existing object leaves it untouched; a delete failure
@@ -65,7 +68,7 @@ func cleanupAfterMetadataFailure(store ObjectStore, key string, created bool, li
 		return linkErr
 	}
 	if cleanupErr := store.Delete([]string{key}); cleanupErr != nil {
-		return errors.Join(linkErr, errUploadCleanup, cleanupErr)
+		return errors.Join(linkErr, ErrUploadCleanup, cleanupErr)
 	}
 	return linkErr
 }
@@ -115,7 +118,7 @@ func (h *Handler) uploadPut(w http.ResponseWriter, r *http.Request, id string) {
 		}
 	}
 	if putErr != nil {
-		if errors.Is(putErr, ErrTooLarge) && !errors.Is(putErr, errUploadCleanup) {
+		if errors.Is(putErr, ErrTooLarge) && !errors.Is(putErr, ErrUploadCleanup) {
 			httpError(w, http.StatusRequestEntityTooLarge, putErr)
 			return
 		}
@@ -128,7 +131,7 @@ func (h *Handler) uploadPut(w http.ResponseWriter, r *http.Request, id string) {
 	if h.Triples != nil && h.Catalogs != nil {
 		if err := h.linkFileTriple(r.Context(), appID, id, filename, r.Header.Get("Content-Type"), cr.n); err != nil {
 			finalErr := cleanupAfterMetadataFailure(h.Store, key, created, err)
-			if errors.Is(finalErr, errUploadCleanup) {
+			if errors.Is(finalErr, ErrUploadCleanup) {
 				httpError(w, http.StatusInternalServerError, finalErr)
 				return
 			}

@@ -1,0 +1,158 @@
+name: publish public alpha
+on:
+  push:
+    tags: ["v*-alpha.*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-alpha-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    # Requires an owner-managed tag ruleset and protected environment approval.
+    if: github.repository == 'whysopriyank/instant-v2' && github.ref_protected
+    environment: public-alpha
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      digest: ${{ steps.image.outputs.digest }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.25.14'
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+        with:
+          cosign-release: v3.1.3
+      - uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        id: syft
+        with:
+          syft-version: v1.51.1
+      - name: Add Syft to PATH
+        env:
+          SYFT_CMD: ${{ steps.syft.outputs.cmd }}
+        run: dirname "$SYFT_CMD" >> "$GITHUB_PATH"
+      - name: Refuse invalid or existing immutable tags
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          CANDIDATE_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$ ]]
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          for tag in "$RELEASE_TAG" "$CANDIDATE_SHA"; do
+            if docker buildx imagetools inspect "ghcr.io/whysopriyank/instant-v2:$tag" 2>"$RUNNER_TEMP/registry-error"; then
+              echo "Refusing to overwrite immutable tag $tag" >&2; exit 1
+            fi
+            # Auth/network failures cannot authorize an overwrite attempt.
+            grep -Eq 'manifest unknown|not found' "$RUNNER_TEMP/registry-error"
+          done
+      - uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
+        with:
+          version: v2.18.1
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Record and check published OCI index
+        id: image
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          docker buildx imagetools inspect "ghcr.io/whysopriyank/instant-v2:$RELEASE_TAG" --format '{{json .Manifest}}' > image-index.json
+          jq -e '.mediaType == "application/vnd.oci.image.index.v1+json" and
+            ([.manifests[].platform | select(.os == "linux") | .architecture] | sort == ["amd64","arm64"])' image-index.json
+          digest=$(jq -er .digest image-index.json)
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-name: ghcr.io/whysopriyank/instant-v2
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
+      - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-checksums: dist/checksums.txt
+      - name: Attach and attest SPDX image SBOM
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          syft "registry:ghcr.io/whysopriyank/instant-v2@$IMAGE_DIGEST" -o spdx-json=image.spdx.json
+          cosign attest --yes --type spdxjson --predicate image.spdx.json "ghcr.io/whysopriyank/instant-v2@$IMAGE_DIGEST"
+          gh release upload "$RELEASE_TAG" image.spdx.json image-index.json
+
+      - name: Verify draft checksums and binary provenance
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          CANDIDATE_SHA: ${{ github.sha }}
+        run: |
+          mkdir release-artifacts
+          gh release download "$RELEASE_TAG" --dir release-artifacts
+          cd release-artifacts
+          cosign verify-blob --bundle checksums.txt.sigstore.json \
+            --certificate-identity "https://github.com/whysopriyank/instant-v2/.github/workflows/publish.yml@refs/tags/$RELEASE_TAG" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums.txt
+          sha256sum --check checksums.txt
+          for archive in instantd_*.tar.gz; do
+            gh attestation verify "$archive" --repo whysopriyank/instant-v2 --signer-workflow whysopriyank/instant-v2/.github/workflows/publish.yml --source-ref "refs/tags/$RELEASE_TAG" --source-digest "$CANDIDATE_SHA"
+          done
+
+  verify-published:
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read
+      attestations: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      IMAGE_DIGEST: ${{ needs.publish.outputs.digest }}
+      RELEASE_TAG: ${{ github.ref_name }}
+      CANDIDATE_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+        with:
+          cosign-release: v3.1.3
+      - name: Verify digest, signature identity and provenance
+        run: |
+          image="ghcr.io/whysopriyank/instant-v2@$IMAGE_DIGEST"
+          identity="https://github.com/whysopriyank/instant-v2/.github/workflows/publish.yml@refs/tags/$RELEASE_TAG"
+          cosign verify --certificate-identity "$identity" --certificate-oidc-issuer https://token.actions.githubusercontent.com "$image"
+          cosign verify-attestation --type spdxjson --certificate-identity "$identity" --certificate-oidc-issuer https://token.actions.githubusercontent.com "$image"
+          gh attestation verify "oci://$image" --repo whysopriyank/instant-v2 --signer-workflow whysopriyank/instant-v2/.github/workflows/publish.yml --source-ref "refs/tags/$RELEASE_TAG" --source-digest "$CANDIDATE_SHA"
+          docker pull "$image"
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image")" = "$CANDIDATE_SHA"
+      - name: Published digest container smoke
+        env:
+          CONTAINER_IMAGE: ghcr.io/whysopriyank/instant-v2@${{ needs.publish.outputs.digest }}
+        run: bash scripts/quality-container.sh

@@ -65,7 +65,8 @@ func TestHandlerS3ObjectRoundTrip(t *testing.T) {
 		t.Fatal("object missing after put")
 	}
 
-	// POST restore-object re-imports from the store (idempotent).
+	// POST restore-object imports into a fresh database.
+	h.Pool = newDatabase(t)
 	rec = do(http.MethodPost, "/backup/"+appStr+"/restore-object?key=dumps/app.ndjson", auth)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("restore-object: got %d body=%s", rec.Code, rec.Body.String())

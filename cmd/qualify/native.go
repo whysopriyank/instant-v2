@@ -16,6 +16,7 @@ import (
 // recovery, and soak subcommands. `record` assembles a gate-schema external
 // record from exactly this shape plus campaign identity flags.
 type laneResult struct {
+	Identity      *liveIdentity  `json:"identity,omitempty"`
 	Packet        string         `json:"packet"`
 	SelectedCount int            `json:"selected_count"`
 	SkippedCount  int            `json:"skipped_count"`

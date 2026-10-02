@@ -1,0 +1,16 @@
+# syntax=docker/dockerfile:1
+# Binary-only GoReleaser build context; do not rebuild the release artifact.
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59 AS roots
+RUN mkdir -p /data /tmp && chown 65532:65532 /data /tmp
+
+FROM scratch
+ARG TARGETPLATFORM
+COPY $TARGETPLATFORM/instantd /instantd
+COPY --from=roots /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=roots --chown=65532:65532 /data /data
+COPY --from=roots --chown=65532:65532 /tmp /tmp
+ENV INSTANT_V2_STORAGE_ROOT=/data
+EXPOSE 8080
+USER 65532:65532
+HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=3 CMD ["/instantd", "healthcheck"]
+ENTRYPOINT ["/instantd"]

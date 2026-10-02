@@ -42,6 +42,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/instant-v2/instant-v2/internal/platform"
+	"github.com/instant-v2/instant-v2/internal/storageapi"
 )
 
 // Handler serves the backup/restore routes.
@@ -52,6 +53,8 @@ type Handler struct {
 	Logger          *slog.Logger
 	// S3 optionally enables the /object routes. When nil they answer 503.
 	S3 ObjectStore
+	// Files is the durable local object store used for v1 ZIP file restoration.
+	Files storageapi.ObjectStore
 }
 
 func (h *Handler) logger() *slog.Logger {
@@ -95,6 +98,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	appID, _ := platform.ScanUUIDErr(appStr)
 
 	ctx := r.Context()
+	if action == "restore" || action == "restore-v1zip" {
+		r.Body = http.MaxBytesReader(w, r.Body, maxEntryBytes)
+	}
 	switch action {
 	case "":
 		h.handleExport(w, r, appStr, appID)
@@ -191,6 +197,15 @@ func (h *Handler) writeImportError(w http.ResponseWriter, err error) {
 		status = http.StatusForbidden
 		h.logger().Warn("backup: cross-app restore rejected", "err", err)
 	}
+	if errors.Is(err, ErrTargetNotEmpty) {
+		status = http.StatusConflict
+	}
+	if errors.Is(err, ErrCommitOutcomeUnknown) {
+		status = http.StatusServiceUnavailable
+	}
+	if errors.Is(err, ErrFileStoreUnavailable) || errors.Is(err, ErrRestoreCleanup) {
+		status = http.StatusServiceUnavailable
+	}
 	writeErr(w, status, msg)
 }
 
@@ -209,13 +224,12 @@ func (h *Handler) importV1ZipBody(ctx context.Context, r *http.Request, appID [1
 		tmp.Close()
 		return Counts{}, err
 	}
-	counts, err := RestoreV1Zip(ctx, h.Pool, tmp, size, appID)
-	cerr := tmp.Close()
+	counts, err := RestoreV1Zip(ctx, h.Pool, tmp, size, appID, h.Files)
+	// This temporary source is no longer needed. A close error after SQL
+	// committed must not turn a completed restore into an ordinary rejection.
+	_ = tmp.Close()
 	if err != nil {
 		return counts, err
-	}
-	if cerr != nil {
-		return counts, cerr
 	}
 	return counts, nil
 }

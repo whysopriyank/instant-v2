@@ -1,75 +1,60 @@
 version: 2
-
 project_name: instantd
 
 builds:
   - id: instantd
     main: ./cmd/instantd
     binary: instantd
-    env:
-      - CGO_ENABLED=0
+    env: [CGO_ENABLED=0]
     goos: [linux, darwin]
     goarch: [amd64, arm64]
-    ldflags:
-      - -s -w -X main.version={{.Version}}
+    ignore:
+      - goos: darwin
+        goarch: amd64
+    flags: [-trimpath]
+    ldflags: ["-s -w -X main.version={{.Tag}}"]
 
 archives:
   - formats: [tar.gz]
-    name_template: "instantd_{{ .Os }}_{{ .Arch }}"
+    name_template: "instantd_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
 checksum:
   name_template: checksums.txt
 
 sboms:
   - artifacts: archive
+    documents: ["${artifact}.spdx.json"]
+    args: ["$artifact", "--output", "spdx-json=$document"]
 
-dockers:
-  - use: buildx
-    goos: linux
-    goarch: amd64
-    image_templates:
-      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY }}:{{ .Version }}-amd64"
-    build_flag_templates:
-      - "--platform=linux/amd64"
-    dockerfile: Dockerfile
-  - use: buildx
-    goos: linux
-    goarch: arm64
-    image_templates:
-      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY }}:{{ .Version }}-arm64"
-    build_flag_templates:
-      - "--platform=linux/arm64"
-    dockerfile: Dockerfile
-
-docker_manifests:
-  - name_template: "ghcr.io/{{ .Env.GITHUB_REPOSITORY }}:{{ .Version }}"
-    image_templates:
-      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY }}:{{ .Version }}-amd64"
-      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY }}:{{ .Version }}-arm64"
-  - name_template: "ghcr.io/{{ .Env.GITHUB_REPOSITORY }}:latest"
-    image_templates:
-      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY }}:{{ .Version }}-amd64"
-      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY }}:{{ .Version }}-arm64"
+# GoReleaser stages compiled binaries, not the source tree.
+dockers_v2:
+  - id: instantd
+    ids: [instantd]
+    dockerfile: deploy/Dockerfile.release
+    images: [ghcr.io/whysopriyank/instant-v2]
+    tags: ["{{ .Tag }}", "{{ .FullCommit }}", alpha]
+    platforms: [linux/amd64, linux/arm64]
+    sbom: true
+    flags: ["--provenance=mode=max", "--output=type=image,oci-mediatypes=true"]
+    labels:
+      org.opencontainers.image.source: https://github.com/whysopriyank/instant-v2
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.version: "{{ .Tag }}"
+      org.opencontainers.image.created: "{{ .Date }}"
+      org.opencontainers.image.licenses: NOASSERTION
 
 docker_signs:
   - cmd: cosign
-    artifacts: images
     output: true
-    args:
-      - "sign"
-      - "--output-signature=${signature}"
-      - "${artifact}"
-      - "--yes"
+    args: [sign, "${artifact}@${digest}", --yes]
 
 signs:
   - cmd: cosign
     artifacts: checksum
+    signature: "${artifact}.sigstore.json"
     output: true
-    args:
-      - "sign-blob"
-      - "--output-signature=${signature}"
-      - "${artifact}"
-      - "--yes"
+    args: [sign-blob, "--bundle=${signature}", "${artifact}", --yes]
 
 release:
   draft: true
+  prerelease: true

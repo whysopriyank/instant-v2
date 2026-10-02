@@ -64,6 +64,7 @@ func TestHandlerRoutesAndAuth(t *testing.T) {
 	}
 
 	// POST restore round-trips through HTTP.
+	h.Pool = newDatabase(t)
 	rec = do(http.MethodPost, "/backup/"+appStr+"/restore", dump, map[string]string{"Authorization": "Bearer tok-123"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("restore: got %d body=%s", rec.Code, rec.Body.String())
@@ -77,6 +78,9 @@ func TestHandlerRoutesAndAuth(t *testing.T) {
 	if resp.Counts.Triples != 10 || resp.Counts.Attrs != 4 {
 		t.Fatalf("restore counts: %+v", resp.Counts)
 	}
+	if rec := do(http.MethodPost, "/backup/"+appStr+"/restore", dump, map[string]string{"Authorization": "Bearer tok-123"}); rec.Code != http.StatusConflict {
+		t.Fatalf("nonempty restore status=%d, want 409", rec.Code)
+	}
 
 	// Corrupted restore body → 400 with message. Rewrite the first numeric
 	// value (priorities are 40+i) so the JSON stays valid but the checksum
@@ -85,6 +89,7 @@ func TestHandlerRoutesAndAuth(t *testing.T) {
 	if i := bytes.Index(bad, []byte(`"value":4`)); i >= 0 {
 		copy(bad[i:], []byte(`"value":9`))
 	}
+	h.Pool = newDatabase(t)
 	rec = do(http.MethodPost, "/backup/"+appStr+"/restore", bad, map[string]string{"Authorization": "Bearer tok-123"})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("corrupted restore: got %d", rec.Code)

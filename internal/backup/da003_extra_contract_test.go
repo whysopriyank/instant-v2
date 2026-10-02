@@ -173,16 +173,23 @@ func TestObjectKeysRejectTraversalAndEscape(t *testing.T) {
 }
 
 // TestFailedImportPreservesExactDump pins DA-003e at byte equality: a
-// checksum-corrupt re-import into the same database leaves the subsequent
+// checksum-corrupt import into an empty target leaves the subsequent
 // export byte-identical (single-transaction rollback, not just row counts).
 func TestFailedImportPreservesExactDump(t *testing.T) {
 	ctx := context.Background()
 	pool, appID, cleanup := env(t)
 	defer cleanup()
 	seedTodoApp(t, ctx, pool, appID, 2)
-	before, _ := exportApp(t, ctx, pool, appID, backup.ExportOptions{})
+	dump, _ := exportApp(t, ctx, pool, appID, backup.ExportOptions{})
+	target, targetID, targetCleanup := env(t)
+	defer targetCleanup()
+	// Preserve the authenticated identity while using an empty target shell.
+	if _, err := target.Exec(ctx, `UPDATE apps SET id=$1 WHERE id=$2`, appID, targetID); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := exportApp(t, ctx, target, appID, backup.ExportOptions{})
 
-	corrupt := append([]byte{}, before...)
+	corrupt := append([]byte{}, dump...)
 	marker := []byte(`"value":4`)
 	idx := bytes.Index(corrupt, marker)
 	if idx < 0 {
@@ -190,13 +197,13 @@ func TestFailedImportPreservesExactDump(t *testing.T) {
 	}
 	copy(corrupt[idx:], []byte(`"value":9`))
 
-	if _, err := backup.Import(ctx, pool, bytes.NewReader(corrupt), appID); err == nil {
+	if _, err := backup.Import(ctx, target, bytes.NewReader(corrupt), appID); err == nil {
 		t.Fatal("expected corrupt re-import to fail")
 	} else if !strings.Contains(err.Error(), "checksum") {
 		t.Fatalf("expected checksum error, got: %v", err)
 	}
 
-	after, _ := exportApp(t, ctx, pool, appID, backup.ExportOptions{})
+	after, _ := exportApp(t, ctx, target, appID, backup.ExportOptions{})
 	if !bytes.Equal(before, after) {
 		t.Fatalf("failed import mutated target: before %d bytes, after %d bytes", len(before), len(after))
 	}

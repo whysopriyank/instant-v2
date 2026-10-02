@@ -167,6 +167,25 @@ func importV1Schema(ctx context.Context, tx pgx.Tx, appID [16]byte, schema v1Sch
 				return nil, err
 			}
 		}
+		if etype == "$files" {
+			// V1 hides these attrs from config.schema but retains their stored
+			// values in entities/$files. Its restore uses the system catalog;
+			// v2 materializes just those builtin definitions here.
+			for _, def := range []struct {
+				label, valueType          string
+				unique, indexed, required bool
+			}{
+				{"location-id", "string", true, true, true},
+				{"size", "number", false, true, true},
+				{"content-type", "string", false, true, false},
+				{"content-disposition", "string", false, true, false},
+				{"key-version", "number", false, false, false},
+			} {
+				if err := insertAttr(etype, def.label, etype, def.label, "blob", "one", v1CheckedDataType(def.valueType), def.unique, def.indexed, def.required); err != nil {
+					return nil, err
+				}
+			}
+		}
 	}
 	// Refs: forward + reverse attr pair, reverse names mirrored like v1.
 	for _, link := range schema.Refs {

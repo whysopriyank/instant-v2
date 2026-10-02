@@ -215,6 +215,7 @@ bad "production rejects test seams" "test seams are not accepted" env PATH="$fak
 # expression. Runs from the real repo root (not the fake $repo above).
 real_log="$tmp/real-hermetic.json"
 if ! (cd "$script_dir/.." && INSTANT_TEST_INTEGRATION=0 DATABASE_URL= TEST_DATABASE_URL= go test ./internal/reactive -count=1 -short -json >"$real_log" 2>&1); then
+  cat "$real_log" >&2
   echo "FAIL: real hermetic selection did not run" >&2; fail=$((fail+1))
 else
   if ! grep -q "integration test: set INSTANT_TEST_INTEGRATION=1 and DATABASE_URL" "$real_log" || ! grep -q "in short mode" "$real_log"; then
@@ -230,6 +231,15 @@ else
   # run that OLD check inline as an assertion without modifying the gate.
   old_skipped=$(jq -Rsr '[split("\n")[] | fromjson? | select((.Test? // "") != "")] | group_by(.Package,.Test) | map(.[-1]) | map(select(.Action=="skip")) | length' "$real_log")
   if [[ $old_skipped -gt 0 ]]; then echo "PASS: old reject-every-skip policy would reject real hermetic lane (skipped=$old_skipped)"; pass=$((pass+1)); else echo "FAIL: real hermetic lane has no skips to prove R4" >&2; fail=$((fail+1)); fi
+fi
+
+# Public schema uses the actual candidate verifier and production shell. These
+# fixtures are hermetic contract checks, never retained live qualification.
+if (cd "$script_dir/.." && go test ./cmd/qualify -run '^TestPublic' -count=1 >"$tmp/public-contract.log" 2>&1); then
+  echo "PASS: public profile actual verifier and production shell contracts";pass=$((pass+1))
+else
+  cat "$tmp/public-contract.log" >&2
+  echo "FAIL: public profile contracts" >&2;fail=$((fail+1))
 fi
 
 echo "$pass passed, $fail failed"

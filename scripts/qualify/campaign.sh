@@ -39,6 +39,7 @@ WORKDIR=""
 LANE=""
 HOST_ID=""
 DRY_RUN=0
+PROFILE=single-node-alpha
 
 usage() {
   cat >&2 <<'EOF'
@@ -53,6 +54,7 @@ while [[ $# -gt 0 ]]; do
     --candidate) CANDIDATE=${2:-}; shift 2;;
     --bundle) BUNDLE=${2:-}; shift 2;;
     --workdir) WORKDIR=${2:-}; shift 2;;
+    --profile) PROFILE=${2:-}; shift 2;;
     --lane) LANE=${2:-}; shift 2;;
     --host-id) HOST_ID=${2:-}; shift 2;;
     --dry-run) DRY_RUN=1; shift;;
@@ -60,6 +62,8 @@ while [[ $# -gt 0 ]]; do
     *) echo "campaign: unknown flag $1" >&2; usage;;
   esac
 done
+
+case "$PROFILE" in single-node-alpha|single-node-public-alpha) ;; *) echo "campaign: unknown profile" >&2; exit 2;; esac
 
 # ---- argument validation (also exercised hermetically by test-campaign.sh) ----
 [[ $CAMPAIGN =~ ^[a-z0-9][a-z0-9-]{0,40}$ ]] || { echo "campaign: --campaign must be non-empty [a-z0-9-] (max 41 chars)" >&2; exit 2; }
@@ -220,10 +224,10 @@ case "$LANE" in
     # THE candidate binary is this make output (src/bin/instantd), copied to
     # evidence/candidate/instantd; recovery/soak execute exactly that file.
     # (bin/ is gitignored, so the candidate tree stays clean.)
-    docker run --rm --user "$(id -u):$(id -g)" -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro --network "$NET" -v "$SRC:/src" "$QUAL_IMG_TAG" \
-      bash -c 'cd /src && make build && sha256sum bin/instantd' | tee "$EVIDENCE/candidate-build1.txt" >/dev/null
-    docker run --rm --user "$(id -u):$(id -g)" -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro --network "$NET" -v "$SRC:/src" "$QUAL_IMG_TAG" \
-      bash -c 'cd /src && make build && sha256sum bin/instantd' | tee "$EVIDENCE/candidate-build2.txt" >/dev/null
+    docker run --rm -e QUALIFY_PROFILE="$PROFILE" --user "$(id -u):$(id -g)" -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro --network "$NET" -v "$SRC:/src" "$QUAL_IMG_TAG" \
+      bash -c 'cd /src && bash scripts/qualify/build-candidate.sh "$QUALIFY_PROFILE" && sha256sum bin/instantd' | tee "$EVIDENCE/candidate-build1.txt" >/dev/null
+    docker run --rm -e QUALIFY_PROFILE="$PROFILE" --user "$(id -u):$(id -g)" -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro --network "$NET" -v "$SRC:/src" "$QUAL_IMG_TAG" \
+      bash -c 'cd /src && bash scripts/qualify/build-candidate.sh "$QUALIFY_PROFILE" && sha256sum bin/instantd' | tee "$EVIDENCE/candidate-build2.txt" >/dev/null
     sha1=$(awk '$2 == "bin/instantd" {print $1}' "$EVIDENCE/candidate-build1.txt")
     sha2=$(awk '$2 == "bin/instantd" {print $1}' "$EVIDENCE/candidate-build2.txt")
     [[ $sha1 =~ ^[0-9a-f]{64}$ ]] || { echo "campaign: could not read candidate sha from build output" >&2; exit 1; }

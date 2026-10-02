@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -17,12 +18,29 @@ import (
 	"github.com/instant-v2/instant-v2/internal/tracing"
 )
 
+var version = "dev"
+
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
-	if err := run(logger); err != nil {
+	if err := runCLI(logger, os.Args[1:]); err != nil {
 		logger.Error("fatal", "err", err)
 		os.Exit(1)
+	}
+}
+
+func runCLI(logger *slog.Logger, args []string) error {
+	if len(args) == 0 {
+		return run(logger)
+	}
+	switch args[0] {
+	case "healthcheck":
+		return healthcheck(args[1:])
+	case "version", "--version":
+		fmt.Println(version)
+		return nil
+	default:
+		return fmt.Errorf("unknown command %q (available: healthcheck, version)", args[0])
 	}
 }
 

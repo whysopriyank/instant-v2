@@ -24,9 +24,8 @@ var ErrAppMismatch = errors.New("backup: dump app_id does not match the authenti
 // Import consumes a v2 NDJSON dump from r into the database inside a single
 // transaction. routeAppID is the app the caller authenticated against — the
 // dump header MUST carry the same id or the import aborts with
-// ErrAppMismatch before any row is written. It is idempotent: re-importing a
-// dump over a DB already holding its rows is a no-op (uuid-PK upserts /
-// ON CONFLICT DO NOTHING). The trailing checksum is verified against
+// ErrAppMismatch before any row is written. A non-empty target is refused,
+// including re-importing an identical dump. The trailing checksum is verified against
 // everything consumed before it; any mismatch aborts the transaction.
 // Unknown apps are created on the fly (with a synthetic creator user when
 // needed), so a fresh schema accepts a dump directly.
@@ -59,6 +58,9 @@ func Import(ctx context.Context, pool *pgxpool.Pool, r io.Reader, routeAppID [16
 	}
 	if appID != routeAppID {
 		return counts, ErrAppMismatch
+	}
+	if err := requireEmptyTarget(ctx, tx, appID); err != nil {
+		return counts, err
 	}
 	creator := appID // deterministic fallback when header lacks creator_id
 	if hdr.CreatorID != "" {
@@ -95,17 +97,17 @@ func Import(ctx context.Context, pool *pgxpool.Pool, r io.Reader, routeAppID [16
 			if logical != ck.Records {
 				return counts, fmt.Errorf("backup: checksum mismatch: expected %d records, saw %d", ck.Records, logical)
 			}
-			if err := finishImport(ctx, tx, flushCounts, &counts); err != nil {
-				return counts, err
-			}
 			if sc.Next() {
 				return counts, fmt.Errorf("backup: unexpected content after checksum line")
 			}
 			if err := sc.err(nil); err != nil {
 				return counts, err
 			}
+			if err := finishImport(ctx, tx, flushCounts, &counts); err != nil {
+				return counts, err
+			}
 			if err := tx.Commit(ctx); err != nil {
-				return counts, fmt.Errorf("backup: commit: %w", err)
+				return counts, restoreCommitError(err)
 			}
 			return counts, nil
 		}
@@ -150,10 +152,21 @@ func finishImport(ctx context.Context, tx pgx.Tx, flush func() error, counts *Co
 	if err := flush(); err != nil {
 		return err
 	}
-	// Preserve imported journal ids above the identity sequence.
-	if _, err := tx.Exec(ctx, `
-		SELECT setval(pg_get_serial_sequence('transactions','id'),
-		              GREATEST((SELECT COALESCE(MAX(id),0) FROM transactions), 1))`); err != nil {
+	// ALTER SEQUENCE is transactional; setval would survive a failed restore.
+	// The admission table lock excludes INSERT/nextval through journal writers.
+	var schema, name string
+	if err := tx.QueryRow(ctx, `SELECT n.nspname, c.relname FROM pg_class c
+		JOIN pg_namespace n ON n.oid=c.relnamespace
+		WHERE c.oid=pg_get_serial_sequence('transactions','id')::regclass`).Scan(&schema, &name); err != nil {
+		return fmt.Errorf("backup: find transactions sequence: %w", err)
+	}
+	sequence := pgx.Identifier{schema, name}.Sanitize()
+	var next int64
+	if err := tx.QueryRow(ctx, `SELECT GREATEST(last_value + CASE WHEN is_called THEN 1 ELSE 0 END,
+		(SELECT COALESCE(MAX(id),0)+1 FROM transactions)) FROM `+sequence).Scan(&next); err != nil {
+		return fmt.Errorf("backup: read transactions sequence: %w", err)
+	}
+	if _, err := tx.Exec(ctx, fmt.Sprintf("ALTER SEQUENCE %s RESTART WITH %d", sequence, next)); err != nil {
 		return fmt.Errorf("backup: reset transactions sequence: %w", err)
 	}
 	return nil

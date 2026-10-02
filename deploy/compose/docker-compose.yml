@@ -1,0 +1,39 @@
+services:
+  postgres:
+    image: postgres:17@sha256:f4c66b820c6f974249089d3d16d86a3698eae11e8746eb6644b2271031e91232
+    environment:
+      POSTGRES_USER: instant
+      POSTGRES_DB: instant
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    command: [postgres, -c, wal_level=logical]
+    volumes: [postgres:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U instant -d instant]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  instantd:
+    # /data is owned by 65532; a fresh named volume inherits its ownership.
+    image: ghcr.io/whysopriyank/instant-v2@${INSTANT_V2_IMAGE_DIGEST:?set verified sha256 image digest}
+    environment:
+      DATABASE_URL: postgres://instant:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/instant?sslmode=disable
+      INSTANT_V2_HTTP_ADDR: :8080
+      INSTANT_V2_STORAGE_ROOT: /data
+      INSTANT_V2_STORAGE_SECRET: ${INSTANT_V2_STORAGE_SECRET:?set INSTANT_V2_STORAGE_SECRET}
+      INSTANT_OAUTH_GOOGLE_CLIENT_ID: ${INSTANT_OAUTH_GOOGLE_CLIENT_ID:?set INSTANT_OAUTH_GOOGLE_CLIENT_ID}
+      INSTANT_OAUTH_GOOGLE_CLIENT_SECRET: ${INSTANT_OAUTH_GOOGLE_CLIENT_SECRET:?set INSTANT_OAUTH_GOOGLE_CLIENT_SECRET}
+      INSTANT_OAUTH_GITHUB_CLIENT_ID: ${INSTANT_OAUTH_GITHUB_CLIENT_ID:?set INSTANT_OAUTH_GITHUB_CLIENT_ID}
+      INSTANT_OAUTH_GITHUB_CLIENT_SECRET: ${INSTANT_OAUTH_GITHUB_CLIENT_SECRET:?set INSTANT_OAUTH_GITHUB_CLIENT_SECRET}
+    ports: ["127.0.0.1:${INSTANT_V2_HTTP_PORT:-8080}:8080"]
+    volumes: [files:/data]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+volumes:
+  postgres:
+  files:

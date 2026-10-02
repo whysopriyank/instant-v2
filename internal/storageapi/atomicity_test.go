@@ -81,7 +81,7 @@ func TestCleanupAfterMetadataFailure(t *testing.T) {
 		cleanupErr := errors.New("delete unavailable")
 		store := &cleanupProbeStore{deleteErr: cleanupErr}
 		err := cleanupAfterMetadataFailure(store, "app/new", true, linkErr)
-		if !errors.Is(err, linkErr) || !errors.Is(err, errUploadCleanup) || !errors.Is(err, cleanupErr) {
+		if !errors.Is(err, linkErr) || !errors.Is(err, ErrUploadCleanup) || !errors.Is(err, cleanupErr) {
 			t.Fatalf("error = %v, want link and cleanup errors", err)
 		}
 		if len(store.deleted) != 1 || store.deleted[0][0] != "app/new" {

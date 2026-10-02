@@ -1,7 +1,7 @@
 // Command qualify is the QH-001 Linux qualification harness CLI. It produces
-// the three external records scripts/quality-release-gate.sh requires
-// (native_linux → OP-003, recovery → OP-005, soak → QR-001) plus the campaign
-// manifest it consumes. It makes no product-code change and never prints
+// profile-selected external records and the campaign manifest consumed by
+// scripts/quality-release-gate.sh. Public adapters validate retained runtime
+// observations; they do not provision environments. It makes no product-code change and never prints
 // DSNs or secrets.
 package main
 
@@ -20,6 +20,14 @@ func run(args []string) int {
 		return 2
 	}
 	switch args[0] {
+	case "verify-public":
+		return runVerifyPublic(args[1:])
+	case "container":
+		return runPublicFacts("OP-004", args[1:])
+	case "v1-differential":
+		return runPublicFacts("CF-005", args[1:])
+	case "restore":
+		return runPublicFacts("OP-006", args[1:])
 	case "native":
 		return runNative(args[1:])
 	case "recovery":
@@ -41,11 +49,15 @@ func run(args []string) int {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, `usage: qualify <native|recovery|soak|record|manifest> [flags]
+	fmt.Fprintln(os.Stderr, `usage: qualify <native|recovery|soak|container|restore|v1-differential|record|manifest|verify-public> [flags]
 
   native    run/parse the owned-DB + hermetic go test selection (OP-003 lane result)
   recovery  drive the candidate binary through 7 crash/drain outcomes (OP-005 lane result)
   soak      seed via soaksetup and run cmd/soak at alpha budgets (QR-001 lane result)
+  container validate retained live container observations (OP-004)
+  restore   validate retained live restore/capacity/rejection observations (OP-006)
+  v1-differential validate actual corpusctl raw differential frames (CF-005)
+  verify-public verify public manifest against candidate-owned policy
   record    assemble one gate-schema external record from a lane result
   manifest  assemble the gate manifest + per-packet handoff files`)
 }

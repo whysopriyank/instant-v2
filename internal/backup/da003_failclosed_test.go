@@ -511,6 +511,8 @@ func TestRestoreObjectCorruptPreservesSourceAndTarget(t *testing.T) {
 	defer cleanup()
 	seedTodoApp(t, ctx, pool, appID, 2)
 	dump, _ := exportApp(t, ctx, pool, appID, backup.ExportOptions{})
+	target := emptyRestoreTarget(t, appID)
+	before, _ := exportApp(t, ctx, target, appID, backup.ExportOptions{})
 
 	corrupt := append([]byte{}, dump...)
 	if i := bytes.Index(corrupt, []byte(`"value":4`)); i < 0 {
@@ -520,7 +522,7 @@ func TestRestoreObjectCorruptPreservesSourceAndTarget(t *testing.T) {
 	}
 
 	store := newDA003MemStore()
-	h := &backup.Handler{Pool: pool, AdminTokenCheck: fakeAuth{valid: "tok-123"}.check, S3: store}
+	h := &backup.Handler{Pool: target, AdminTokenCheck: fakeAuth{valid: "tok-123"}.check, S3: store}
 	appStr := uuidStr(appID)
 	scoped := appStr + "/dumps/corrupt.ndjson"
 	store.mu.Lock()
@@ -539,13 +541,17 @@ func TestRestoreObjectCorruptPreservesSourceAndTarget(t *testing.T) {
 	if !ok || !bytes.Equal(after, corrupt) {
 		t.Fatal("failed restore did not preserve the source object")
 	}
+	state, _ := exportApp(t, ctx, target, appID, backup.ExportOptions{})
+	if !bytes.Equal(before, state) {
+		t.Fatal("failed object restore changed exact target state")
+	}
 	var triples, attrs int
-	if err := pool.QueryRow(ctx,
+	if err := target.QueryRow(ctx,
 		`SELECT (SELECT count(*) FROM triples WHERE app_id=$1),
 		        (SELECT count(*) FROM attrs   WHERE app_id=$1)`, appID).Scan(&triples, &attrs); err != nil {
 		t.Fatal(err)
 	}
-	if triples != 10 || attrs != 4 {
+	if triples != 0 || attrs != 0 {
 		t.Fatalf("failed restore-object mutated target: triples=%d attrs=%d", triples, attrs)
 	}
 }
@@ -560,13 +566,15 @@ func TestRestoreObjectTruncatedPreservesSourceAndTarget(t *testing.T) {
 	defer cleanup()
 	seedTodoApp(t, ctx, pool, appID, 2)
 	dump, _ := exportApp(t, ctx, pool, appID, backup.ExportOptions{})
+	target := emptyRestoreTarget(t, appID)
+	before, _ := exportApp(t, ctx, target, appID, backup.ExportOptions{})
 
 	// Truncate before checksum trailer: drop the final checksum line.
 	lines := bytes.Split(bytes.TrimSuffix(dump, []byte("\n")), []byte("\n"))
 	truncated := append(bytes.Join(lines[:len(lines)-1], []byte("\n")), '\n')
 
 	store := newDA003MemStore()
-	h := &backup.Handler{Pool: pool, AdminTokenCheck: fakeAuth{valid: "tok-123"}.check, S3: store}
+	h := &backup.Handler{Pool: target, AdminTokenCheck: fakeAuth{valid: "tok-123"}.check, S3: store}
 	appStr := uuidStr(appID)
 	scoped := appStr + "/dumps/truncated.ndjson"
 	store.mu.Lock()
@@ -585,13 +593,17 @@ func TestRestoreObjectTruncatedPreservesSourceAndTarget(t *testing.T) {
 	if !ok || !bytes.Equal(after, truncated) {
 		t.Fatal("failed restore did not preserve the source object")
 	}
+	state, _ := exportApp(t, ctx, target, appID, backup.ExportOptions{})
+	if !bytes.Equal(before, state) {
+		t.Fatal("failed object restore changed exact target state")
+	}
 	var triples, attrs int
-	if err := pool.QueryRow(ctx,
+	if err := target.QueryRow(ctx,
 		`SELECT (SELECT count(*) FROM triples WHERE app_id=$1),
 		        (SELECT count(*) FROM attrs   WHERE app_id=$1)`, appID).Scan(&triples, &attrs); err != nil {
 		t.Fatal(err)
 	}
-	if triples != 10 || attrs != 4 {
+	if triples != 0 || attrs != 0 {
 		t.Fatalf("failed restore-object mutated target: triples=%d attrs=%d", triples, attrs)
 	}
 }

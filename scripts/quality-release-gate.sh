@@ -24,7 +24,8 @@ source_manifest=$(cd "$(dirname "$manifest")" && pwd -P)/$(basename "$manifest")
 source_root=$(dirname "$source_manifest")
 snapshot=$(mktemp -d "${TMPDIR:-/tmp}/instant-release-evidence.XXXXXX")
 chmod 700 "$snapshot"
-trap 'rm -rf "$snapshot"' EXIT
+verifier_source=
+trap 'rm -rf "$snapshot"; [[ -z $verifier_source ]] || rm -rf "$verifier_source"' EXIT
 cp -R "$source_root/." "$snapshot/"
 [[ -z $(find -P "$snapshot" -type l -print -quit) ]] || die "release evidence may not contain symlinks"
 manifest="$snapshot/$(basename "$source_manifest")"
@@ -39,6 +40,20 @@ expected_profile=single-node-alpha
 expected_lanes='{"artifact":"validate","container":"not_selected","corpus":"run","external_v1":"not_selected","hermetic":"run","owned_db":"run","performance":"not_selected","recovery":"artifact","soak":"artifact"}'
 expected_packets='["CF-002","CF-003","DA-001","DA-002","DA-003","DA-004","DA-004V","DA-005","DA-006A","DA-007","DA-008A","EV-001","EV-002","EV-003","EV-004","EV-005","EV-006","F-001","F-002","FR-001","OP-003","OP-005","QR-001","QR-003","QR-005","RT-001","RT-002","RT-003"]'
 
+selected_profile=$(jq -er '.profile' "$manifest") || die "manifest profile missing"
+if [[ $selected_profile == single-node-public-alpha ]]; then
+  command -v go >/dev/null || die "go is required to verify public qualification"
+  verifier_source=$(mktemp -d "${TMPDIR:-/tmp}/instant-release-verifier.XXXXXX")
+  # Build from immutable committed inputs, never from an uncommitted harness.
+  git -C "$repo_root" archive "$candidate" | tar -x -C "$verifier_source" || die "cannot snapshot candidate verifier"
+  [[ -z $(find -P "$verifier_source" -type l -print -quit) ]] || die "candidate verifier source may not contain symlinks"
+  (cd "$verifier_source" && GOFLAGS= GOWORK=off go build -mod=readonly -o "$verifier_source/qualify-verifier" ./cmd/qualify) || die "cannot compile candidate verifier"
+  selection=$(cd "$verifier_source" && ./qualify-verifier verify-public --evidence-root "$manifest_root" --manifest "$(basename "$manifest")" --policy docs/plans/next-release/qualification-policy.json --candidate "$candidate" --campaign "$campaign") || die "public manifest evidence contract failed"
+  expected_decision=$(jq -r '.decision_id' <<<"$selection")
+  expected_profile=$(jq -r '.profile' <<<"$selection")
+  expected_lanes=$(jq -c '.lanes' <<<"$selection")
+  expected_packets=$(jq -c '.packets|sort' <<<"$selection")
+else
 jq -e --arg sha "$candidate" --arg campaign "$campaign" --arg decision "$expected_decision" \
   --arg profile "$expected_profile" --argjson lanes "$expected_lanes" --argjson packets "$expected_packets" '
   def text: type == "string" and length > 0;
@@ -64,6 +79,7 @@ jq -e --arg sha "$candidate" --arg campaign "$campaign" --arg decision "$expecte
   ([.handoffs[].packet] | length == (unique | length)) and
   ([.handoffs[].packet] | sort) == $packets
   ' "$manifest" >/dev/null || die "manifest schema, selection, identity, or handoff inventory is invalid"
+fi
 
 campaign_epoch=$(jq -er '.campaign_started_at | fromdateiso8601' "$manifest") || die "campaign_started_at must be RFC3339 UTC"
 commit_epoch=$(git -C "$repo_root" show -s --format=%ct "$candidate") || die "cannot read candidate commit time"
@@ -120,6 +136,7 @@ verify_record() {
   safe_relative_file "$rel" "$manifest_root" || die "$name record path is unsafe or missing"
   record="$manifest_root/$rel"
   evidence_paths+=("$rel")
+  if [[ $selected_profile != single-node-public-alpha ]]; then
   jq -e --arg packet "$packet" --arg campaign "$campaign" --arg sha "$candidate" --arg binary "$binary_sha" --arg config "$config_sha" --arg endpoint "$endpoint_sha" '
     def text: type == "string" and length > 0;
     def hex64: type == "string" and test("^[0-9a-f]{64}$");
@@ -134,6 +151,7 @@ verify_record() {
     (.host.id|text) and (.host.os|text) and (.host.kernel|text) and (.host.arch|text) and (.host.runtime|text) and
     (.artifacts|type == "array") and (.artifacts|length>0) and all(.artifacts[]; artifact)
   ' "$record" >/dev/null || die "$name record failed its common contract"
+  fi
   started=$(jq -er '.started_at|fromdateiso8601' "$record") || die "$name started_at is invalid"
   finished=$(jq -er '.finished_at|fromdateiso8601' "$record") || die "$name finished_at is invalid"
   (( started >= campaign_epoch && finished >= started && finished <= now_epoch )) || die "$name record timestamps are stale, reversed, or future"
@@ -168,6 +186,13 @@ jq -e '
   .refreshed_transactions == .committed_transactions and
   .dropped_transactions == 0 and .unresolved_transactions == 0
 ' "$soak_record" >/dev/null || die "qualified soak evidence is insufficient"
+
+if [[ $selected_profile == single-node-public-alpha ]]; then
+  verify_record container OP-004
+  verify_record restore OP-006
+  verify_record v1_differential CF-005
+  if [[ $(jq -r '.lanes.performance' "$manifest") == artifact ]]; then verify_record performance QR-002; fi
+fi
 
 run_target() {
   local target=$1
@@ -273,7 +298,13 @@ run_target validate-release
 run_target lint
 run_target vet
 run_target check-generated
-run_target build
+if [[ $selected_profile == single-node-public-alpha ]]; then
+  release_version=$(jq -r '.release_version' <<<"$selection")
+  mkdir -p "$repo_root/bin"
+  (cd "$repo_root" && bash scripts/qualify/build-candidate.sh single-node-public-alpha "$repo_root/bin/instantd") || die "public distribution binary build failed"
+else
+  run_target build
+fi
 [[ -f "$repo_root/bin/instantd" && $(shasum -a 256 "$repo_root/bin/instantd" | awk '{print $1}') == "$binary_sha" ]] || die "built candidate binary does not match qualified evidence"
 run_test_target test-unit
 run_test_target bench-acceptance
@@ -287,4 +318,4 @@ for rel in "${evidence_paths[@]}"; do
   cmp "$source_root/$rel" "$snapshot/$rel" >/dev/null || die "source evidence changed during release gate: $rel"
 done
 cmp "$source_manifest" "$manifest" >/dev/null || die "release manifest changed during release gate"
-echo "release-gate: selected single-node-alpha checks passed for $candidate"
+echo "release-gate: selected $expected_profile checks passed for $candidate"

@@ -26,6 +26,9 @@ ok "dry-run native" bash "$CAMPAIGN" --campaign alpha-1 --candidate "$SHA" --bun
 ok "dry-run recovery" bash "$CAMPAIGN" --campaign alpha-1 --candidate "$SHA" --bundle "$tmp/bundle.git" --workdir "$tmp/work" --lane recovery --host-id host-1 --dry-run
 ok "dry-run soak" bash "$CAMPAIGN" --campaign alpha-1 --candidate "$SHA" --bundle "$tmp/bundle.git" --workdir "$tmp/work" --lane soak --host-id host-1 --dry-run
 
+ok "public profile dry-run build" bash "$CAMPAIGN" --profile single-node-public-alpha --campaign alpha-1 --candidate "$SHA" --bundle "$tmp/bundle.git" --workdir "$tmp/work" --lane build --host-id host-1 --dry-run
+bad "unknown profile refused" "unknown profile" bash "$CAMPAIGN" --profile unknown --campaign alpha-1 --candidate "$SHA" --bundle "$tmp/bundle.git" --workdir "$tmp/work" --lane build --host-id host-1 --dry-run
+
 # --- argument validation ---
 bad "empty campaign refused" "--campaign must be non-empty" bash "$CAMPAIGN" --campaign "" --candidate "$SHA" --bundle "$tmp/bundle.git" --workdir "$tmp/work" --lane build --host-id host-1 --dry-run
 bad "uppercase campaign refused" "--campaign must be non-empty" bash "$CAMPAIGN" --campaign "Alpha" --candidate "$SHA" --bundle "$tmp/bundle.git" --workdir "$tmp/work" --lane build --host-id host-1 --dry-run

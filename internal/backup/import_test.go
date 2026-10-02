@@ -15,7 +15,7 @@ import (
 
 // TestExportImportRoundTrip seeds an app via the authn-style fixture, exports
 // it, imports into a fresh database, and asserts instaql
-// results are identical pre/post. Re-importing the same dump is idempotent.
+// results are identical pre/post. Re-importing into the populated target is refused.
 func TestExportImportRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	pool, appID, cleanup := env(t)
@@ -44,13 +44,8 @@ func TestExportImportRoundTrip(t *testing.T) {
 		t.Fatalf("instaql results diverged:\nbefore=%s\nafter=%s", before, after)
 	}
 
-	// Idempotency: re-importing the same dump succeeds as a no-op.
-	reimported, err := backup.Import(ctx, pool, bytes.NewReader(dump), appID)
-	if err != nil {
-		t.Fatalf("re-import: %v", err)
-	}
-	if reimported.Triples != imported.Triples || reimported.Attrs != imported.Attrs {
-		t.Fatalf("re-import changed counts: %+v vs %+v", reimported, imported)
+	if _, err := backup.Import(ctx, pool, bytes.NewReader(dump), appID); !errors.Is(err, backup.ErrTargetNotEmpty) {
+		t.Fatalf("re-import error = %v, want ErrTargetNotEmpty", err)
 	}
 	again := compactJSON(t, runInstaql(t, ctx, pool, appID))
 	if again != after {
@@ -83,7 +78,8 @@ func TestChecksumCorruption(t *testing.T) {
 		t.Fatal("corruption was a no-op")
 	}
 
-	_, err := backup.Import(ctx, pool, bytes.NewReader(corrupt), appID)
+	target := newDatabase(t)
+	_, err := backup.Import(ctx, target, bytes.NewReader(corrupt), appID)
 	if err == nil {
 		t.Fatal("expected import to fail on corrupted dump")
 	}
@@ -93,12 +89,12 @@ func TestChecksumCorruption(t *testing.T) {
 
 	// The rejected dump must leave the target exactly as it was.
 	var triples, attrs int
-	if err := pool.QueryRow(ctx,
+	if err := target.QueryRow(ctx,
 		`SELECT (SELECT count(*) FROM triples WHERE app_id=$1),
 		        (SELECT count(*) FROM attrs   WHERE app_id=$1)`, appID).Scan(&triples, &attrs); err != nil {
 		t.Fatal(err)
 	}
-	if triples != 10 || attrs != 4 {
+	if triples != 0 || attrs != 0 {
 		t.Fatalf("corrupt import mutated target: triples=%d attrs=%d", triples, attrs)
 	}
 }
