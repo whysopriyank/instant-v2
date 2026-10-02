@@ -256,7 +256,7 @@ build_candidate() {
 bad "public build without release tag rejected" "release tag must identify candidate HEAD" build_candidate
 [[ ! -f $tmp/go-called ]] || { echo "FAIL: untagged build invoked Go" >&2; fail=$((fail+1)); }
 rm -f "$tmp/go-called"
-git -C "$build_repo" tag v0.1.0-alpha.1 "$build_sha"
+git -C "$build_repo" tag "$(jq -r .release_version "$build_repo/docs/plans/next-release/qualification-policy.json")" "$build_sha"
 git -C "$build_repo" commit --allow-empty -qm different-candidate
 bad "public build with tag on another commit rejected" "release tag must identify candidate HEAD" build_candidate
 [[ ! -f $tmp/go-called ]] || { echo "FAIL: mismatched tag build invoked Go" >&2; fail=$((fail+1)); }

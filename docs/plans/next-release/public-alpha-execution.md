@@ -137,3 +137,19 @@ skips on Go 1.25.14 after updating only the two fixture files: duplicate-query
 acknowledgements echo `q`; remove-query acknowledgements echo `q` and retain
 `client-event-id: null`. Runtime behavior is unchanged. All `6f0981c` campaigns
 remain superseded evidence; the corrected source requires fresh qualification.
+
+
+## Publication blocker correction — 2026-10-03 (IST)
+
+The owner approved final public publication. Candidate `259f4478` passed the
+complete release gate; source visibility, protected tag rules and the required
+reviewer environment were then applied and independently read back. Its actual
+publisher run `37050637547` stopped before packaging: the pinned Cosign v3
+installer requested a detached `.sig` asset absent from Cosign 3.1.3, whose
+release uses verification bundles. The immutable `v0.1.0-alpha.1` tag remains
+unchanged as failed-attempt evidence. The minimum correction uses the official
+bundle-verifying installer and qualifies a fresh `v0.1.0-alpha.2` successor.
+The fresh source CI also exposed incorrect PostgreSQL `createdb` argument and
+soak process/configuration wiring; those release-blocking workflow inputs are
+corrected without changing daemon behavior or relaxing configuration checks.
+All prior campaign evidence remains under its original source identity.

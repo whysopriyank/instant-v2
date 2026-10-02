@@ -8,11 +8,11 @@ starts one daemon with durable local storage and PostgreSQL 17.
 
 ## Verify before starting
 
-Use an exact version tag (first intended tag: `v0.1.0-alpha.1`) to discover
+Use an exact version tag (intended public tag: `v0.1.0-alpha.2`) to discover
 its digest; deploy the verified digest, never the moving `alpha` alias.
 
 ```sh
-TAG=v0.1.0-alpha.1
+TAG=v0.1.0-alpha.2
 IMAGE=ghcr.io/whysopriyank/instant-v2
 DIGEST=$(docker buildx imagetools inspect "$IMAGE:$TAG" --format '{{json .Manifest}}' | jq -er .digest)
 IDENTITY="https://github.com/whysopriyank/instant-v2/.github/workflows/publish.yml@refs/tags/$TAG"
@@ -142,4 +142,6 @@ or load capacity. A failed cleanup has no `cleanup.complete` and exits nonzero.
 Platform qualification is Linux amd64 on the currently selected owned host.
 Linux arm64 and Darwin arm64 are cross-compiled artifacts until separately
 executed on a matching host; a multiarch index alone is not ARM64 runtime
-qualification. The initial selected release version is `v0.1.0-alpha.1`.
+qualification. The selected public release version is `v0.1.0-alpha.2`; the immutable
+`v0.1.0-alpha.1` tag records an attempted publication that stopped during
+Cosign installation before producing release artifacts.

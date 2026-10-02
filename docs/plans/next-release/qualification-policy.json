@@ -1,7 +1,7 @@
 {
   "decision_id": "DEC-002-single-node-public-alpha-20261002",
   "profile": "single-node-public-alpha",
-  "release_version": "v0.1.0-alpha.1",
+  "release_version": "v0.1.0-alpha.2",
   "performance": "not_selected",
   "external_v1": "not_selected",
   "external_v1_approval": "EXCLUDED_APPROVED",

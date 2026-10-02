@@ -110,7 +110,7 @@ jobs:
           test "$ready" = 1
           # Connect through the bootstrap database; the benchmark database is
           # created with the exact name used by DATABASE_URL above.
-          docker exec soak-pg createdb -U instant -d postgres "$BENCHMARK_DB_NAME"
+          docker exec soak-pg createdb -U instant --maintenance-db=postgres "$BENCHMARK_DB_NAME"
       - name: Build server + harness
         run: |
           go build -o instantd ./cmd/instantd
@@ -132,6 +132,11 @@ jobs:
         env:
           INSTANT_V2_HTTP_ADDR: "127.0.0.1:8888"
           INSTANT_V2_INSECURE_DEV_SECRETS: "1"
+          # Fake credentials satisfy startup validation; this job does not contact providers.
+          INSTANT_OAUTH_GOOGLE_CLIENT_ID: "ci-soak-google-id"
+          INSTANT_OAUTH_GOOGLE_CLIENT_SECRET: "ci-soak-google-secret"
+          INSTANT_OAUTH_GITHUB_CLIENT_ID: "ci-soak-github-id"
+          INSTANT_OAUTH_GITHUB_CLIENT_SECRET: "ci-soak-github-secret"
         run: |
           ./instantd > instantd.log 2>&1 &
           echo $! > server.pid
@@ -145,7 +150,7 @@ jobs:
       - name: Soak (150 sessions, 10s ramp + 30s warm-up + 60s measurement)
         timeout-minutes: 6
         run: |
-          make soak-gate SOAK_SERVER_PID="$(cat server.pid)"
+          SOAK_EXPECTED_BIN="$PWD/instantd" make soak-gate SOAK_SERVER_PID="$(cat server.pid)"
       - name: RSS ceiling (1 GiB)
         if: always()
         run: |
