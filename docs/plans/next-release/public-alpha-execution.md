@@ -127,3 +127,13 @@ all runtime and identity checks remain mandatory. Apache-2.0 is declared in
 LICENSE and OCI metadata. Source/binary transfer and final tests on bigbeast
 were explicitly approved; publication follows qualification and the final
 protected workflow controls.
+
+### Final corpus acknowledgement reconciliation
+
+Candidate `6f0981c` native qualification failed two authored corpus scenarios
+because three expected acknowledgements predated the reviewed reply-field fix.
+The full owned-DB corpus reproduced RED, then all 18 scenarios passed with no
+skips on Go 1.25.14 after updating only the two fixture files: duplicate-query
+acknowledgements echo `q`; remove-query acknowledgements echo `q` and retain
+`client-event-id: null`. Runtime behavior is unchanged. All `6f0981c` campaigns
+remain superseded evidence; the corrected source requires fresh qualification.

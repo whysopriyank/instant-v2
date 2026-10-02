@@ -4,8 +4,8 @@
 {"dir":"c2s","raw":{"op":"add-query","q":{"posts":{}},"client-event-id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc"}}
 {"dir":"s2c","raw":{"op":"add-query-ok","q":{"posts":{}},"result":[{"child-nodes":[],"data":{"datalog-result":{"join-rows":[[]]}}}],"result-meta":{},"processed-tx-id":0,"processed-isn":0,"client-event-id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc"}}
 {"dir":"c2s","raw":{"op":"add-query","q":{"posts":{}},"client-event-id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc"}}
-{"dir":"s2c","raw":{"op":"add-query-exists","client-event-id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc"}}
+{"dir":"s2c","raw":{"op":"add-query-exists","q":{"posts":{}},"client-event-id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc"}}
 {"dir":"c2s","raw":{"op":"remove-query","q":{"posts":{}}}}
-{"dir":"s2c","raw":{"op":"remove-query-ok"}}
+{"dir":"s2c","raw":{"op":"remove-query-ok","q":{"posts":{}},"client-event-id":null}}
 {"dir":"c2s","raw":{"op":"add-query","q":{"posts":{}},"client-event-id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc"}}
 {"dir":"s2c","raw":{"op":"add-query-ok","q":{"posts":{}},"result":[{"child-nodes":[],"data":{"datalog-result":{"join-rows":[[]]}}}],"result-meta":{},"processed-tx-id":0,"processed-isn":0,"client-event-id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc"}}

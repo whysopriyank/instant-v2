@@ -6,7 +6,7 @@
 {"dir":"c2s","raw":{"op":"add-query","q":{"posts":{}},"client-event-id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc"}}
 {"dir":"s2c","raw":{"op":"add-query-ok","q":{"posts":{}},"result":[{"child-nodes":[],"data":{"datalog-result":{"join-rows":[[["dddddddd-dddd-4ddd-8ddd-dddddddddddd","44444444-4444-4444-8444-444444444444","temporary"]]]}}}],"result-meta":{},"processed-tx-id":0,"processed-isn":0,"client-event-id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc"}}
 {"dir":"c2s","raw":{"op":"remove-query","q":{"posts":{}}}}
-{"dir":"s2c","raw":{"op":"remove-query-ok"}}
+{"dir":"s2c","raw":{"op":"remove-query-ok","q":{"posts":{}},"client-event-id":null}}
 {"dir":"c2s","raw":{"op":"transact","tx-steps":[["retract-triple","dddddddd-dddd-4ddd-8ddd-dddddddddddd","44444444-4444-4444-8444-444444444444","temporary"]]}}
 {"dir":"s2c","raw":{"op":"transact-ok","tx-id":0}}
 {"dir":"c2s","raw":{"op":"add-query","q":{"posts":{}},"client-event-id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc"}}
