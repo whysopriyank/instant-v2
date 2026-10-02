@@ -172,5 +172,8 @@ func (h *Handler) handleRestoreObject(w http.ResponseWriter, r *http.Request, ap
 		h.writeImportError(w, ierr)
 		return
 	}
+	if h.OnRestore != nil {
+		h.OnRestore(platform.UUIDToStr(appID))
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"counts": counts})
 }

@@ -39,6 +39,9 @@ func NewCatalogCache(q Queryer, rq RowQueryer) *CatalogCache {
 
 // For returns the app's catalog, loading it on first use.
 func (c *CatalogCache) For(ctx context.Context, appID string) (*AttrCatalog, error) {
+	if id, err := ScanUUIDErr(appID); err == nil {
+		appID = UUIDToStr(id)
+	}
 	for {
 		c.mu.Lock()
 		if cat, ok := c.cache[appID]; ok {
@@ -74,6 +77,9 @@ func (c *CatalogCache) For(ctx context.Context, appID string) (*AttrCatalog, err
 
 // Invalidate drops one app's cached catalog and rule doc.
 func (c *CatalogCache) Invalidate(appID string) {
+	if id, err := ScanUUIDErr(appID); err == nil {
+		appID = UUIDToStr(id)
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.versions == nil {
@@ -89,6 +95,9 @@ func (c *CatalogCache) Invalidate(appID string) {
 // callers can pass the result straight into perms.Check. The cache shares the
 // catalog's invalidation cycle (Invalidate clears both).
 func (c *CatalogCache) RuleDocFor(ctx context.Context, appID string) (*perms.RuleDoc, error) {
+	if id, err := ScanUUIDErr(appID); err == nil {
+		appID = UUIDToStr(id)
+	}
 	for {
 		c.mu.Lock()
 		if d, ok := c.rules[appID]; ok {

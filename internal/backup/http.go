@@ -55,6 +55,9 @@ type Handler struct {
 	S3 ObjectStore
 	// Files is the durable local object store used for v1 ZIP file restoration.
 	Files storageapi.ObjectStore
+	// OnRestore is called after a known successful commit, before the HTTP
+	// success response. The daemon uses it to invalidate cached app metadata.
+	OnRestore func(appID string)
 }
 
 func (h *Handler) logger() *slog.Logger {
@@ -110,12 +113,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.writeImportError(w, ierr)
 			return
 		}
+		if h.OnRestore != nil {
+			h.OnRestore(appStr)
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"counts": counts})
 	case "restore-v1zip":
 		counts, zerr := h.importV1ZipBody(ctx, r, appID)
 		if zerr != nil {
 			h.writeImportError(w, zerr)
 			return
+		}
+		if h.OnRestore != nil {
+			h.OnRestore(appStr)
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"counts": counts})
 	case "object":

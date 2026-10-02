@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -21,6 +22,92 @@ type snapshotQuery struct {
 	release chan struct{}
 	calls   atomic.Int32
 	rows    func(old bool) pgx.Rows
+}
+
+func TestCatalogCacheUUIDAliasInvalidation(t *testing.T) {
+	appID, attrID := [16]byte{0xab}, [16]byte{2}
+	canonical := UUIDToStr(appID)
+	for _, alias := range []string{strings.ToUpper(canonical), strings.ReplaceAll(canonical, "-", "")} {
+		for _, reverse := range []bool{false, true} {
+			warm, invalidate := canonical, alias
+			if reverse {
+				warm, invalidate = alias, canonical
+			}
+			for _, rules := range []bool{false, true} {
+				t.Run(fmt.Sprintf("alias=%s/reverse=%t/rules=%t", alias, reverse, rules), func(t *testing.T) {
+					q := &snapshotQuery{entered: make(chan struct{}), release: make(chan struct{}), rows: func(old bool) pgx.Rows {
+						if rules {
+							allow := strconv.FormatBool(old)
+							return &ruleSnapshotRows{raw: []byte(`{"todos":{"allow":{"view":"` + allow + `"}}}`)}
+						}
+						etype, label := "todos", "fresh"
+						if old {
+							label = "stale"
+						}
+						return &scriptedRows{rows: []Attr{{ID: attrID, AppID: appID, Etype: &etype, Label: &label, ValueType: "blob", Cardinality: "one"}}}
+					}}
+					close(q.release)
+					cache := NewCatalogCache(q, q)
+					load := func() string {
+						if rules {
+							doc, err := cache.RuleDocFor(context.Background(), warm)
+							if err != nil {
+								t.Fatal(err)
+							}
+							allow, err := perms.Check("todos", "view", doc, perms.Bindings{})
+							if err != nil {
+								t.Fatal(err)
+							}
+							return strconv.FormatBool(allow)
+						}
+						cat, err := cache.For(context.Background(), warm)
+						if err != nil {
+							t.Fatal(err)
+						}
+						attr, ok := cat.ByID(attrID)
+						if !ok || cat.AppID != appID || attr.AppID != appID || attr.Label == nil {
+							t.Fatalf("unexpected catalog: %+v attr=%+v", cat, attr)
+						}
+						return *attr.Label
+					}
+					before, want := "stale", "fresh"
+					if rules {
+						before, want = "true", "false"
+					}
+					if got := load(); got != before {
+						t.Fatalf("warm state = %q, want %q", got, before)
+					}
+					cache.Invalidate(invalidate)
+					if got := load(); got != want {
+						t.Fatalf("UUID alias retained stale state: got %q want %q", got, want)
+					}
+					if calls := q.calls.Load(); calls != 2 {
+						t.Fatalf("query count = %d, want warm read and replacement", calls)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestCatalogCacheInvalidUUIDBehavior(t *testing.T) {
+	q := &snapshotQuery{}
+	cache := NewCatalogCache(q, q)
+	for app, want := range map[string]string{"not-a-uuid": "bad uuid", "ab": "bad uuid length"} {
+		if _, err := cache.For(context.Background(), app); err == nil || err.Error() != want {
+			t.Fatalf("For(%q) error = %v, want %q", app, err, want)
+		}
+		if _, err := cache.RuleDocFor(context.Background(), app); err == nil || err.Error() != want {
+			t.Fatalf("RuleDocFor(%q) error = %v, want %q", app, err, want)
+		}
+		cache.Invalidate(app)
+		if cache.versions[app] != 1 {
+			t.Fatalf("invalid UUID invalidation changed original key %q", app)
+		}
+	}
+	if calls := q.calls.Load(); calls != 0 {
+		t.Fatalf("invalid UUID made %d database queries", calls)
+	}
 }
 
 func (q *snapshotQuery) Query(ctx context.Context, _ string, _ ...any) (pgx.Rows, error) {

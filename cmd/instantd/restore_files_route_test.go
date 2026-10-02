@@ -8,11 +8,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 )
 
 func TestDaemonZIPRestoreFilesAreDownloadable(t *testing.T) {
 	mux, _, token := cf003PostgresMux(t)
+	status, body, _ := cf003Serve(mux, http.MethodGet, "/admin/schema?app-id="+cf003AppID, "", map[string]string{"X-admin-token": token})
+	if status != http.StatusOK || !strings.Contains(body, `"attrs":[]`) {
+		t.Fatalf("warm empty schema status=%d body=%s", status, body)
+	}
 	var archive bytes.Buffer
 	w := zip.NewWriter(&archive)
 	const location = "00000000-0000-4000-8000-000000000006"
@@ -34,14 +39,18 @@ func TestDaemonZIPRestoreFilesAreDownloadable(t *testing.T) {
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(http.MethodPost, "/backup/"+cf003AppID+"/restore-v1zip", bytes.NewReader(archive.Bytes()))
+	request := httptest.NewRequest(http.MethodPost, "/backup/"+strings.ReplaceAll(cf003AppID, "-", "")+"/restore-v1zip", bytes.NewReader(archive.Bytes()))
 	request.Header.Set("X-admin-token", token)
 	response := httptest.NewRecorder()
 	mux.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("ZIP restore status=%d body=%s", response.Code, response.Body.String())
 	}
-	status, body, _ := cf003Serve(mux, http.MethodGet, "/storage/signed-download-url?app-id="+cf003AppID+"&id="+cf003FileID, "", map[string]string{"X-admin-token": token})
+	status, body, _ = cf003Serve(mux, http.MethodGet, "/admin/schema?app-id="+cf003AppID, "", map[string]string{"X-admin-token": token})
+	if status != http.StatusOK || !strings.Contains(body, `"$files"`) || !strings.Contains(body, `"path"`) {
+		t.Fatalf("restored schema stayed stale: status=%d body=%s", status, body)
+	}
+	status, body, _ = cf003Serve(mux, http.MethodGet, "/storage/signed-download-url?app-id="+cf003AppID+"&id="+cf003FileID, "", map[string]string{"X-admin-token": token})
 	if status != http.StatusOK {
 		t.Fatalf("download URL status=%d body=%s", status, body)
 	}

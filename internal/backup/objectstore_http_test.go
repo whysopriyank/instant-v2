@@ -27,8 +27,15 @@ func TestHandlerS3ObjectRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("s3 store: %v", err)
 	}
-	h := &backup.Handler{Pool: pool, AdminTokenCheck: fakeAuth{valid: "tok-123"}.check, S3: store}
 	appStr := uuidStr(appID)
+	restores := 0
+	h := &backup.Handler{Pool: pool, AdminTokenCheck: fakeAuth{valid: "tok-123"}.check, S3: store,
+		OnRestore: func(app string) {
+			if app != appStr {
+				t.Errorf("restored app = %q, want %q", app, appStr)
+			}
+			restores++
+		}}
 	auth := map[string]string{"Authorization": "Bearer tok-123"}
 
 	do := func(method, path string, hdr map[string]string) *httptest.ResponseRecorder {
@@ -74,6 +81,9 @@ func TestHandlerS3ObjectRoundTrip(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `"counts"`) {
 		t.Fatalf("unexpected restore body: %s", rec.Body.String())
 	}
+	if restores != 1 {
+		t.Fatalf("successful restore callbacks = %d, want 1", restores)
+	}
 
 	// GET /object downloads the raw dump.
 	rec = do(http.MethodGet, "/backup/"+appStr+"/object?key=dumps/app.ndjson", auth)
@@ -85,5 +95,8 @@ func TestHandlerS3ObjectRoundTrip(t *testing.T) {
 	rec = do(http.MethodPost, "/backup/"+appStr+"/restore-object?key=nope", auth)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("missing key: got %d", rec.Code)
+	}
+	if restores != 1 {
+		t.Fatalf("failed restore changed callback count to %d", restores)
 	}
 }

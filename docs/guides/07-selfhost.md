@@ -1,27 +1,55 @@
 # Self-hosting instantd (v2)
 
-This guide replaces every `instantdb.com` assumption in the v1 docs. Nothing here
-phones home: the daemon talks to one Postgres and to your clients, nothing else.
+This guide covers controlled single-node alpha testing. No public release is
+available yet and production readiness is not established. Follow the current
+[public-alpha envelope](../reference/public-alpha-release-envelope.md); the
+September 26 acceptance applies only to its historical DEC-001 candidate.
 
 ## Quickstart
 
-Requirements: Postgres 15+ with `wal_level=logical` (reactive sync streams changes
-via logical replication), Go 1.25+ or Docker.
+Selected runtime: one daemon and primary PostgreSQL 17 on Linux amd64.
+For a source run, use Go 1.25+ and Docker for the database. Serving uses
+post-commit notification; the separately tested WAL tailer is not the assembled
+serving path. The reference database configuration retains logical WAL.
+Google and GitHub OAuth configuration is mandatory when a database is set,
+even for testing that does not exercise provider login.
 
 ```sh
-# 1. Postgres with logical WAL
-docker run -d --name instant-pg -p 5432:5432 \
-  -e POSTGRES_USER=instant -e POSTGRES_PASSWORD=instant postgres:17 \
+# Run from the repository root. Export the four OAuth variables with your app settings.
+: "${INSTANT_OAUTH_GOOGLE_CLIENT_ID:?set Google client ID}"
+: "${INSTANT_OAUTH_GOOGLE_CLIENT_SECRET:?set Google client secret}"
+: "${INSTANT_OAUTH_GITHUB_CLIENT_ID:?set GitHub client ID}"
+: "${INSTANT_OAUTH_GITHUB_CLIENT_SECRET:?set GitHub client secret}"
+
+# 1. Local PostgreSQL and durable file storage
+export POSTGRES_PASSWORD="$(openssl rand -hex 32)"
+export INSTANT_V2_STORAGE_SECRET="$(openssl rand -hex 32)"
+export INSTANT_V2_STORAGE_ROOT="$PWD/.instant-files"
+mkdir -p "$INSTANT_V2_STORAGE_ROOT"
+docker run -d --name instant-pg -p 127.0.0.1:5432:5432 \
+  -e POSTGRES_USER=instant -e POSTGRES_DB=instant -e POSTGRES_PASSWORD postgres:17 \
   -c wal_level=logical
 
-# 2. Run instantd against it
-export DATABASE_URL='postgres://instant:instant@localhost:5432/instant?sslmode=disable'
-go run ./cmd/instantd            # or: docker run -p 8080:8080 ghcr.io/<you>/instantd
+# 2. Wait for pg_isready, then run the source daemon on loopback
+docker exec instant-pg pg_isready -U instant -d instant
+export DATABASE_URL="postgres://instant:$POSTGRES_PASSWORD@127.0.0.1:5432/instant?sslmode=disable"
+export INSTANT_V2_HTTP_ADDR=127.0.0.1:8080
+export INSTANT_V2_WS_ALLOWED_ORIGINS=http://localhost:3000
+go run ./cmd/instantd
 ```
+
+Keep the generated database password, storage secret and file directory for
+subsequent starts; do not regenerate them for an existing installation. The
+OAuth settings must be exported in the shell running the daemon. For a verified
+published image, the [distribution reference](../../deploy/README.md) documents
+signature/provenance verification and the real
+[Compose deployment](../../deploy/compose/docker-compose.yml), using the
+[required settings template](../../deploy/compose/.env.example). Its required
+image digest is not evidence that an image has already been published.
 
 The daemon creates its schema on boot (embedded migrations under an advisory
 lock, so a concurrent boot cannot race the migration step). This alpha's
-release profile is single-node only (DEC-001): running more than one
+release profile is single-node only: running more than one
 `instantd` instance against one database is not a qualified or supported
 topology in this release.
 
@@ -36,7 +64,7 @@ topology in this release.
 
 ### File storage volume
 
-The daemon runs as UID/GID `65532:65532` and validates its storage root at
+The container image runs as UID/GID `65532:65532` and validates its storage root at
 startup: the directory must exist (or be creatable), be absolute, and accept
 synced writes, otherwise the daemon refuses to start before exposing any
 route. Mount a persistent volume owned by `65532` and point
@@ -59,14 +87,19 @@ container without a mounted persistent volume at `INSTANT_V2_STORAGE_ROOT`
 loses every stored object when the container is replaced, even though the
 database rows survive. Object-backup routes stay a stable explicit `503`
 (`{"message":"no object store wired"}`) for this alpha: no S3-compatible
-store is assembled and no object-backup provider is selected. Native Linux
-qualification remains OP-003 and container qualification remains unselected
-OP-004; container execution itself is outside DA-001.
+store is assembled and no object-backup provider is selected. The new public
+candidate requires its own native, container and restore qualification;
+historical native acceptance does not establish those results.
+
+Additional configuration:
+
+| Env var | Default | Purpose |
+|---|---|---|
 | `INSTANT_V2_MAX_SUBS_PER_APP` | 2000 | Live subscription cap per app (0 would mean unlimited) |
 | `INSTANT_V2_MAX_WS_CONNS` | 20000 | Concurrent websocket connection cap |
 | `INSTANT_V2_MAX_SSE_CONNS` | 10000 | Concurrent SSE stream cap |
 | `INSTANT_V2_MAX_UPLOAD_BYTES` | 536870912 (512 MiB) | Per-upload body ceiling; over-cap uploads are rejected 413 |
-| `INSTANT_V2_MAX_BACKUP_BYTES` | 34359738368 (32 GiB) | Restore-body ceiling |
+| `INSTANT_V2_MAX_BACKUP_BYTES` | 34359738368 (32 GiB) | Configuration value; current alpha restore HTTP routes enforce a fixed 1 GiB ceiling, which this setting does not raise |
 | `INSTANT_V2_READ_URL` | `$DATABASE_URL` | Read-plane DSN (instaql refreshes); point at a replica to isolate reads (docs/09 §T2.3) |
 | `INSTANT_V2_WRITE_POOL_MAXCONNS` | 32 | Write-pool connection ceiling |
 | `INSTANT_V2_READ_POOL_MAXCONNS` | 32 | Read-pool connection ceiling |
@@ -75,6 +108,7 @@ OP-004; container execution itself is outside DA-001.
 | `INSTANT_V2_PG_LOCK_TIMEOUT` | `5s` | DDL/row-lock wait ceiling on both pools (`0` disables) |
 | `INSTANT_V2_PG_IDLE_TX_TIMEOUT` | `30s` | Kills connections left idle inside an open transaction (`0` disables) |
 | `INSTANT_V2_WS_COMPRESSION` | `disabled` | permessage-deflate: `no-context-takeover` or `context-takeover` (docs/09 §T2.2) |
+| `INSTANT_V2_WS_ALLOWED_ORIGINS` | `*` (development default) | Set explicit application origins for the alpha; wildcard is rejected by qualification |
 | `INSTANT_V2_INVALIDATION_BUS` | `none` | `postgres` enables LISTEN/NOTIFY invalidation across peer processes; this config knob exists, but running more than one `instantd` against one DB is not a qualified or supported topology for this single-node alpha (DEC-001; docs/09 §T2.4) |
 | `INSTANT_V2_NODE_ID` | hostname | Node identity in logs and `/health` |
 | `INSTANT_V2_METRICS_ADDR` | `127.0.0.1:9465` | Prometheus scrape endpoint (`/metrics`); set empty to disable |
@@ -104,12 +138,26 @@ the roadmap.)
 
 ```js
 import { init } from '@instantdb/react';
-const db = init({ appId: '<app-id>', apiURI: 'http://localhost:8080' });   // REST/WS plane
-// websocket lands on ws://localhost:8080/runtime/session automatically
+const db = init({
+  appId: '<app-id>',
+  apiURI: 'http://localhost:8080',
+  websocketURI: 'ws://localhost:8080/runtime/session',
+});
 ```
 
-The frozen v1 SDKs work unmodified — that compatibility is the project's core
-constraint.
+This configuration is a testing example, not a claim that frozen v1 SDKs work
+unmodified. The [actual v1 rehearsal](../plans/next-release/v1-differential-rehearsal-20261002.md)
+found discrepancies in 16 of 18 selected scenarios. Current query tuples omit
+v1's fourth timestamp element; SDK `serverCreatedAt` ordering, infinite-query
+and cursor fidelity are unqualified. Serialized cursor input also differs from
+pinned v1. See [compatibility observations](../plans/next-release/v1-compatibility-observations.md).
+An owner decision on these discrepancies remains pending; they are not approved
+alpha exclusions.
+
+The approved alpha differences remain explicit: no email delivery (503), direct
+ID-token sign-in (501), admin presence (501), dynamic view rules, sync/stream
+operations or object-store backup (503). HA/read replicas and real-provider
+acceptance remain unselected.
 
 ## Surfaces
 
@@ -129,7 +177,15 @@ Export is a plain NDJSON stream with trailing checksum:
 curl -H "Authorization: Bearer <admin-token>" http://localhost:8080/backup/<app-id> > app.ndjson
 ```
 
-Restore posts it back. Object storage routes (`PUT /backup/<app-id>/object?key=…`,
+Restore posts it to an empty target app; a nonempty target is rejected. Native
+NDJSON contains SQL records and file metadata, not file bytes: preserve and
+restore the durable file volume alongside it. V1 ZIP restoration includes its
+file bytes. Known rejections preserve target/source state; an unknown COMMIT
+outcome requires reconciliation and a crash may leave orphan blobs. Use an
+alpha maintenance window for restore. See the
+[restore contract](../plans/next-release/restore-contract.md).
+
+Object storage routes (`PUT /backup/<app-id>/object?key=…`,
 `GET /backup/<app-id>/object?key=…`,
 `POST /backup/<app-id>/restore-object?key=…`) are disabled for this alpha:
 they return the stable explicit `503 {"message":"no object store wired"}`,
@@ -137,5 +193,5 @@ construct no object-store backend, create no staging or final backup object,
 and require no S3 credentials. They activate only when an S3-compatible
 store is wired in a future packet; keys are namespaced under the app id
 server-side. All backup routes require the app's admin token. See
-`internal/backup` package doc. Container or production recovery acceptance
-is not claimed here (OP-004/OP-006 remain separate).
+`internal/backup` package doc. Public-candidate container and restore acceptance
+require their own retained runtime evidence; production recovery is not claimed.

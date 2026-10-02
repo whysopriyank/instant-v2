@@ -96,3 +96,21 @@ after `AUTH-PUBLISH-001`. This corrects the earlier circular requirement that
 QR-004's prepublication gate wait for publication. No runtime verifier is
 weakened and no public signing, owner protection setting or release is claimed.
 The final tagged snapshot and independent supply-chain review are still pending.
+
+
+## Live restore cache blocker
+
+An independent assembled-mux/owned-DB regression reproduced a successful restore
+followed by stale empty `/admin/schema` after warming the empty shell catalog.
+The minimum correction invalidates the existing per-app catalog/rules cache
+only after a known successful restore commit. Rejected and ambiguous restores
+must not report a successful invalidation. Handler callback verification and
+an assembled warmed-schema regression are required before the next freeze.
+
+
+The assembled warmed-schema test reproduced RED, then passed with the success
+hook (1.986s). Independent review additionally found accepted UUID spellings
+could create separate cache keys; normalize successful UUID parses in the
+existing catalog/rules cache read and invalidation paths so aliases share the
+same entry. The assembled restore test uses a hyphenless restore route after
+warming the canonical schema. Failed/unknown restores still do not notify.
