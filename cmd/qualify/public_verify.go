@@ -38,7 +38,7 @@ func runVerifyPublic(args []string) int {
 	if err = strictPublicJSON(b, &m); err != nil {
 		return fail(err)
 	}
-	if m.Profile != PublicProfile || m.Lanes["performance"] != p.Performance {
+	if m.Profile != PublicProfile || m.Lanes["performance"] != p.Performance || m.Lanes["external_v1"] != p.ExternalV1 {
 		return fail(fmt.Errorf("manifest contradicts approved public policy"))
 	}
 	if err = validateManifest(*root, m, *candidate, *campaign); err != nil {
@@ -84,7 +84,7 @@ func runVerifyPublic(args []string) int {
 			return fail(fmt.Errorf("candidate artifact hash/size mismatch"))
 		}
 	}
-	packets, lanes, _, _ := selectPublicPerformance(p.Performance)
+	packets, lanes, _, _ := selectPublicPerformance(p.Performance, p.ExternalV1)
 	if err = json.NewEncoder(os.Stdout).Encode(map[string]any{"release_version": p.ReleaseVersion, "decision_id": p.DecisionID, "profile": p.Profile, "lanes": lanes, "packets": packets}); err != nil {
 		return fail(err)
 	}

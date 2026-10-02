@@ -18,8 +18,9 @@ LABEL org.opencontainers.image.source="https://github.com/whysopriyank/instant-v
       org.opencontainers.image.revision=$REVISION \
       org.opencontainers.image.version=$VERSION \
       org.opencontainers.image.created=$CREATED \
-      org.opencontainers.image.licenses="NOASSERTION"
+      org.opencontainers.image.licenses="Apache-2.0"
 COPY --from=build /out/instantd /instantd
+COPY --from=build /src/LICENSE /LICENSE
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build --chown=65532:65532 /data /data
 COPY --from=build --chown=65532:65532 /tmp /tmp

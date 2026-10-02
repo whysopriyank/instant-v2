@@ -15,11 +15,13 @@ Scope: Dockerfile, `.goreleaser.yaml`, `.github/workflows/publish.yml`,
 | QR-004-2 | checksums signed with identity-verifiable keyless bundle; OCI digest signed; SPDX SBOM and build provenance attached; draft binary release | local static archives/SBOM/checksums, offline local-key signature dry run; Actions OIDC/registry exercise after grant | snapshot; cosign verification; postpublish job | FIX / PARTIAL |
 | OP-004 / QR-004-3 | published digest is re-pulled and identity/signatures/provenance verified before DB-connected transact/subscription/persistence/drain smoke | existing smoke has no DB or storage root and fails current daemon startup | `make container-verify`; postpublish job | FIX / PARTIAL |
 
-No commit, tag, push, publication, infrastructure change, or license choice
-is authorized by this packet. Tag rules and the `public-alpha` environment
+At packet creation, no commit, tag, push, publication, infrastructure change, or license choice
+was authorized by this packet. Tag rules and the `public-alpha` environment
 require owner setup. Container runtime and OIDC evidence cannot be replaced
-by YAML checks or a snapshot. No license is declared in the checkout; the
-OCI license label uses `NOASSERTION` pending the owner's decision.
+by YAML checks or a snapshot. The owner subsequently selected Apache-2.0 and
+public source/images on 2026-10-02. `LICENSE` is included in binary archives and
+images, and the OCI license label declares `Apache-2.0`. This selection does not
+substitute for the final candidate gate or actual signed publication checks.
 
 ## Evidence
 

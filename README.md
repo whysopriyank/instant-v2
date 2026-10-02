@@ -64,18 +64,22 @@ sub-second cold start, single-binary deploy, and architectural wins (delta sync,
 An internal single-node alpha was accepted on September 26. **No public alpha
 has been published, and production readiness is not established.** The current
 [public-alpha envelope](docs/reference/public-alpha-release-envelope.md) selects
-one daemon with primary PostgreSQL 17 on Linux amd64, plus new container,
-restore and official-v1 comparison requirements. Historical acceptance does
+one daemon with primary PostgreSQL 17 on Linux amd64, plus new container and
+restore requirements. Historical acceptance does
 not qualify the new candidate.
 
 The [actual v1 rehearsal](docs/plans/next-release/v1-differential-rehearsal-20261002.md)
-observed 2 agreements and 16 failures across 18 selected scenarios; compatibility
-qualification remains blocked. Query tuples omit v1's fourth timestamp element,
+observed 2 agreements and 16 failures across 18 scenarios. The owner approved
+documented compatibility limits and excluded v1 parity/drop-in acceptance from
+this bounded alpha; the failures remain failures. Query tuples omit v1's fourth timestamp element,
 so SDK `serverCreatedAt` ordering, infinite queries and cursor fidelity are
 unqualified; cursor input and other wire/behavior differences also remain.
 See the [precise compatibility limits](docs/plans/next-release/v1-compatibility-observations.md).
-These discrepancies are not approved exclusions; the owner's compatibility
-decision remains pending.
+The envelope records the stable limits, including error envelopes, repeated
+initialization, schema conflicts, entity enumeration and room/acknowledgment
+differences. Five fresh runtime records and the final release gate are still
+required. The owner selected Apache-2.0 and public source/images; publication
+and actual remote visibility are not established by that choice.
 
 Email delivery (503), direct ID-token sign-in (501), admin presence (501),
 dynamic view rules, sync/stream operations and object-store backup (503)

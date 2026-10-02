@@ -6,8 +6,12 @@ original 18-scenario run produced **2 agreements, 14 wire/replay failures and
 rerun completed those two blocked comparisons: both failed. Across the two
 attempts all 18 selected scenarios have genuine runtime observations: 2 agree
 and 16 fail. No PASS qualification record or final-candidate facts were issued.
-CF-004's selected HTTP comparison remains coordinator-owned and is not proved
-by these WS observations.
+CF-004 HTTP comparison is not proved by these WS observations. Subsequently,
+the owner selected documented compatibility limits with no v1 parity claim
+(2026-10-02); the [approved envelope](../../reference/public-alpha-release-envelope.md#owner-confirmed-compatibility-limits--2026-10-02)
+excludes CF-004/CF-005 parity/drop-in acceptance for this bounded alpha. The
+failed results, fixture blocks, aligned reruns and immutable identities below
+remain unchanged; no comparison PASS is manufactured.
 
 ## Immutable inputs and scope
 
@@ -119,8 +123,10 @@ private runtime artifacts rather than promoted public goldens.
   invocation are preserved. They are producer failures, not runtime parity
   verdicts, and are not counted as additional selected scenario results.
 
-The public qualifier currently requires every selected scenario, complete
-streams, empty deltas and bound final identities. These observations do not
-satisfy that contract. Resolving the selected compatibility contract and
-rerunning a final immutable candidate remain required; no comparative
-performance claim follows from this correctness rehearsal.
+At the time of this rehearsal, the selected public qualifier required every
+scenario, complete streams, empty deltas and bound final identities. These
+observations failed that contract. The subsequent owner choice removes
+CF-004/CF-005 parity/drop-in acceptance from the bounded alpha while retaining
+CF-LIMIT-001 through CF-LIMIT-008 and every failed raw observation. Five other
+fresh runtime lanes and their final immutable candidate gate remain required;
+no comparative performance claim follows from this correctness rehearsal.

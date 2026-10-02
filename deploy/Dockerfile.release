@@ -6,6 +6,7 @@ RUN mkdir -p /data /tmp && chown 65532:65532 /data /tmp
 FROM scratch
 ARG TARGETPLATFORM
 COPY $TARGETPLATFORM/instantd /instantd
+COPY LICENSE /LICENSE
 COPY --from=roots /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=roots --chown=65532:65532 /data /data
 COPY --from=roots --chown=65532:65532 /tmp /tmp

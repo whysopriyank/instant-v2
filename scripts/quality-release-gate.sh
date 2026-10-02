@@ -190,7 +190,7 @@ jq -e '
 if [[ $selected_profile == single-node-public-alpha ]]; then
   verify_record container OP-004
   verify_record restore OP-006
-  verify_record v1_differential CF-005
+  if [[ $(jq -r '.lanes.external_v1' "$manifest") == run ]]; then verify_record v1_differential CF-005; fi
   if [[ $(jq -r '.lanes.performance' "$manifest") == artifact ]]; then verify_record performance QR-002; fi
 fi
 

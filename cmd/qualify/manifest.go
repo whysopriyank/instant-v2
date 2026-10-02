@@ -97,14 +97,19 @@ func runManifest(args []string) int {
 		}
 		records["container"] = *containerRecord
 		records["restore"] = *restoreRecord
-		records["v1_differential"] = *differentialRecord
 		policy, err := readPublicPolicy(*policyPath)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "manifest: public policy:", err)
 			return 2
 		}
-		expectedPackets, expectedLanes, _, err = selectPublicPerformance(policy.Performance)
+		expectedPackets, expectedLanes, _, err = selectPublicPerformance(policy.Performance, policy.ExternalV1)
 		if err != nil {
+			return 2
+		}
+		if policy.ExternalV1 == "run" {
+			records["v1_differential"] = *differentialRecord
+		} else if *differentialRecord != "" {
+			fmt.Fprintln(os.Stderr, "manifest: v1 differential record is not selected")
 			return 2
 		}
 		if policy.Performance == "artifact" {
@@ -283,7 +288,7 @@ func validateManifest(evidenceRoot string, m gateManifest, candidate, campaign s
 	if m.Profile == PublicProfile {
 		schema = 2
 		var records map[string]string
-		packets, lanes, records, err = selectPublicPerformance(m.Lanes["performance"])
+		packets, lanes, records, err = selectPublicPerformance(m.Lanes["performance"], m.Lanes["external_v1"])
 		if err != nil {
 			return err
 		}

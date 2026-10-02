@@ -105,9 +105,9 @@ tags, publishes one amd64/arm64 OCI index with an `alpha` alias, creates a
 draft binary release, and verifies signatures/provenance plus container
 behavior after pulling the published digest. It never creates `latest`.
 
-Choose repository/package visibility and the project's license separately.
-The checkout currently declares no license; image metadata records
-`NOASSERTION`. Neither this scaffold nor a local snapshot grants publication
+The owner selected Apache-2.0 and public source/images on 2026-10-02.
+The checkout includes `LICENSE`; archives and images retain that license,
+and OCI metadata declares `Apache-2.0`. A local snapshot does not grant publication
 or proves OP-004/QR-004 acceptance. Keep the release draft until the new
 candidate's release gate and postpublish verification pass.
 

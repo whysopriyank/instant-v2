@@ -66,8 +66,16 @@ manifest_args=()
 if [[ $PROFILE == single-node-public-alpha ]]; then
   policy=$WORKDIR/src/docs/plans/next-release/qualification-policy.json
   performance=$(jq -er '.performance | select(.=="not_selected" or .=="artifact")' "$policy")
-  lanes+=(container restore v1_differential)
-  manifest_args+=(--policy "$policy" --fixtures "$FIXTURES" --image-digest "$DISTRIBUTION_IMAGE" --container-record records/container.json --restore-record records/restore.json --v1-differential-record records/v1_differential.json)
+  external_v1=$(jq -er '.external_v1 | select(.=="not_selected" or .=="run")' "$policy")
+  lanes+=(container restore)
+  manifest_args+=(--policy "$policy" --fixtures "$FIXTURES" --image-digest "$DISTRIBUTION_IMAGE" --container-record records/container.json --restore-record records/restore.json)
+  if [[ $external_v1 == run ]]; then
+    lanes+=(v1_differential)
+    manifest_args+=(--v1-differential-record records/v1_differential.json)
+  else
+    jq -e '.external_v1_approval=="EXCLUDED_APPROVED" and .external_v1_scope=="Document explicit compatibility limits; no v1 parity claim"' "$policy" >/dev/null || { echo "assemble: unapproved v1 exclusion" >&2; exit 1; }
+    [[ ! -e $EV/records/v1_differential.json ]] || { echo "assemble: unselected v1 record supplied" >&2; exit 1; }
+  fi
   if [[ $performance == artifact ]]; then lanes+=(performance);manifest_args+=(--performance-record records/performance.json);fi
 fi
 for lane in "${lanes[@]}"; do

@@ -1,7 +1,10 @@
 # Pinned-v1 compatibility observations — 2026-10-02
 
-Status: observed discrepancies, not approved exceptions or passing CF-005
-evidence. This note does not change the release selection or golden captures.
+Status: observed discrepancies remain failed comparison evidence. On
+2026-10-02 the owner selected documented compatibility limits with no v1 parity
+claim; the [approved envelope](../../reference/public-alpha-release-envelope.md#owner-confirmed-compatibility-limits--2026-10-02)
+records CF-004/CF-005 claim exclusions and stable limits. This note preserves
+the actual observations and golden captures; it does not turn them into PASS.
 
 ## Query tuple timestamps
 
@@ -63,6 +66,7 @@ establish parity.
 
 Scenario 17 sends a serialized cursor string accepted by the candidate; the
 pinned v1 path expects a join-row vector and rejects that input. Cursor input
-compatibility remains unqualified. These observations require an owner
-decision on the supported comparison scope before any exclusion is accepted
-or broader query behavior is changed.
+compatibility remains unqualified. The owner-approved alpha now explicitly
+excludes parity/drop-in claims for these observations; the actual query
+behavior and raw failures remain unchanged. A future parity selection requires
+new implementation/fixture decisions and genuine acceptance evidence.

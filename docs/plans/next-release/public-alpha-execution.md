@@ -114,3 +114,16 @@ could create separate cache keys; normalize successful UUID parses in the
 existing catalog/rules cache read and invalidation paths so aliases share the
 same entry. The assembled restore test uses a hyphenless restore route after
 warming the canonical schema. Failed/unknown restores still do not notify.
+
+
+## Owner release selection — 2026-10-02
+
+The owner directly selected “Document explicit compatibility limits; no v1
+parity claim (Recommended)” and “Apache-2.0; public source and images”.
+CF-004/005 parity/drop-in claims are now EXCLUDED_APPROVED, retaining the
+actual failed comparison and precise SDK limitations rather than declaring it
+a pass. The selected public gate requires five live records and 35 packets;
+all runtime and identity checks remain mandatory. Apache-2.0 is declared in
+LICENSE and OCI metadata. Source/binary transfer and final tests on bigbeast
+were explicitly approved; publication follows qualification and the final
+protected workflow controls.

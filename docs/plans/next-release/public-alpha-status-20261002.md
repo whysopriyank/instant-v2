@@ -2,8 +2,9 @@
 
 **Public alpha is not accepted or published. Production readiness is not
 established.** The restore/release implementation is substantially complete,
-but the final release gate cannot pass with the current compatibility evidence
-and missing fresh candidate records. This report supersedes the implementation
+but the final release gate still needs fresh candidate records. The owner has
+approved explicit compatibility limits with no v1 parity claim; historical
+comparison failures remain retained. This report supersedes the implementation
 backlog portions of the October 1 readiness review, not historical acceptance.
 
 ## Implemented in this release branch
@@ -39,7 +40,7 @@ on bigbeast under `~/iv2q-public-alpha-20261002/`.
 | Five rejected restore inputs | PASS: specific corrupt, truncated, oversized, wrong-app and nonempty responses; exact target/source hashes unchanged | Known rejection, not uncertain commit/crash atomicity |
 | Container runtime | PASS: 9/9, actual UID65532/readiness/TLS/transaction/subscription/storage/restore/drain/cleanup | Corrected owned producer, rehearsal image; 0.156-second drain |
 | Linux native rehearsal | FAIL: stale nonempty-restore expectation and dependency-download failures | Test fixed; fresh full pinned Linux run is still required |
-| v1 differential | 18 observed: 2 agree, 16 fail; original physical-fixture blocks and aligned reruns retained | No parity, drop-in, ordering or cursor claim; not accepted exclusions |
+| v1 differential | 18 observed: 2 agree, 16 fail; original physical-fixture blocks and aligned reruns retained | Owner approved CF-004/CF-005 parity/drop-in claim exclusions with stable documented limits; these results remain failures |
 | Local integrated checks | Full short/race suite passed; scoped lint zero issues; real assembled warmed-schema restore RED then GREEN | Workstation implementation checks, not Linux release acceptance |
 | Tagged artifact rehearsal | Go1.25.14, three matching archive payloads, six checksums, populated SPDX SBOMs; offline local signature accepted original and rejected tampering | Candidate `4d1e206`; final source successor must rebuild. No OIDC/public publication proof |
 
@@ -48,8 +49,13 @@ The v1 differences include omitted tuple timestamps affecting SDK
 error envelopes, initialization and other query behavior. See the
 [full comparison](v1-differential-rehearsal-20261002.md) and
 [precise limits](v1-compatibility-observations.md). The small reply-field fix does
-not establish broad parity. Owner selection of documented limits versus full
-parity remains pending; the gate is not weakened while awaiting it.
+not establish broad parity. The owner selected “Document explicit compatibility
+limits; no v1 parity claim (Recommended)” and “Apache-2.0; public source and
+images”, received around `2026-10-02T16:56Z` (approximate minute). The
+[approved envelope](../../reference/public-alpha-release-envelope.md#owner-confirmed-compatibility-limits--2026-10-02)
+defines CF-LIMIT-001 through CF-LIMIT-008. The five required runtime records
+remain native Linux, recovery, soak, container and restore. No failed
+comparison becomes PASS and no public-ready claim follows from this scope change.
 
 No comparative v1/v2 performance result is qualified. The benchmark harness
 exists; an efficiency or speed claim needs the separately selected paired
@@ -57,18 +63,16 @@ matrix. The successful soak establishes only the workload described above.
 
 ## Release work still required
 
-1. Resolve the v1 scope: approve specific documented alpha limits or implement
-   and qualify parity. The current mandatory differential record is failing.
-2. Authorize final private-source transfer to bigbeast and renew its Cloudflare
-   Access session. Automatic approval review rejected the new bundle transfer
-   for missing explicit private-source egress authorization; no bypass occurred.
-3. Freeze the corrected source, build matching tagged Go1.25.14 binaries/image,
+1. Freeze the corrected source and approved compatibility selection, build matching tagged Go1.25.14 binaries/image,
    rerun the five runtime lanes, assemble actual records and complete the gate.
    Final scripts and fixture producers are staged; a new soak needs 17 minutes.
-4. Choose license and repository/package visibility. The repository currently
-   remains private with no declared license. Configure the protected alpha tag
-   and `public-alpha` environment; neither is claimed configured.
-5. On the separate final publication grant, publish the reviewed version/draft,
+   Private-source transfer to the owned bigbeast qualification directory is now
+   owner-authorized; the earlier automatic approval rejection is historical and
+   was not bypassed.
+2. Apply the owner-selected Apache-2.0/public source and images choice and
+   configure the protected alpha tag and `public-alpha` environment. The choice
+   is recorded; actual remote visibility/protection is not claimed here.
+3. On the separate final publication grant, publish the reviewed version/draft,
    verify real OIDC signatures/SBOM/provenance and public pull, then test the
    actual published image before accepting the release. QR-004 preparation
    and FR-003 actual publication are distinct stages.

@@ -243,3 +243,20 @@ passes. Logs `/tmp/instant-native-package-failure-final-race.log` and
 `/tmp/instant-native-package-failure-final-lint.log`. Independent review and
 fresh successor-candidate runtime qualification remain parent-owned. Live
 campaign readiness is still PARTIAL; prior candidate output is not promoted.
+
+## Explicit no-v1-parity public scope (2026-10-03)
+
+Baseline `4d4d5fed9402484d17d0983b5e9971ffbcf094c6`, owned qualifier/policy/gate files initially clean. Owner explicitly selected “Document explicit compatibility limits; no v1 parity claim.” Scope is the existing public selection contract; legacy profile and selected v1 parity remain strict. Five live records remain mandatory. No historical differential result is promoted to PASS.
+
+| ID | Invariant / real path | Planned evidence | Expected RED | Status |
+|---|---|---|---|---|
+| PV1 | Approved candidate policy external_v1=not_selected omits only CF-004/005 and v1_differential; exact35packets/5records | Actual verify-public CLI and production shell no-parity case | Current strict public policy rejects selection | PENDING |
+| PV2 | Missing/unknown external selection, missing approval/owner scope, lane contradiction, unexpected parity record/fixture/packet fail closed | Focused verifier/shell negative cases | Rejection guards | PENDING |
+| PV3 | external_v1=run still requires full37packets and real differential; legacy unchanged | Existing public selected and legacy package/shell cases plus missing differential regression | Missing differential fails | PENDING |
+
+Tests first, minimum adaptation to existing selection function/manifest/verifier/gate. Source-owned policy carries exact EXCLUDED_APPROVED approval and explicit owner scope; no CLI automatic fallback. Runtime qualification and truthful packet handoffs remain parent-owned PARTIAL until successor evidence exists.
+
+PV1 RED was the actual public production shell + verify-public CLI rejection of the new approved external_v1 field (`/tmp/instant-public-alpha-no-parity-red.log`). The existing selection function now requires run|not_selected; not_selected requires source-policy EXCLUDED_APPROVED and the exact owner sentence, omits only CF-004/005 and v1_differential identity, and retains all five mandatory live records. Manifest CLI rejects a supplied unselected record; immutable-candidate verifier rejects contradictory lanes, missing/unknown selection, incorrect/missing approval or owner scope, extra parity record/fixture/packet, and missing mandatory restore. Selected run still requires real differential evidence and37packets. No historical PASS is imported.
+
+Contract GREEN: actual public shell selected and approved-unselected paths; unapproved exclusion rejected; exact no-parity manifest CLI35handoffs/5records/5fixtures PASS0.683s. Whole qualifier race suite PASS17.135s (`/tmp/instant-public-alpha-no-parity-final-race.log`), including legacy schema1 and selected differential rejection guards. Initial new manifest fixture collided with its own existing handoff outputs; corrected fixture --handoff-dir to generated-handoffs, preserving create-exclusive production behavior. Scoped strict lint0issues, vet, shellsyntax, formatting and diffcheck PASS. Root independent source review found no blocker; artifact worker review and actual successor runtime evidence remain parent-owned. Campaign readiness remains PARTIAL until current candidate live evidence and grounded handoffs exist.
+Existing production shell regression suite also PASS48/48 (`/tmp/instant-public-alpha-no-parity-legacy-shell.log`), including tag identity and actual public verifier paths. Author-owned source and ledger final; no commits or remote actions.

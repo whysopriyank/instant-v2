@@ -197,7 +197,7 @@ func publicManifestFixture(t *testing.T) (string, gateManifest, string) {
 	config := testArtifact(t, root, "candidate/config", "contract-only-config")
 	fixture := testArtifact(t, root, "candidate/fixture.json", "contract-only-fixture")
 	identity := liveIdentity{strings.Repeat("a", 40), binary.SHA256, config.SHA256, CanonicalEndpointSHA256(), "sha256:" + strings.Repeat("d", 64), "fixture-1", fixture.SHA256}
-	packets, lanes, records, err := selectPublicPerformance("not_selected")
+	packets, lanes, records, err := selectPublicPerformance("not_selected", "run")
 	requirePublicTestSuccess(t, err)
 	start := time.Now().Add(-time.Minute).UTC().Truncate(time.Second).Format(time.RFC3339)
 	finish := time.Now().Add(-time.Second).UTC().Truncate(time.Second).Format(time.RFC3339)
@@ -258,8 +258,114 @@ func publicManifestFixture(t *testing.T) (string, gateManifest, string) {
 		a := testArtifact(t, root, path, string(b))
 		m.Handoffs = append(m.Handoffs, manifestHandoff{m.CampaignID, identity.CandidateSHA, finish, packet, path, a.SHA256, a.SizeBytes, state})
 	}
-	policy := testArtifact(t, root, "policy.json", `{"decision_id":"`+PublicDecision+`","profile":"`+PublicProfile+`","performance":"not_selected","release_version":"v0.1.0-alpha.1"}`)
+	policy := testArtifact(t, root, "policy.json", `{"decision_id":"`+PublicDecision+`","profile":"`+PublicProfile+`","performance":"not_selected","external_v1":"run","release_version":"v0.1.0-alpha.1"}`)
 	return root, m, filepath.Join(root, policy.Path)
+}
+
+func publicNoParityFixture(t *testing.T, m *gateManifest, policy string) {
+	t.Helper()
+	m.Lanes["external_v1"] = "not_selected"
+	delete(m.ExternalRecords, "v1_differential")
+	delete(m.Fixtures, "v1_differential")
+	handoffs := m.Handoffs[:0]
+	for _, h := range m.Handoffs {
+		if h.Packet != "CF-004" && h.Packet != "CF-005" {
+			handoffs = append(handoffs, h)
+		}
+	}
+	m.Handoffs = handoffs
+	var p map[string]any
+	requirePublicTestSuccess(t, json.Unmarshal(readPublicTestFile(t, policy), &p))
+	p["external_v1"] = "not_selected"
+	p["external_v1_approval"] = "EXCLUDED_APPROVED"
+	p["external_v1_scope"] = "Document explicit compatibility limits; no v1 parity claim"
+	requirePublicTestSuccess(t, os.WriteFile(policy, marshalPublicTest(t, p), 0600))
+}
+
+func TestPublicNoParitySelection(t *testing.T) {
+	for _, mutation := range []string{"", "missing-selection", "unknown-selection", "missing-approval", "wrong-approval", "missing-scope", "wrong-scope", "contradictory-lane", "extra-record", "extra-fixture", "extra-packet", "missing-restore"} {
+		t.Run(mutation, func(t *testing.T) {
+			root, m, policy := publicManifestFixture(t)
+			parityRecord, parityFixture := m.ExternalRecords["v1_differential"], m.Fixtures["v1_differential"]
+			var parityHandoff manifestHandoff
+			for _, h := range m.Handoffs {
+				if h.Packet == "CF-005" {
+					parityHandoff = h
+				}
+			}
+			publicNoParityFixture(t, &m, policy)
+			var p map[string]any
+			requirePublicTestSuccess(t, json.Unmarshal(readPublicTestFile(t, policy), &p))
+			switch mutation {
+			case "missing-selection":
+				delete(p, "external_v1")
+			case "unknown-selection":
+				p["external_v1"] = "optional"
+			case "missing-approval":
+				delete(p, "external_v1_approval")
+			case "wrong-approval":
+				p["external_v1_approval"] = "GREEN"
+			case "missing-scope":
+				delete(p, "external_v1_scope")
+			case "wrong-scope":
+				p["external_v1_scope"] = "full v1 parity"
+			case "contradictory-lane":
+				m.Lanes["external_v1"] = "run"
+			case "extra-record":
+				m.ExternalRecords["v1_differential"] = parityRecord
+			case "extra-fixture":
+				m.Fixtures["v1_differential"] = parityFixture
+			case "extra-packet":
+				m.Handoffs = append(m.Handoffs, parityHandoff)
+			case "missing-restore":
+				delete(m.ExternalRecords, "restore")
+			}
+			requirePublicTestSuccess(t, os.WriteFile(policy, marshalPublicTest(t, p), 0600))
+			testArtifact(t, root, "manifest.json", string(marshalPublicTest(t, m)))
+			code := runVerifyPublic([]string{"--evidence-root", root, "--manifest", "manifest.json", "--policy", policy, "--candidate", m.Candidate.SHA, "--campaign", m.CampaignID})
+			if (mutation == "") != (code == 0) {
+				t.Fatalf("no-parity mutation %q exit=%d", mutation, code)
+			}
+		})
+	}
+}
+
+func TestPublicNoParityManifestCLI(t *testing.T) {
+	for _, mutation := range []string{"", "supplied-unselected-record", "missing-restore"} {
+		t.Run(mutation, func(t *testing.T) {
+			root, m, policy := publicManifestFixture(t)
+			publicNoParityFixture(t, &m, policy)
+			var inputs []handoffInput
+			for _, h := range m.Handoffs {
+				inputs = append(inputs, handoffInput{Packet: h.Packet, State: h.State, LedgerRef: "contract-only", FinishedAt: h.FinishedAt})
+			}
+			handoffs := testArtifact(t, root, "inputs.json", string(marshalPublicTest(t, inputs)))
+			fixtures := testArtifact(t, root, "fixtures.json", string(marshalPublicTest(t, m.Fixtures)))
+			args := []string{"--profile", PublicProfile, "--evidence-root", root, "--policy", policy, "--fixtures", filepath.Join(root, fixtures.Path), "--image-digest", m.Candidate.ImageDigest,
+				"--campaign", m.CampaignID, "--candidate", m.Candidate.SHA, "--campaign-started-at", m.CampaignStartedAt,
+				"--binary", m.Candidate.Binary.Path + ":" + itoa(m.Candidate.Binary.SizeBytes) + ":" + m.Candidate.Binary.SHA256,
+				"--configuration", m.Candidate.Configuration.Path + ":" + itoa(m.Candidate.Configuration.SizeBytes) + ":" + m.Candidate.Configuration.SHA256,
+				"--native-record", m.ExternalRecords["native_linux"], "--recovery-record", m.ExternalRecords["recovery"], "--soak-record", m.ExternalRecords["soak"],
+				"--container-record", m.ExternalRecords["container"], "--restore-record", m.ExternalRecords["restore"], "--handoffs", filepath.Join(root, handoffs.Path), "--handoff-dir", "generated-handoffs", "--out", "generated.json"}
+			switch mutation {
+			case "supplied-unselected-record":
+				args = append(args, "--v1-differential-record", "records/v1_differential.json")
+			case "missing-restore":
+				args = append(args, "--restore-record", "")
+			}
+			code := runManifest(args)
+			if (mutation == "") != (code == 0) {
+				t.Fatalf("manifest mutation %q exit=%d", mutation, code)
+			}
+			if mutation == "" {
+				var got gateManifest
+				requirePublicTestSuccess(t, json.Unmarshal(readPublicTestFile(t, filepath.Join(root, "generated.json")), &got))
+				if len(got.Handoffs) != 35 || len(got.ExternalRecords) != 5 || len(got.Fixtures) != 5 || got.Lanes["external_v1"] != "not_selected" {
+					t.Fatalf("no-parity inventory = %d packets, %d records, %d fixtures, lanes=%v", len(got.Handoffs), len(got.ExternalRecords), len(got.Fixtures), got.Lanes)
+				}
+			}
+		})
+	}
 }
 
 func TestPublicProfileSelectionAndEvidence(t *testing.T) {
@@ -273,7 +379,7 @@ func TestPublicProfileSelectionAndEvidence(t *testing.T) {
 	}
 	defer func() { requirePublicTestSuccess(t, os.Chdir(original)) }()
 	// Fixture helper reads source relative to package, so restore briefly per fixture.
-	for _, mutation := range []string{"", "missing-record", "old-profile", "wrong-image", "wrong-fixture", "synthetic", "missing-artifact", "hash-tamper", "missing-packet", "extra-performance", "old-decision", "differential-raw-mismatch", "differential-delta", "differential-dirty", "differential-equal-truncated"} {
+	for _, mutation := range []string{"", "missing-record", "missing-differential", "old-profile", "wrong-image", "wrong-fixture", "synthetic", "missing-artifact", "hash-tamper", "missing-packet", "extra-performance", "old-decision", "differential-raw-mismatch", "differential-delta", "differential-dirty", "differential-equal-truncated"} {
 		t.Run(mutation, func(t *testing.T) {
 			requirePublicTestSuccess(t, os.Chdir(original))
 			root, m, policy := publicManifestFixture(t)
@@ -318,6 +424,8 @@ func TestPublicProfileSelectionAndEvidence(t *testing.T) {
 			switch mutation {
 			case "missing-record":
 				delete(m.ExternalRecords, "restore")
+			case "missing-differential":
+				delete(m.ExternalRecords, "v1_differential")
 			case "old-profile":
 				m.Profile = ExpectedProfile
 			case "wrong-image":

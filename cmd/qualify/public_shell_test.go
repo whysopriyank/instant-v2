@@ -25,10 +25,19 @@ func TestPublicShellGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, mutation := range []string{"", "missing-restore", "wrong-image", "unapproved-performance", "changed-fixture"} {
+	for _, mutation := range []string{"", "no-parity", "no-parity-unapproved", "missing-restore", "wrong-image", "unapproved-performance", "changed-fixture"} {
 		t.Run(mutation, func(t *testing.T) {
 			requirePublicTestSuccess(t, os.Chdir(original))
 			root, m, policy := publicManifestFixture(t)
+			if strings.HasPrefix(mutation, "no-parity") {
+				publicNoParityFixture(t, &m, policy)
+				if mutation == "no-parity-unapproved" {
+					var p map[string]any
+					requirePublicTestSuccess(t, json.Unmarshal(readPublicTestFile(t, policy), &p))
+					delete(p, "external_v1_approval")
+					requirePublicTestSuccess(t, os.WriteFile(policy, marshalPublicTest(t, p), 0600))
+				}
+			}
 			repo := t.TempDir()
 			fakebin := t.TempDir()
 			copyFile := func(source, dest string) {
@@ -141,10 +150,11 @@ case "$target" in test-unit|bench-acceptance|test-integration|test-contract)
 			cmd := exec.Command("bash", filepath.Join(repo, "scripts/quality-release-gate.sh"))
 			cmd.Env = append(os.Environ(), "PATH="+fakebin+":"+os.Getenv("PATH"), "RELEASE_CANDIDATE_SHA="+sha, "RELEASE_CAMPAIGN_ID="+m.CampaignID, "RELEASE_GATE_MANIFEST="+filepath.Join(root, "manifest.json"), "DATABASE_URL=postgres://qualification-test.invalid/owned", "PUBLIC_TEST_VERIFIER="+helper, "PUBLIC_TEST_BINARY="+filepath.Join(root, m.Candidate.Binary.Path))
 			output, err := cmd.CombinedOutput()
-			if (mutation == "") != (err == nil) {
+			valid := mutation == "" || mutation == "no-parity"
+			if valid != (err == nil) {
 				t.Fatalf("public shell %q result %v\n%s", mutation, err, output)
 			}
-			if mutation == "" && !strings.Contains(string(output), "selected single-node-public-alpha checks passed") {
+			if valid && !strings.Contains(string(output), "selected single-node-public-alpha checks passed") {
 				t.Fatalf("public acceptance marker missing: %s", output)
 			}
 		})

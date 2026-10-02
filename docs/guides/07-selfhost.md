@@ -151,8 +151,11 @@ found discrepancies in 16 of 18 selected scenarios. Current query tuples omit
 v1's fourth timestamp element; SDK `serverCreatedAt` ordering, infinite-query
 and cursor fidelity are unqualified. Serialized cursor input also differs from
 pinned v1. See [compatibility observations](../plans/next-release/v1-compatibility-observations.md).
-An owner decision on these discrepancies remains pending; they are not approved
-alpha exclusions.
+The owner approved documented compatibility limits and excluded v1 parity/drop-in
+acceptance for this bounded alpha. Error envelopes, repeated initialization,
+schema conflicts, entity enumeration and room/acknowledgment behavior also
+differ; the [stable limits](../reference/public-alpha-release-envelope.md#owner-confirmed-compatibility-limits--2026-10-02)
+retain those differences. No raw failure is converted into passing evidence.
 
 The approved alpha differences remain explicit: no email delivery (503), direct
 ID-token sign-in (501), admin presence (501), dynamic view rules, sync/stream

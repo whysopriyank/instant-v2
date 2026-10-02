@@ -43,13 +43,16 @@ func profileSelection(profile string) (decision string, packets []string, lanes 
 }
 
 type publicPolicy struct {
-	DecisionID     string `json:"decision_id"`
-	Profile        string `json:"profile"`
-	Performance    string `json:"performance"`
-	ReleaseVersion string `json:"release_version"`
+	DecisionID         string `json:"decision_id"`
+	Profile            string `json:"profile"`
+	Performance        string `json:"performance"`
+	ReleaseVersion     string `json:"release_version"`
+	ExternalV1         string `json:"external_v1"`
+	ExternalV1Approval string `json:"external_v1_approval,omitempty"`
+	ExternalV1Scope    string `json:"external_v1_scope,omitempty"`
 }
 
-func selectPublicPerformance(performance string) ([]string, map[string]string, map[string]string, error) {
+func selectPublicPerformance(performance, externalV1 string) ([]string, map[string]string, map[string]string, error) {
 	packets := append([]string{}, PublicPackets...)
 	lanes := map[string]string{}
 	records := map[string]string{}
@@ -60,6 +63,19 @@ func selectPublicPerformance(performance string) ([]string, map[string]string, m
 		if k != "performance" {
 			records[k] = v
 		}
+	}
+	if externalV1 == "not_selected" {
+		lanes["external_v1"] = "not_selected"
+		delete(records, "v1_differential")
+		selected := packets[:0]
+		for _, packet := range packets {
+			if packet != "CF-004" && packet != "CF-005" {
+				selected = append(selected, packet)
+			}
+		}
+		packets = selected
+	} else if externalV1 != "run" {
+		return nil, nil, nil, fmt.Errorf("invalid public external_v1 selection")
 	}
 	if performance == "artifact" {
 		packets = append(packets, "EV-007", "QR-002")
@@ -83,7 +99,14 @@ func readPublicPolicy(path string) (publicPolicy, error) {
 	if p.DecisionID != PublicDecision || p.Profile != PublicProfile || !regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$`).MatchString(p.ReleaseVersion) {
 		return p, fmt.Errorf("public policy decision/profile mismatch")
 	}
-	_, _, _, err = selectPublicPerformance(p.Performance)
+	if p.ExternalV1 == "not_selected" {
+		if p.ExternalV1Approval != "EXCLUDED_APPROVED" || p.ExternalV1Scope != "Document explicit compatibility limits; no v1 parity claim" {
+			return p, fmt.Errorf("public external_v1 exclusion lacks approved owner scope")
+		}
+	} else if p.ExternalV1Approval != "" || p.ExternalV1Scope != "" {
+		return p, fmt.Errorf("selected external_v1 may not carry an exclusion")
+	}
+	_, _, _, err = selectPublicPerformance(p.Performance, p.ExternalV1)
 	return p, err
 }
 
