@@ -115,10 +115,7 @@ func (m *Manager) handleAddQuery(ctx context.Context, sess *Session, f Frame) ([
 	dup := sess.Subs[key]
 	sess.mu.Unlock()
 	if dup {
-		fr := Frame{"op": json.RawMessage(`"add-query-exists"`)}
-		if eventID != "" {
-			fr["client-event-id"] = json.RawMessage(mustJSON(eventID))
-		}
+		fr := Frame{"op": json.RawMessage(`"add-query-exists"`), "q": rawQ, "client-event-id": f["client-event-id"]}
 		return []Frame{fr}, nil
 	}
 

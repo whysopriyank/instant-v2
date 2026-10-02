@@ -122,7 +122,7 @@ cleanup() {
   reap_workdir_processes
   # Remove only prefixed resources; every name here derives from $PREFIX.
   require_prefix "$PG" || return 0
-  docker rm -f "$PG" >/dev/null 2>&1 || true
+  docker rm -fv "$PG" >/dev/null 2>&1 || true
   require_prefix "$NET" || return 0
   docker network rm "$NET" >/dev/null 2>&1 || true
   local vol
@@ -177,6 +177,16 @@ fi
 HEAD_SHA=$(git -C "$SRC" rev-parse HEAD)
 [[ $HEAD_SHA == "$CANDIDATE" ]] || { echo "campaign: bundle HEAD $HEAD_SHA != candidate $CANDIDATE" >&2; exit 1; }
 [[ -z $(git -C "$SRC" status --porcelain --untracked-files=all) ]] || { echo "campaign: candidate tree is dirty" >&2; exit 1; }
+# The public binary's Go module metadata must match the eventual release tag.
+# This tag is confined to the disposable qualification clone.
+if [[ $PROFILE == single-node-public-alpha ]]; then
+  release_version=$(jq -er '.release_version | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+-alpha\\.[0-9]+$"))' "$SRC/docs/plans/next-release/qualification-policy.json")
+  if git -C "$SRC" rev-parse --verify "refs/tags/$release_version" >/dev/null 2>&1; then
+    [[ $(git -C "$SRC" rev-parse "$release_version^{commit}") == "$CANDIDATE" ]] || { echo "campaign: release tag targets another candidate" >&2; exit 1; }
+  else
+    git -C "$SRC" tag "$release_version" "$CANDIDATE"
+  fi
+fi
 
 # ---- private network + owned postgres (loopback-published only) ----
 if ! docker network inspect "$NET" >/dev/null 2>&1; then

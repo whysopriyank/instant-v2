@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -211,7 +210,7 @@ func TestCF003HTTPMatrixOwnedPostgres(t *testing.T) {
 	if status != http.StatusOK || headers.Get("Content-Type") != "application/x-ndjson" || headers.Get("Accept-Ranges") != "records" {
 		t.Fatalf("backup export = %d headers=%v body=%q", status, headers, dump)
 	}
-	counts := cf003CheckDump(t, dump, appStr)
+	cf003CheckDump(t, dump, appStr)
 
 	status, body, _ = cf003Serve(mux, http.MethodPost, "/admin/transact", cf003JSON(t, map[string]any{
 		"app-id": appStr,
@@ -226,15 +225,22 @@ func TestCF003HTTPMatrixOwnedPostgres(t *testing.T) {
 		t.Fatalf("query after destructive backup fixture delete = %d %q; want absent entity", status, body)
 	}
 
+	status, beforeRestore, _ := cf003Serve(mux, http.MethodGet, "/backup/"+appStr, "", map[string]string{"X-admin-token": adminToken})
+	if status != http.StatusOK {
+		t.Fatalf("backup before rejected restore = %d %q", status, beforeRestore)
+	}
 	status, restoreBody, _ := cf003Serve(mux, http.MethodPost, "/backup/"+appStr+"/restore", dump, map[string]string{"Authorization": "Bearer " + adminToken})
-	wantRestore := fmt.Sprintf(`{"counts":{"attrs":%d,"triples":%d,"rules":%d,"transactions":%d}}`, counts.attrs, counts.triples, counts.rules, counts.transactions)
-	if status != http.StatusOK || restoreBody != wantRestore {
-		t.Fatalf("backup restore status/body = %d %q; want %d %q", status, restoreBody, http.StatusOK, wantRestore)
+	if status != http.StatusConflict || restoreBody != `{"message":"backup: restore target is non-empty"}` {
+		t.Fatalf("nonempty backup restore status/body = %d %q", status, restoreBody)
+	}
+	status, afterRestore, _ := cf003Serve(mux, http.MethodGet, "/backup/"+appStr, "", map[string]string{"X-admin-token": adminToken})
+	if status != http.StatusOK || afterRestore != beforeRestore {
+		t.Fatalf("rejected restore changed target: status=%d", status)
 	}
 	status, body, _ = cf003Serve(mux, http.MethodPost, "/runtime/framework/query",
 		`{"query":{"todos":{}}}`, map[string]string{"app-id": appStr})
-	if status != http.StatusOK || body != wantQuery {
-		t.Fatalf("query after backup restore = %d %q; want %d %q", status, body, http.StatusOK, wantQuery)
+	if status != http.StatusOK || body != `{"data":{"todos":[]}}`+"\n" {
+		t.Fatalf("query after rejected backup restore = %d %q; want absent entity", status, body)
 	}
 
 	status, body, _ = cf003Serve(mux, http.MethodPut,

@@ -37,7 +37,7 @@ cleanup() {
   result=$?
   docker logs "$server" > "$evidence_dir/server-final.log" 2>&1 || true
   if test "$result" -ne 0; then cat "$evidence_dir/server-final.log" >&2; fi
-  docker rm -f "$server" "$pg" "$prefix-setup" "$prefix-soak" >/dev/null 2>&1 || true
+  docker rm -fv "$server" "$pg" "$prefix-setup" "$prefix-soak" >/dev/null 2>&1 || true
   docker network rm "$network" >/dev/null 2>&1 || true
   docker volume rm "$volume" >/dev/null 2>&1 || true
   docker image rm "$tools_image" >/dev/null 2>&1 || true
@@ -116,8 +116,8 @@ start_server() {
 probe_phase=before
 
 start_server
-docker top "$server" -eo uid > "$evidence_dir/process-uid.txt"
-actual_uid=$(awk 'NR == 2 {print $1}' "$evidence_dir/process-uid.txt")
+docker top "$server" -eo pid,uid > "$evidence_dir/process-uid.txt"
+actual_uid=$(awk 'NR == 2 {print $2}' "$evidence_dir/process-uid.txt")
 test "$actual_uid" = 65532
 docker cp "$server:/instantd" "$evidence_dir/instantd"
 actual_binary_sha=$(hash_file "$evidence_dir/instantd")
@@ -127,16 +127,16 @@ fi
 docker exec "$server" /instantd healthcheck --tls-url="${CONTAINER_TLS_URL:-https://www.google.com}" \
   > "$evidence_dir/tls-probe.log" 2>&1
 tls_verified=true
-docker run --rm --name "$prefix-setup" --network "$network" "$tools_image" /soaksetup \
-  -database-url 'postgres://instant:smoke@postgres:5432/instant_bench_container?sslmode=disable' \
+docker run --rm --name "$prefix-setup" --network "container:$pg" "$tools_image" /soaksetup \
+  -database-url 'postgres://instant:smoke@127.0.0.1:5432/instant_bench_container?sslmode=disable' \
   -marker "$prefix" > "$evidence_dir/setup.txt"
 app=$(awk -F= '$1 == "APP" {print $2}' "$evidence_dir/setup.txt")
 attr=$(awk -F= '$1 == "ATTR" {print $2}' "$evidence_dir/setup.txt")
 test -n "$app" && test -n "$attr"
 # Existing harness proves actual init/query/transact/refresh on the candidate.
-docker run --rm --name "$prefix-soak" --network "$network" \
+docker run --rm --name "$prefix-soak" --network "container:$server" \
   --user "$(id -u):$(id -g)" -v "$evidence_dir:/evidence" "$tools_image" /soak \
-  -url ws://instantd:8080/runtime/session -app "$app" -attr "$attr" \
+  -url ws://127.0.0.1:8080/runtime/session -app "$app" -attr "$attr" \
   -sessions 2 -duration 8s -ramp 1s -settle 1s -global-tx-rate 1 \
   -quiescence 10s -max-p99-lag 5s -sdk-version 1.0.65 -out /evidence/soak \
   > "$evidence_dir/soak.log" 2>&1

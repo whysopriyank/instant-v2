@@ -56,6 +56,43 @@ from real exported config/entity shards plus its owned S3 blob (6,959,837 bytes)
 This proves fixture provenance, not a successful candidate restore yet.
 
 Fresh immutable-candidate Linux/container/restore/differential/recovery/soak
-evidence remains pending. QR-004 stays PARTIAL until real OIDC/publication
-verification; the public gate must refuse that state. No public-ready claim
-is established by the prepared workflow or a local signing test.
+evidence remains pending. QR-004 prepublication acceptance requires an independently reviewed workflow
+and an exact tagged Go 1.25.14 artifact dry run. Actual OIDC signing and public
+pull verification remain FR-003 publication checks after the separate owner
+grant. Missing protections, visibility and license choices remain publication
+blockers; neither a snapshot nor local signing establishes those checks.
+
+
+## Candidate rehearsal corrections
+
+Candidate `4a2e0fc` exposed a stale CF-003 test expecting replacement of a
+nonempty restore target. The correction checks HTTP409 and exact unchanged
+exported target state; the safety guard stays intact. Owned Docker cleanup now
+removes anonymous volumes attached to the exact owned containers (`docker rm -fv`),
+without pruning unrelated or named volumes. Tagged Go builds carry different
+module metadata, so final qualification must build in a disposable clone with
+the exact release tag, matching publication. Existing rehearsal evidence is kept
+under its original identity and cannot establish acceptance for a new candidate.
+
+
+The native lane now refuses any package setup/build failure independently of
+named-test counts; the actual CLI regression reproduced unsafe PASS in log,
+full and hermetic modes, then passed after retaining the existing parser's
+package failure map. CF-005 actual-v1 evidence found omitted subscription
+reply fields; the shared duplicate/remove reply path must echo `q` and preserve
+`client-event-id` including null, verified against pinned upstream wire output.
+The container smoke must retain Docker's required PID column when reading UID
+and use each target container's loopback namespace for guarded setup/soak tools.
+
+
+## Release stage correction
+
+Independent artifact/release review reconciled the staged requirements with
+`docs/plans/finish-up/07-qualification-release.md`: “Static validation and an
+authorized dry run precede publication.” QR-004 evaluates the prepared pipeline
+and its real exact-candidate dry run before publication. FR-003 evaluates actual
+published signatures, provenance, registry visibility and pull verification
+after `AUTH-PUBLISH-001`. This corrects the earlier circular requirement that
+QR-004's prepublication gate wait for publication. No runtime verifier is
+weakened and no public signing, owner protection setting or release is claimed.
+The final tagged snapshot and independent supply-chain review are still pending.

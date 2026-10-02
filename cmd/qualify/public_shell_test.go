@@ -68,6 +68,7 @@ func TestPublicShellGate(t *testing.T) {
 			git("add", ".")
 			git("commit", "-qm", "candidate")
 			sha := git("rev-parse", "HEAD")
+			git("tag", "v0.1.0-alpha.1", sha)
 			// Bind the test-only retained corpus frames and handoffs to this candidate.
 			requirePublicTestSuccess(t, filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 				if err != nil {

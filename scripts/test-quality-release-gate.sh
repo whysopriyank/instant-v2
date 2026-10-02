@@ -233,6 +233,36 @@ else
   if [[ $old_skipped -gt 0 ]]; then echo "PASS: old reject-every-skip policy would reject real hermetic lane (skipped=$old_skipped)"; pass=$((pass+1)); else echo "FAIL: real hermetic lane has no skips to prove R4" >&2; fail=$((fail+1)); fi
 fi
 
+# Public binaries must use the same real Git tag as publication; an ldflag alone
+# does not pin the main-module version embedded by Go.
+build_repo="$tmp/build-repo"
+mkdir -p "$build_repo/docs/plans/next-release" "$build_repo/scripts/qualify" "$tmp/build-bin"
+cp "$script_dir/qualify/build-candidate.sh" "$build_repo/scripts/qualify/"
+cp "$script_dir/../docs/plans/next-release/qualification-policy.json" "$build_repo/docs/plans/next-release/"
+git -C "$build_repo" init -q
+git -C "$build_repo" config user.email test@example.invalid
+git -C "$build_repo" config user.name test
+git -C "$build_repo" add .
+git -C "$build_repo" commit -qm candidate
+build_sha=$(git -C "$build_repo" rev-parse HEAD)
+cat >"$tmp/build-bin/go" <<'EOF'
+#!/usr/bin/env bash
+touch "$BUILD_TEST_GO_CALLED"
+EOF
+chmod +x "$tmp/build-bin/go"
+build_candidate() {
+  (cd "$build_repo" && PATH="$tmp/build-bin:$PATH" BUILD_TEST_GO_CALLED="$tmp/go-called" bash scripts/qualify/build-candidate.sh single-node-public-alpha "$tmp/build-output/instantd")
+}
+bad "public build without release tag rejected" "release tag must identify candidate HEAD" build_candidate
+[[ ! -f $tmp/go-called ]] || { echo "FAIL: untagged build invoked Go" >&2; fail=$((fail+1)); }
+rm -f "$tmp/go-called"
+git -C "$build_repo" tag v0.1.0-alpha.1 "$build_sha"
+git -C "$build_repo" commit --allow-empty -qm different-candidate
+bad "public build with tag on another commit rejected" "release tag must identify candidate HEAD" build_candidate
+[[ ! -f $tmp/go-called ]] || { echo "FAIL: mismatched tag build invoked Go" >&2; fail=$((fail+1)); }
+git -C "$build_repo" checkout -q --detach "$build_sha"
+ok "public build with exact candidate tag accepted" build_candidate
+
 # Public schema uses the actual candidate verifier and production shell. These
 # fixtures are hermetic contract checks, never retained live qualification.
 if (cd "$script_dir/.." && go test ./cmd/qualify -run '^TestPublic' -count=1 >"$tmp/public-contract.log" 2>&1); then

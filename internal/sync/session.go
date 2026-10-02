@@ -281,7 +281,7 @@ func (m *Manager) Handle(ctx context.Context, sess *Session, f Frame) ([]Frame, 
 			}
 		}
 		m.detachMember(sess, id)
-		return []Frame{{"op": json.RawMessage(`"remove-query-ok"`)}}, nil
+		return []Frame{{"op": json.RawMessage(`"remove-query-ok"`), "q": f["q"], "client-event-id": f["client-event-id"]}}, nil
 	case "transact":
 		return m.handleTransact(ctx, sess, f)
 	case "error":

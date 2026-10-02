@@ -214,3 +214,32 @@ and assembly proof remain PARTIAL. No candidate commits or remote actions.
 
 Post-lint-repair actual production shell suite passes 45/45;
 `/tmp/instant-public-gate-lintfix.log` (CGO disabled for the local SDK limit).
+
+## Native package-failure blocking fix (2026-10-02)
+
+Baseline candidate `4a2e0fcc6a0c239c71d1bc72fe4653c96ed52996`.
+The owned Linux run exposed package setup/build failures omitted from native
+qualification verdicts because `runNative` discarded the parser's existing
+`packageFailed` map. Scope is only native qualifier source/tests and this
+ledger. Planned invariant: both owned-DB and hermetic package failures prevent
+PASS even when every named platform test passes; named test counts retain
+their existing meaning. Actual CLI regressions cover `--log`, `--run` owned-DB
+failure, and `--run` hermetic failure. Expected RED is unsafe PASS; package
+checks, scoped lint and an independent re-review follow the minimal fix.
+Runtime campaign proof remains PARTIAL and must use the successor candidate.
+
+Native guard verification: RED actual CLI `--log`, owned-DB `--run`, and
+hermetic `--run` all returned unsafe PASS with seven required platform tests
+passing plus an unrelated package failure; retained in
+`/tmp/instant-native-package-failure-red.log`. The minimal fix retains both
+existing parser maps and passes their combined package-failure count to the
+verdict independently of failed named tests. A package failure now yields
+FAIL with `failed=0`, `package_failed=1`, and the original seven selected
+identities. No parser change or new production abstraction was introduced.
+Focused regression GREEN; native/parser/platform race checks PASS 1.887s;
+complete qualifier race suite PASS 12.274s, including the independently owned
+valid release-tag fixture. Scoped golangci-lint reports `0 issues`; diff check
+passes. Logs `/tmp/instant-native-package-failure-final-race.log` and
+`/tmp/instant-native-package-failure-final-lint.log`. Independent review and
+fresh successor-candidate runtime qualification remain parent-owned. Live
+campaign readiness is still PARTIAL; prior candidate output is not promoted.

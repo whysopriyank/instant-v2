@@ -101,3 +101,24 @@ arm64 and Darwin arm64 are compiled-only until matching-host execution.
 A loopback owned registry may supply a genuine prepublication RepoDigest;
 its local image verification still cannot replace the final signed GHCR
 published-digest verification.
+
+
+## Current staged acceptance (coordinator review, 2026-10-02)
+
+The implementation handoff above records earlier mechanics evidence and remains
+historical PARTIAL. Current QR-004 prepublication acceptance requires the exact
+immutable candidate's tagged Go 1.25.14 archives, populated SPDX inventories,
+verified checksum/tamper checks, the actual staged multiarch image and an
+independent pipeline/supply-chain review. It does not require an already
+published release: the authoritative packet explicitly places static validation
+and a dry run before publication. Real GitHub OIDC signing, GHCR index/signature/
+provenance verification and anonymous public pull are FR-003 postpublication
+checks, separately authorized. Owner tag protections, the `public-alpha`
+environment, visibility and license are explicit publication prerequisites,
+currently unconfigured or undecided. No snapshot establishes these facts.
+
+Rehearsal candidate `4a2e0fc` passed the live Linux-amd64 image smoke after the
+Docker PID-column and loopback namespace corrections. Tagged binary metadata
+changed its identity, so that rehearsal and the initial untagged snapshot cannot
+close final QR-004/OP-004 acceptance. Final tagged artifacts/runtime remain
+pending and must match the eventual workflow's compiled bytes.

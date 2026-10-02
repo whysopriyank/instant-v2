@@ -42,9 +42,10 @@ func runNative(args []string) int {
 	}
 	started := time.Now().UTC()
 	var (
-		stream         io.Reader
-		raw            []byte
-		hermeticFailed int
+		stream                io.Reader
+		raw                   []byte
+		hermeticFailed        int
+		hermeticPackageFailed int
 	)
 	switch {
 	case *doRun:
@@ -59,11 +60,12 @@ func runNative(args []string) int {
 		// Counts come from the owned-DB run only (the gate's test-integration
 		// lane, zero skips allowed); the -short pass legitimately skips
 		// reporting tests, so it contributes failures only.
-		hermOutcomes, _, err := parseGoTestJSON(bytes.NewReader(hermetic))
+		hermOutcomes, hermeticPackages, err := parseGoTestJSON(bytes.NewReader(hermetic))
 		if err != nil {
 			return failLane(*out, "OP-003", started, map[string]any{"error": "hermetic stream: " + err.Error()}, nil)
 		}
 		_, hermeticFailed, _ = countOutcomes(hermOutcomes)
+		hermeticPackageFailed = len(hermeticPackages)
 		raw = append(full, hermetic...)
 		stream = bytes.NewReader(full)
 		if *rawLog != "" {
@@ -85,23 +87,23 @@ func runNative(args []string) int {
 		return 2
 	}
 
-	outcomes, _, err := parseGoTestJSON(stream)
+	outcomes, packageFailed, err := parseGoTestJSON(stream)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "native:", err)
 		return 1
 	}
-	return writeNativeResult(*out, outcomes, started, time.Now().UTC(), hermeticFailed)
+	return writeNativeResult(*out, outcomes, started, time.Now().UTC(), hermeticFailed, len(packageFailed)+hermeticPackageFailed)
 }
 
 // writeNativeResult folds parsed outcomes into the OP-003 lane verdict.
 // Exported from runNative for hermetic unit tests.
-func writeNativeResult(out string, outcomes []testOutcome, started, finished time.Time, hermeticFailed int) int {
+func writeNativeResult(out string, outcomes []testOutcome, started, finished time.Time, hermeticFailed, packageFailures int) int {
 	passed, failed, skipped := countOutcomes(outcomes)
 	failed += hermeticFailed
 	plat, platOK := checkPlatformCoverage(outcomes)
 	native := isNativePlatform()
 	result := "PASS"
-	if failed > 0 || skipped > 0 || !platOK || !native {
+	if failed > 0 || packageFailures > 0 || skipped > 0 || !platOK || !native {
 		result = "FAIL"
 	}
 	details := map[string]any{
@@ -121,6 +123,7 @@ func writeNativeResult(out string, outcomes []testOutcome, started, finished tim
 	if result == "FAIL" {
 		diag := map[string]any{
 			"failed":               failed,
+			"package_failed":       packageFailures,
 			"platform_missing":     plat.Missing,
 			"platform_nopass":      plat.Failed,
 			"native_runtime_check": native,
@@ -133,8 +136,8 @@ func writeNativeResult(out string, outcomes []testOutcome, started, finished tim
 		return 1
 	}
 	if result == "FAIL" {
-		fmt.Fprintf(os.Stderr, "native: FAIL selected=%d skipped=%d failed=%d platform_passed=%d missing=%v nopass=%v native=%v\n",
-			passed, skipped, failed, plat.Passed, plat.Missing, plat.Failed, native)
+		fmt.Fprintf(os.Stderr, "native: FAIL selected=%d skipped=%d failed=%d package_failed=%d platform_passed=%d missing=%v nopass=%v native=%v\n",
+			passed, skipped, failed, packageFailures, plat.Passed, plat.Missing, plat.Failed, native)
 		return 1
 	}
 	fmt.Fprintf(os.Stderr, "native: PASS selected=%d platform_checks=%d\n", passed, plat.Passed)
